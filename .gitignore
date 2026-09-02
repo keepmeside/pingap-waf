@@ -98,3 +98,11 @@ spikes/*/target/
 
 # Local tooling state
 .code-review-graph/
+
+# libFuzzer's evolved corpus is a coverage cache, not a gate: it is machine
+# generated, it grows on every run, and nothing asserts against its contents.
+# The Phase 03 gate is "both targets run clean with zero artifacts", and the
+# Phase 02 detector corpus — which *is* a gate — is hand-assembled and hashed.
+# `artifacts/` is deliberately NOT ignored: a crash reproducer is the regression
+# fixture for the bug it found and belongs in history.
+crates/pingap-waf/fuzz/corpus/

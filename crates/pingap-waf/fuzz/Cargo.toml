@@ -1,0 +1,40 @@
+[package]
+name = "pingap-waf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detached from the parent workspace on purpose. cargo-fuzz builds with its own
+# profile and sanitizer flags; leaving it as a workspace member would drag those
+# into every ordinary `cargo build` in the tree.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+arbitrary = { version = "=1.4.2", features = ["derive"] }
+
+[dependencies.pingap-waf]
+path = ".."
+
+# The gate only means something if the target is fast enough to reach interesting
+# inputs, so the fuzz profile keeps optimisation on and debug info for symbolised
+# crash reports.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "evaluate"
+path = "fuzz_targets/evaluate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "evaluate_response"
+path = "fuzz_targets/evaluate_response.rs"
+test = false
+doc = false
+bench = false

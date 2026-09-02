@@ -4298,6 +4298,15 @@ dependencies = [
 [[package]]
 name = "pingap-waf"
 version = "0.13.10"
+dependencies = [
+ "arc-swap",
+ "criterion",
+ "fancy-regex",
+ "serde",
+ "serde_json",
+ "snafu",
+ "toml",
+]
 
 [[package]]
 name = "pingap-webhook"
