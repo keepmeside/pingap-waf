@@ -119,6 +119,13 @@ jobs:
       - name: Verify one ProxyHttp implementation
         run: |
           set -euo pipefail
-          count=$(grep -rn "impl ProxyHttp" --include=*.rs . | wc -l)
+          # Scope matters here. A bare `grep -rn . ` also descends into
+          # `.xia-src/` (the read-only upstream clones, gitignored so absent in
+          # CI but present in every working tree) and into `target/`, which this
+          # same job just populated with `cargo build --release`. Counting those
+          # makes the gate pass in CI for the wrong reason and fail locally for
+          # anyone who kept the clones, so it must exclude both explicitly.
+          count=$(grep -rn "impl ProxyHttp" --include=*.rs \
+            --exclude-dir=.xia-src --exclude-dir=target . | wc -l)
           echo "impl ProxyHttp count: ${count}"
           test "${count}" -eq 1
