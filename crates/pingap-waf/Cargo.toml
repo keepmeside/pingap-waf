@@ -23,6 +23,10 @@ fancy-regex = { workspace = true }
 arc-swap = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 snafu = { workspace = true }
+# Percent-decoding before matching. A payload is judged by its bytes, and `%27`
+# reaches the origin as `'`, so a detector that inspects only the raw field is
+# bypassed by the cheapest possible encoding trick.
+urlencoding = { workspace = true }
 
 [dev-dependencies]
 # Declared directly rather than through `workspace = true`: criterion is not in
@@ -30,7 +34,11 @@ snafu = { workspace = true }
 # same way. Adding it to the workspace table would be a root-manifest diff for no
 # behaviour change.
 criterion = { version = "0.7.0", features = ["html_reports"] }
+# The frozen detector corpus is hash-verified before it is scored, so a corpus
+# edited to make the regression gate pass is detectable rather than convenient.
+hex = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 toml = { workspace = true }
 
 # `harness = false` because criterion supplies its own. Records the cost baseline

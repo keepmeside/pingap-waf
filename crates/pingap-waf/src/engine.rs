@@ -235,6 +235,100 @@ fn clamp(body: Option<&[u8]>, limit: usize) -> (Option<&[u8]>, bool) {
     }
 }
 
+/// Run `find` against a field value in both the form it arrived in and its
+/// percent-decoded form.
+///
+/// Both, not just one. Decoding only would miss a pattern written against an
+/// encoded sequence (`%2e%2e%2f`); raw only would miss `%27` standing in for `'`,
+/// which is the cheapest bypass there is. The second scan costs nothing on the
+/// common path: `urlencoding::decode` borrows when there is nothing to decode, so
+/// a field with no `%` is scanned once.
+fn find_both_forms(
+    value: &str,
+    find: &dyn Fn(&str) -> Option<usize>,
+) -> Option<usize> {
+    if let Some(at) = find(value) {
+        return Some(at);
+    }
+    match urlencoding::decode(value) {
+        // Borrowed means nothing was decoded, so the scan above already covered it.
+        Ok(std::borrow::Cow::Borrowed(_)) | Err(_) => None,
+        Ok(std::borrow::Cow::Owned(decoded)) => find(&decoded),
+    }
+}
+
+/// Walk every field of a request a rule may inspect, in evaluation order, and
+/// report the first match.
+///
+/// One definition of "what a rule can see", shared by the native detectors and by
+/// operator-authored custom rules. Two copies would drift, and the drift shows up
+/// as a payload caught in one field and missed in another — which is exactly the
+/// defect the inherited detectors shipped, four times over, as four private
+/// skip-lists.
+///
+/// `inspect_header` decides which headers participate. It is a parameter rather
+/// than a constant so the policy lives in one place that a test can point at,
+/// not scattered across detector modules.
+pub fn find_in_request(
+    input: &RequestInput<'_>,
+    inspect_header: &dyn Fn(&str) -> bool,
+    find: &dyn Fn(&str) -> Option<usize>,
+) -> Option<MatchedField> {
+    if find_both_forms(input.method, find).is_some() {
+        return Some(MatchedField::Method);
+    }
+    if find_both_forms(input.uri, find).is_some() {
+        return Some(MatchedField::Uri);
+    }
+    for (key, value) in input.query {
+        if find_both_forms(value, find).is_some() {
+            return Some(MatchedField::Query {
+                key: (*key).to_string(),
+            });
+        }
+    }
+    for (name, value) in input.headers {
+        if !inspect_header(name) {
+            continue;
+        }
+        if find_both_forms(value, find).is_some() {
+            return Some(MatchedField::Header {
+                name: (*name).to_string(),
+            });
+        }
+    }
+    let offset = find_both_forms(text_prefix(input.body?), find)?;
+    Some(MatchedField::Body { offset })
+}
+
+/// The response-side counterpart. Status, headers, then the bounded body prefix.
+pub fn find_in_response(
+    input: &ResponseInput<'_>,
+    inspect_header: &dyn Fn(&str) -> bool,
+    find: &dyn Fn(&str) -> Option<usize>,
+) -> Option<MatchedField> {
+    for (name, value) in input.headers {
+        if !inspect_header(name) {
+            continue;
+        }
+        if find_both_forms(value, find).is_some() {
+            return Some(MatchedField::ResponseHeader {
+                name: (*name).to_string(),
+            });
+        }
+    }
+    let offset = find_both_forms(text_prefix(input.body_chunk?), find)?;
+    Some(MatchedField::ResponseBody { offset })
+}
+
+/// Header policy for operator-authored custom rules: inspect everything.
+///
+/// A custom rule exists because the operator wanted something specific matched, so
+/// silently excluding fields from it would be surprising in the worst direction.
+fn every_header(_name: &str) -> bool {
+    true
+}
+
 /// An operator-authored rule, compiled.
 ///
 /// Implements both rule traits so one type covers a custom rule attributed to
@@ -293,39 +387,17 @@ impl CompiledCustomRule {
 
 impl RequestRule for CompiledCustomRule {
     fn evaluate(&self, input: &RequestInput<'_>) -> Option<Hit> {
-        if self.find_at(input.uri).is_some() {
-            return Some(self.hit(MatchedField::Uri));
-        }
-        for (key, value) in input.query {
-            if self.find_at(value).is_some() {
-                return Some(self.hit(MatchedField::Query {
-                    key: (*key).to_string(),
-                }));
-            }
-        }
-        for (name, value) in input.headers {
-            if self.find_at(value).is_some() {
-                return Some(self.hit(MatchedField::Header {
-                    name: (*name).to_string(),
-                }));
-            }
-        }
-        let offset = self.find_at(text_prefix(input.body?))?;
-        Some(self.hit(MatchedField::Body { offset }))
+        let field =
+            find_in_request(input, &every_header, &|text| self.find_at(text))?;
+        Some(self.hit(field))
     }
 }
 
 impl ResponseRule for CompiledCustomRule {
     fn evaluate(&self, input: &ResponseInput<'_>) -> Option<Hit> {
-        for (name, value) in input.headers {
-            if self.find_at(value).is_some() {
-                return Some(self.hit(MatchedField::ResponseHeader {
-                    name: (*name).to_string(),
-                }));
-            }
-        }
-        let offset = self.find_at(text_prefix(input.body_chunk?))?;
-        Some(self.hit(MatchedField::ResponseBody { offset }))
+        let field =
+            find_in_response(input, &every_header, &|text| self.find_at(text))?;
+        Some(self.hit(field))
     }
 }
 

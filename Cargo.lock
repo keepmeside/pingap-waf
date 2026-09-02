@@ -4302,10 +4302,13 @@ dependencies = [
  "arc-swap",
  "criterion",
  "fancy-regex",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "snafu",
  "toml",
+ "urlencoding",
 ]
 
 [[package]]

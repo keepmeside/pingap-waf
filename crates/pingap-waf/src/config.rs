@@ -424,6 +424,15 @@ impl WafConfig {
 
 /// Reject patterns whose shape invites catastrophic backtracking.
 ///
+/// Public so the native detector set can be held to exactly the standard operator
+/// rules are held to. An inherited pattern with a quadratic shape would be worse
+/// than an operator's, because no config could disable it.
+pub fn check_pattern_cost(pattern: &str) -> Result<(), String> {
+    cost_check(pattern)
+}
+
+/// Reject patterns whose shape invites catastrophic backtracking.
+///
 /// A heuristic, not a decision procedure — proving a backtracking bound is
 /// undecidable in general. It catches the shapes that actually show up: an
 /// unbounded quantifier inside a lookaround, nested unbounded quantifiers, and
