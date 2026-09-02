@@ -1,0 +1,49 @@
+[package]
+name = "pingap-core"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "core"]
+description = "Core for pingap"
+
+[dependencies]
+ahash = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+hostname = { workspace = true }
+http = { workspace = true }
+ipnet = { workspace = true }
+itoa = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
+pingora = { workspace = true }
+pingora-limits = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+strum = { workspace = true }
+TinyUFO = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+
+[features]
+tracing = ["opentelemetry"]
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = "3.21.0"
+tokio-test = "0.4.4"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "bench"
+harness = false
+
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

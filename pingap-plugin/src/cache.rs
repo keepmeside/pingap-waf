@@ -1,0 +1,712 @@
+// Copyright 2024-2025 Tree xie.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::{
+    Error, get_bool_conf, get_hash_key, get_str_conf, get_str_slice_conf,
+};
+use async_trait::async_trait;
+use bstr::ByteSlice;
+use bytes::Bytes;
+use bytesize::ByteSize;
+use fancy_regex::Regex;
+use http::{Method, StatusCode};
+use humantime::parse_duration;
+use pingap_cache::{HttpCache, new_cache_backend};
+use pingap_config::{PluginCategory, PluginConf};
+use pingap_core::{
+    Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
+    ensure_client_ip, get_cache_key,
+};
+use pingap_util::IpRules;
+use pingora::cache::eviction::EvictionManager;
+use pingora::cache::eviction::simple_lru::Manager;
+use pingora::cache::key::CacheHashKey;
+use pingora::cache::lock::{CacheKeyLock, CacheLock};
+use pingora::cache::predictor::{CacheablePredictor, Predictor};
+use pingora::proxy::Session;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::str::FromStr;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::Duration;
+use tracing::{debug, error};
+
+type Result<T> = std::result::Result<T, Error>;
+
+// Singleton instances using OnceCell for thread-safe lazy initialization
+// Predictor: Determines if a response should be cached based on patterns/rules
+static PREDICTOR: OnceLock<Predictor<32>> = OnceLock::new();
+// EvictionManager: Handles removing entries when cache is full using LRU strategy
+static EVICTION_MANAGER: OnceLock<Manager> = OnceLock::new();
+// CacheLock: Prevents multiple requests from generating the same cache entry
+// simultaneously. `session.cache.enable` wants a `&'static` lock, so one is
+// leaked per distinct duration and reused from then on — bounded by the number
+// of distinct `lock` values in the configuration, not by the number of plugin
+// instances, so a hot reload does not leak.
+static CACHE_LOCKS: LazyLock<
+    Mutex<HashMap<Duration, &'static (dyn CacheKeyLock + Send + Sync)>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub struct Cache {
+    // Determines when this plugin runs in the request/response lifecycle
+    plugin_step: PluginStep,
+    // Optional LRU-based memory management for cache entries
+    // Static lifetime ensures the eviction manager lives for the program duration
+    eviction: Option<&'static (dyn EvictionManager + Sync)>,
+    // Optional predictor to determine if responses should be cached
+    // Uses patterns and rules to make intelligent caching decisions
+    predictor: Option<&'static (dyn CacheablePredictor + Sync)>,
+    // Optional lock mechanism to prevent cache stampede
+    // (multiple identical requests generating the same cache entry)
+    lock: Option<&'static (dyn CacheKeyLock + Send + Sync)>,
+    // Backend storage implementation for the HTTP cache
+    http_cache: &'static HttpCache,
+    // Maximum size in bytes for individual cached files
+    max_file_size: usize,
+    // Optional maximum time a cache entry can live
+    // Overrides Cache-Control headers if set
+    max_ttl: Option<Duration>,
+    // Optional namespace for cache isolation
+    // Useful for multi-tenant systems or separating different types of cached content
+    namespace: Option<String>,
+    // Optional list of headers to include when generating cache keys
+    // Allows for variant caching (e.g., different versions based on Accept-Encoding)
+    headers: Option<Vec<String>>,
+    // Whether to check the cache-control header, if not exist the response will not be cached.
+    check_cache_control: bool,
+    // IP-based access control for cache purge operations
+    purge_ip_rules: IpRules,
+    // Optional regex pattern to skip caching for certain requests
+    skip: Option<Regex>,
+    // Unique identifier for this cache configuration
+    hash_value: String,
+}
+
+/// Helper function to initialize or retrieve the eviction manager singleton.
+/// This manager handles the LRU (Least Recently Used) cache eviction strategy.
+///
+/// # Returns
+/// Returns a static reference to the Manager instance that handles cache eviction.
+///
+/// # Implementation Details
+/// - Uses the configured cache size from current config if available
+/// - Falls back to MAX_MEMORY_SIZE (100MB) if not configured
+/// - Ensures only one instance is created using OnceCell
+fn get_eviction_manager(cache_max_size: u64) -> &'static Manager {
+    EVICTION_MANAGER.get_or_init(|| Manager::new(cache_max_size as usize))
+}
+
+/// Returns the cache lock for `lock`, creating it on first use.
+/// Cache locks prevent cache stampede by ensuring only one request generates a
+/// cache entry.
+///
+/// # Arguments
+/// * `lock` - The desired lock duration
+///
+/// # Returns
+/// * `Some(&CacheLock)` - For any non-zero duration
+/// * `None` - For a zero duration, which disables locking
+fn get_cache_lock(
+    lock: Duration,
+) -> Option<&'static (dyn CacheKeyLock + Send + Sync)> {
+    if lock.is_zero() {
+        return None;
+    }
+    let mut locks = CACHE_LOCKS.lock().ok()?;
+    if let Some(cache_lock) = locks.get(&lock) {
+        return Some(*cache_lock);
+    }
+    let cache_lock: &'static (dyn CacheKeyLock + Send + Sync) =
+        Box::leak(CacheLock::new_boxed(lock));
+    locks.insert(lock, cache_lock);
+    Some(cache_lock)
+}
+
+/// Helper function to initialize or retrieve the predictor singleton.
+/// The predictor determines whether responses should be cached based on configured rules.
+///
+/// # Returns
+/// Returns a static reference to a CacheablePredictor implementation.
+///
+/// # Implementation Details
+/// - Creates a new Predictor with capacity of 128 entries
+/// - No additional predictor configuration (None parameter)
+/// - Ensures only one instance is created using OnceCell
+fn get_predictor() -> &'static (dyn CacheablePredictor + Sync) {
+    PREDICTOR.get_or_init(|| Predictor::new(128, None))
+}
+
+impl TryFrom<&PluginConf> for Cache {
+    type Error = Error;
+
+    /// Attempts to create a Cache instance from plugin configuration.
+    ///
+    /// # Arguments
+    /// * `value` - Plugin configuration to convert
+    ///
+    /// # Returns
+    /// * `Result<Self>` - Configured Cache instance or conversion error
+    ///
+    /// # Configuration Options
+    /// - eviction: Enables LRU cache eviction
+    /// - lock: Cache lock duration (1-3s)
+    /// - max_ttl: Maximum cache entry lifetime
+    /// - max_file_size: Maximum cached file size
+    /// - namespace: Cache isolation namespace
+    /// - headers: Headers to include in cache key
+    /// - predictor: Enables cache prediction
+    /// - purge_ip_list: IPs allowed to purge cache
+    /// - skip: Regex pattern for requests to skip
+    ///
+    /// # Validation
+    /// - Ensures plugin step is Request
+    /// - Validates duration formats
+    /// - Creates cache directories if needed
+    /// - Compiles skip regex if provided
+    fn try_from(value: &PluginConf) -> Result<Self> {
+        let hash_value = get_hash_key(value);
+        let directory = get_str_conf(value, "directory");
+
+        let cache = new_cache_backend(directory.as_str()).map_err(|e| {
+            Error::Invalid {
+                category: "cache".to_string(),
+                message: e.to_string(),
+            }
+        })?;
+        let cache_max_size = cache.max_size;
+
+        let eviction = if value.contains_key("eviction") {
+            if cache_max_size > 0 {
+                let eviction = get_eviction_manager(cache_max_size);
+                Some(eviction as &'static (dyn EvictionManager + Sync))
+            } else {
+                // Eviction needs a bounded backend to evict against. The file
+                // backend does not report a size, so say so instead of leaving
+                // the operator believing the cache is capped.
+                error!(
+                    directory,
+                    "eviction is only supported by the memory cache backend, ignoring it"
+                );
+                None
+            }
+        } else {
+            None
+        };
+
+        let lock = get_str_conf(value, "lock");
+        let lock = if !lock.is_empty() {
+            parse_duration(&lock).map_err(|e| Error::Invalid {
+                category: PluginCategory::Cache.to_string(),
+                message: e.to_string(),
+            })?
+        } else {
+            Duration::from_secs(1)
+        };
+
+        let max_ttl = get_str_conf(value, "max_ttl");
+        let max_ttl = if !max_ttl.is_empty() {
+            Some(parse_duration(&max_ttl).map_err(|e| Error::Invalid {
+                category: PluginCategory::Cache.to_string(),
+                message: e.to_string(),
+            })?)
+        } else {
+            None
+        };
+
+        let max_file_size = get_str_conf(value, "max_file_size");
+        let max_file_size = if !max_file_size.is_empty() {
+            ByteSize::from_str(&max_file_size).map_err(|e| Error::Invalid {
+                category: PluginCategory::Cache.to_string(),
+                message: e.to_string(),
+            })?
+        } else {
+            ByteSize::mb(1)
+        };
+        let namespace = get_str_conf(value, "namespace");
+        if !namespace.is_empty() && cache.directory.is_some() {
+            let path = format!(
+                "{}/{namespace}",
+                cache.directory.clone().unwrap_or_default()
+            );
+            if let Err(e) = std::fs::create_dir_all(&path) {
+                error!(
+                    error = e.to_string(),
+                    path, "create directory of cache fail"
+                );
+            }
+        }
+        let namespace = if namespace.is_empty() {
+            None
+        } else {
+            Some(namespace)
+        };
+        let headers = get_str_slice_conf(value, "headers");
+        let headers = if headers.is_empty() {
+            None
+        } else {
+            Some(headers)
+        };
+
+        let predictor = if value.contains_key("predictor") {
+            Some(get_predictor())
+        } else {
+            None
+        };
+
+        let purge_ip_rules =
+            IpRules::new(&get_str_slice_conf(value, "purge_ip_list"));
+
+        let skip_value = get_str_conf(value, "skip");
+        let skip = if skip_value.is_empty() {
+            None
+        } else {
+            Some(Regex::new(&skip_value).map_err(|e| Error::Regex {
+                category: "cache".to_string(),
+                source: Box::new(e),
+            })?)
+        };
+
+        let params = Self {
+            hash_value,
+            http_cache: cache,
+            plugin_step: PluginStep::Request,
+            eviction,
+            predictor,
+            lock: get_cache_lock(lock),
+            max_ttl,
+            max_file_size: max_file_size.as_u64() as usize,
+            namespace,
+            headers,
+            purge_ip_rules,
+            check_cache_control: get_bool_conf(value, "check_cache_control"),
+            skip,
+        };
+        Ok(params)
+    }
+}
+
+impl Cache {
+    /// Creates a new Cache instance from the provided plugin configuration.
+    ///
+    /// # Arguments
+    /// * `params` - Plugin configuration parameters
+    ///
+    /// # Returns
+    /// * `Result<Self>` - New Cache instance or error if configuration is invalid
+    ///
+    /// # Logging
+    /// Logs debug information about the cache plugin creation
+    pub fn new(params: &PluginConf) -> Result<Self> {
+        debug!(params = params.to_string(), "new http cache plugin");
+        Self::try_from(params)
+    }
+}
+
+static METHOD_PURGE: LazyLock<Method> = LazyLock::new(|| {
+    Method::from_bytes(b"PURGE").expect("Failed to create PURGE method")
+});
+
+#[async_trait]
+impl Plugin for Cache {
+    /// Returns the unique hash key for this cache configuration.
+    /// Used to identify different cache configurations in the system.
+    #[inline]
+    fn config_key(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.hash_value)
+    }
+
+    /// Handles incoming HTTP requests for caching operations.
+    ///
+    /// # Arguments
+    /// * `step` - Current plugin execution step
+    /// * `session` - HTTP session containing request/response data
+    /// * `ctx` - Ctx context for sharing data between plugins
+    ///
+    /// # Returns
+    /// * `Ok(Some(HttpResponse))` - For immediate responses (e.g., PURGE operations)
+    /// * `Ok(None)` - To continue normal request processing
+    ///
+    /// # Processing Steps
+    /// 1. Validates plugin step and HTTP method
+    /// 2. Checks skip patterns
+    /// 3. Builds cache key from URI and headers
+    /// 4. Handles PURGE requests with access control
+    /// 5. Configures cache settings for the session
+    /// 6. Enables caching with configured components
+    /// 7. Sets up size limits and tracking
+    #[inline]
+    async fn handle_request(
+        &self,
+        step: PluginStep,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<RequestPluginResult> {
+        // Only process if we're in the correct plugin step
+        if step != self.plugin_step {
+            return Ok(RequestPluginResult::Skipped);
+        }
+
+        // Cache operations only support GET/HEAD for retrieval and PURGE for invalidation
+        let req_header = session.req_header();
+        let method = &req_header.method;
+        if ![&Method::GET, &Method::HEAD, &*METHOD_PURGE].contains(&method) {
+            return Ok(RequestPluginResult::Skipped);
+        }
+
+        // Check if request matches skip pattern (if configured)
+        if let Some(skip) = &self.skip
+            && let Some(value) = req_header.uri.path_and_query()
+            && skip.is_match(value.as_str()).unwrap_or_default()
+        {
+            return Ok(RequestPluginResult::Skipped);
+        }
+
+        // Build cache key components including configured headers
+        let mut keys = Vec::with_capacity(4);
+        {
+            let cache_info = ctx.cache.get_or_insert_default();
+            cache_info.namespace = self.namespace.clone();
+        }
+        if let Some(headers) = &self.headers {
+            for key in headers.iter() {
+                let buf = session.get_header_bytes(key).to_str_lossy();
+                if !buf.is_empty() {
+                    keys.push(buf.to_string());
+                }
+            }
+        }
+        if !keys.is_empty() {
+            ctx.extend_cache_keys(keys);
+            if let Some(cache_info) = &ctx.cache {
+                debug!("Cache keys: {:?}", cache_info.keys);
+            }
+        }
+
+        // Handle PURGE requests with IP-based access control
+        if method == *METHOD_PURGE {
+            let ip = ensure_client_ip(session, ctx);
+            let found = match self.purge_ip_rules.is_match(ip) {
+                Ok(matched) => matched,
+                Err(e) => {
+                    return Ok(RequestPluginResult::Respond(
+                        HttpResponse::bad_request(e.to_string()),
+                    ));
+                },
+            };
+            if !found {
+                return Ok(RequestPluginResult::Respond(HttpResponse {
+                    status: StatusCode::FORBIDDEN,
+                    body: Bytes::from_static(b"Forbidden, ip is not allowed"),
+                    ..Default::default()
+                }));
+            }
+
+            // `PURGE /*` empties the whole namespace. Anything else purges
+            // exactly the requested uri.
+            if session.req_header().uri.path() == "/*" {
+                let Some(namespace) = &self.namespace else {
+                    return Ok(RequestPluginResult::Respond(HttpResponse {
+                        status: StatusCode::NOT_IMPLEMENTED,
+                        body: Bytes::from_static(
+                            b"namespace purge requires the namespace option",
+                        ),
+                        ..Default::default()
+                    }));
+                };
+                let result =
+                    self.http_cache.cache.purge_namespace(namespace).await?;
+                let Some(stats) = result else {
+                    return Ok(RequestPluginResult::Respond(HttpResponse {
+                        status: StatusCode::NOT_IMPLEMENTED,
+                        body: Bytes::from_static(
+                            b"namespace purge is not supported by the memory cache backend",
+                        ),
+                        ..Default::default()
+                    }));
+                };
+                return Ok(RequestPluginResult::Respond(HttpResponse::text(
+                    format!("purged: {}, fail: {}", stats.success, stats.fail),
+                )));
+            }
+
+            // Cached GET and HEAD responses are separate entries (the method
+            // is part of the key); purge both so a HEAD variant cannot keep
+            // answering for a url that was just purged.
+            for method in [Method::GET, Method::HEAD] {
+                let key = get_cache_key(
+                    ctx,
+                    method.as_ref(),
+                    &session.req_header().uri,
+                );
+                self.http_cache
+                    .cache
+                    .remove(&key.combined(), key.namespace())
+                    .await?;
+            }
+            return Ok(
+                RequestPluginResult::Respond(HttpResponse::no_content()),
+            );
+        }
+
+        // Configure cache settings for this request
+        if let Some(cache_info) = &mut ctx.cache {
+            cache_info.max_ttl = self.max_ttl;
+            cache_info.check_cache_control = self.check_cache_control;
+        }
+
+        // Enable caching for this session with configured components
+        session.cache.enable(
+            self.http_cache,
+            self.eviction,
+            self.predictor,
+            self.lock,
+            // TODO: add cache option overrides
+            None,
+        );
+
+        // Set maximum cached file size if configured
+        if self.max_file_size > 0 {
+            session.cache.set_max_file_size_bytes(self.max_file_size);
+        }
+
+        // Track cache statistics if available
+        if let Some(stats) = self.http_cache.stats()
+            && let Some(cache_info) = ctx.cache.as_mut()
+        {
+            cache_info.reading_count = Some(stats.reading);
+            cache_info.writing_count = Some(stats.writing);
+        }
+
+        Ok(RequestPluginResult::Continue)
+    }
+}
+
+register_plugin!("cache", Cache);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pingap_config::PluginConf;
+    use pingap_core::{Ctx, PluginStep};
+    use pingora::proxy::Session;
+    use pretty_assertions::assert_eq;
+    use tokio_test::io::Builder;
+
+    #[test]
+    fn test_cache_params() {
+        let params = Cache::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+eviction = true
+headers = ["Accept-Encoding"]
+lock = "2s"
+max_file_size = "100kb"
+predictor = true
+max_ttl = "1m"
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(true, params.eviction.is_some());
+        assert_eq!(
+            r#"Some(["Accept-Encoding"])"#,
+            format!("{:?}", params.headers)
+        );
+        assert_eq!(true, params.lock.is_some());
+        assert_eq!(100 * 1000, params.max_file_size);
+        assert_eq!(60, params.max_ttl.unwrap().as_secs());
+        assert_eq!(true, params.predictor.is_some());
+    }
+
+    /// Regression: only 1, 2 and 3 second locks used to be honoured, every
+    /// other value silently disabled locking altogether.
+    #[test]
+    fn test_cache_lock_any_duration() {
+        let lock_of = |lock: &str| {
+            Cache::try_from(
+                &toml::from_str::<PluginConf>(&format!(
+                    r###"lock = "{lock}""###
+                ))
+                .unwrap(),
+            )
+            .unwrap()
+            .lock
+            .is_some()
+        };
+
+        for lock in ["1s", "2s", "3s", "5s", "30s", "500ms", "1m"] {
+            assert_eq!(true, lock_of(lock), "lock({lock}) was disabled");
+        }
+        // Zero explicitly means "no lock".
+        assert_eq!(false, lock_of("0s"));
+    }
+    #[tokio::test]
+    async fn test_cache() {
+        let cache = Cache::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+namespace = "pingap"
+eviction = true
+headers = ["Accept-Encoding"]
+purge_ip_list = ["127.0.0.1"]
+lock = "2s"
+max_file_size = "100kb"
+predictor = true
+max_ttl = "1m"
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let headers = ["Accept-Encoding: gzip"].join("\r\n");
+        let input_header =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        cache
+            .handle_request(PluginStep::Request, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            "pingap",
+            ctx.cache.as_ref().unwrap().namespace.as_ref().unwrap()
+        );
+        assert_eq!(
+            "gzip",
+            ctx.cache.as_ref().unwrap().keys.as_ref().unwrap().join(":")
+        );
+        assert_eq!(true, session.cache.enabled());
+        assert_eq!(100 * 1000, cache.max_file_size);
+    }
+
+    async fn purge(cache: &Cache, path: &str) -> HttpResponse {
+        let input_header = format!("PURGE {path} HTTP/1.1\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        // The mock io has no peer address, so the ip check is satisfied
+        // explicitly instead of through `get_client_ip`.
+        ctx.conn.client_ip = Some("127.0.0.1".to_string());
+        let result = cache
+            .handle_request(PluginStep::Request, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("purge must respond, got a pass-through");
+        };
+        resp
+    }
+
+    #[tokio::test]
+    async fn test_purge_namespace_memory_backend_unsupported() {
+        // No directory -> memory backend, which cannot enumerate entries.
+        let cache = Cache::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+namespace = "purge-mem"
+purge_ip_list = ["127.0.0.1"]
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let resp = purge(&cache, "/*").await;
+        assert_eq!(StatusCode::NOT_IMPLEMENTED, resp.status);
+    }
+
+    #[tokio::test]
+    async fn test_purge_namespace_file_backend() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Cache::try_from(
+            &toml::from_str::<PluginConf>(&format!(
+                r###"
+directory = "{}"
+namespace = "purge-ns"
+purge_ip_list = ["127.0.0.1"]
+"###,
+                dir.path().to_string_lossy()
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Seed one object in the plugin's namespace and one outside it.
+        let obj = pingap_cache::CacheObject {
+            meta: (b"meta0".to_vec(), b"meta1".to_vec()),
+            body: Bytes::from_static(b"cached body"),
+        };
+        cache
+            .http_cache
+            .cache
+            .put("purge-key", b"purge-ns", obj.clone())
+            .await
+            .unwrap();
+        cache
+            .http_cache
+            .cache
+            .put("other-key", b"other-ns", obj)
+            .await
+            .unwrap();
+
+        let resp = purge(&cache, "/*").await;
+        assert_eq!(StatusCode::OK, resp.status);
+        assert_eq!(
+            "purged: 1, fail: 0",
+            std::str::from_utf8(&resp.body).unwrap()
+        );
+
+        // The namespace is empty, the other one is untouched.
+        let purged = cache
+            .http_cache
+            .cache
+            .get("purge-key", b"purge-ns")
+            .await
+            .unwrap();
+        assert_eq!(true, purged.is_none());
+        let kept = cache
+            .http_cache
+            .cache
+            .get("other-key", b"other-ns")
+            .await
+            .unwrap();
+        assert_eq!(true, kept.is_some());
+
+        // An exact purge responds 204 whether or not the entry existed.
+        let resp = purge(&cache, "/vicanso/pingap").await;
+        assert_eq!(StatusCode::NO_CONTENT, resp.status);
+    }
+
+    #[tokio::test]
+    async fn test_purge_forbidden_ip() {
+        let cache = Cache::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+namespace = "purge-deny"
+purge_ip_list = ["192.168.1.1"]
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let resp = purge(&cache, "/*").await;
+        assert_eq!(StatusCode::FORBIDDEN, resp.status);
+    }
+}

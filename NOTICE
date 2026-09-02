@@ -1,0 +1,121 @@
+pingap-waf
+Copyright 2026 the pingap-waf authors
+
+This product includes software developed by third parties, listed below with the
+licence and the exact source commit each import was taken from. Source commits
+are recorded so a future upstream merge has a known base to diff against.
+
+All three upstream projects are licensed under the Apache License, Version 2.0.
+Each LICENSE file was read and verified directly from the clone, not inferred
+from repository metadata. A copy of the licence is in ./LICENSE.
+
+================================================================================
+pingap  --  vendored, and the host program of this fork
+================================================================================
+
+  Author:     Tree Xie <tree.xie@outlook.com>
+  Repository: https://github.com/vicanso/pingap
+  Licence:    Apache-2.0
+  Version:    0.13.10
+  Commit:     51025efca56f342a9a1e5e40559637f32b9140bf  (tag v0.13.10, 2026-08-29)
+
+  The pingap workspace is vendored into this repository. Vendored files keep
+  their exact upstream paths so `git merge upstream/main` produces readable
+  conflicts inside known files rather than add/delete pairs. Crates owned by this
+  fork live under `crates/` instead. The path prefix is the ownership marker:
+  unprefixed means vendored and carrying merge debt, `crates/`-prefixed means
+  ours and carrying none.
+
+  Vendored at upstream paths: the 19 `pingap-*` crates, `src/` (binary crate),
+  `web/` (React admin UI), `conf/`, `benches/`, `docs/`, `examples/`, `website/`,
+  `packaging/`, `scripts/`, `hooks/`, `icons/`, `asset/`, `dist/README.md`,
+  and the root build and tooling files (`Cargo.toml`, `Cargo.lock`, `build.rs`,
+  `Makefile`, `Dockerfile`, `CLAUDE.md`, `bacon.toml`, `clippy.toml`,
+  `typos.toml`, `cliff.toml`, `.rustfmt.toml`, `.cargo/`, `entrypoint.sh`,
+  `install.sh`, `publish.sh`, `pingap.service`, `docker-compose.yml`, and the
+  README/CHANGELOG/CLA documents).
+
+  Deliberate divergences from the upstream tree, all recorded here because a
+  future merge will otherwise read them as accidental drift:
+
+  1. `.github/workflows/publish.yml`, `test.yml`, `pages.yml`, and
+     `mark-stale.yaml` are NOT vendored. `publish.yml` triggers on `v*` tags and
+     pushes to crates.io and Docker Hub `vicanso/pingap`; `test.yml` (named
+     "publish" internally) also carries `IMAGE_NAME: vicanso/pingap`;
+     `pages.yml` deploys upstream's site. Vendoring them would mean a release
+     tag in this fork attempting a publish under another project's namespace.
+     `audit.yml` and `windows.yml` are vendored unchanged.
+
+  2. `.gitignore` retains upstream's content byte-for-byte and appends a
+     fork-only section below a marker comment, so the file still merges cleanly.
+     `Cargo.lock` is tracked (upstream ignores it as a published library, yet
+     force-tracks it anyway) because a reproducible dependency graph is a
+     security property for a deployed WAF.
+
+  3. The root `Cargo.toml` gains the five owned crates in `[workspace]` members
+     and `[workspace.dependencies]`, an `exclude = ["spikes"]` entry, and a
+     `[workspace.lints.clippy]` table. Upstream declares `unwrap_used = "deny"`
+     separately in each of its 19 crates and in the root package, with no
+     workspace table to inherit from; the new table exists so owned crates opt in
+     with `[lints] workspace = true`. No vendored crate manifest was repointed at
+     it, since that would be diff with no behaviour change.
+
+  4. `src/plugin/admin.rs` and `src/plugin/mod.rs` are modified to close an admin
+     authentication fail-open. Upstream's `auth_validate` returns `true` when the
+     resolved credential list is empty, which means an admin listener started
+     without credentials serves an unauthenticated config-write API rather than
+     denying. See the fork's own history for the change and its tests.
+
+================================================================================
+pingora  --  upstream dependency, not vendored
+================================================================================
+
+  Author:     Cloudflare, Inc.
+  Repository: https://github.com/cloudflare/pingora
+  Licence:    Apache-2.0
+  Version:    0.8.1, from crates.io
+
+  Consumed as a normal cargo dependency with the `lb`, `openssl`, and `cache`
+  features. Exactly one pingora version is permitted in `Cargo.lock`.
+
+================================================================================
+pingora-waf  --  detector source material, not vendored as a crate
+================================================================================
+
+  Author:     AarambhDevHub
+  Repository: https://github.com/AarambhDevHub/pingora-waf
+  Licence:    Apache-2.0
+  Commit:     a316b22997946b3fd3c484e00ee32d1d6cfc9de9  (2025-12-13)
+
+  This project is absorbed as source material, not as a dependency or a second
+  process. Its `src/waf/*` detectors are copied file-by-file into
+  `crates/pingap-waf` and ported to the pingora 0.8.1 API; each ported file
+  carries its own attribution header naming this commit.
+
+  Not carried over: `src/proxy/mod.rs`, `src/main.rs`, `src/config/`,
+  `src/metrics/`, and `rate_limiter.rs`. pingap owns the single `ProxyHttp`
+  implementation and its existing `limit` plugin supersedes the rate limiter.
+
+================================================================================
+nginx-love  --  behaviour and UX reference only; no code imported
+================================================================================
+
+  Author:     TinyActive
+  Repository: https://github.com/TinyActive/nginx-love
+  Licence:    Apache-2.0
+  Commit:     f796a5fe382b7abcce9676c8e54ff5a446e4950f  (2026-07-10)
+
+  Used to establish feature parity targets and UX expectations. No source,
+  schema, or component is copied from it. Its licence permitting reuse does not
+  by itself make verbatim copying appropriate: any future decision to reuse a
+  schema or component from this project is a deliberate choice requiring
+  sign-off, and would be recorded here at that time.
+
+================================================================================
+Reference clones
+================================================================================
+
+  The three clones inspected to produce the evidence above live under
+  `.xia-src/` and are excluded from version control; each carries its own `.git`,
+  so tracking them would create gitlinks nobody else can resolve. The retained
+  analysis artifacts are `.xia-src/EVIDENCE-PACKET.md` and `.xia-src/candidates/`.

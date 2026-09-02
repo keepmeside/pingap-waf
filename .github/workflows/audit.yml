@@ -1,0 +1,34 @@
+name: Security Audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/audit.toml"
+  schedule:
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security-audit:
+    permissions:
+      checks: write # for rustsec/audit-check to create check
+      contents: read # for actions/checkout to fetch code
+      issues: write # for rustsec/audit-check to create issues
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit Check
+        # https://github.com/rustsec/audit-check/issues/2
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          # The built-in token, which cannot expire. The job permissions above
+          # already grant the checks/issues write access the action needs.
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,124 @@
+name: ci
+
+# This fork's own CI. Upstream's publish.yml, test.yml, pages.yml and
+# mark-stale.yaml are deliberately not vendored: they push to crates.io and
+# Docker Hub `vicanso/pingap` on a `v*` tag, so a release tag here would attempt
+# a publish under another project's namespace. See NOTICE for the full rationale.
+# audit.yml and windows.yml are vendored unchanged and run alongside this file.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-22.04
+    services:
+      # pingap-config's manager::tests::test_etcd_config_manger talks to a real
+      # etcd. Without this service it is the one test that fails on a clean
+      # checkout, so it is a CI dependency rather than an optional extra.
+      etcd:
+        image: quay.io/coreos/etcd:v3.5.5
+        env:
+          ETCD_ADVERTISE_CLIENT_URLS: http://0.0.0.0:2379
+          ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+        ports:
+          - 2379:2379
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build.rs uses vergen-git2 and src/plugin/admin.rs bakes in
+          # env!("VERGEN_GIT_SHA"). A shallow clone leaves HEAD unpeelable, so
+          # vergen silently substitutes defaults and the binary reports no
+          # commit. Full history keeps the version stamp real.
+          fetch-depth: 0
+
+      # The toolchain is read from rust-toolchain.toml, so the pin lives in one
+      # place and CI cannot drift from a local build.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Must precede any cargo step. rust-embed resolves #[folder = "dist/"] at
+      # compile time, and the admin asset test asserts index.html is present, so
+      # a cargo run before this builds a binary with an empty admin UI.
+      # `npm ci` rather than `npm install`: it honours the committed lockfile
+      # instead of silently rewriting it.
+      - name: Build admin UI
+        run: |
+          cd web
+          npm ci
+          npm run build
+          cd ..
+          cp -rf web/dist/* dist/
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --features=full -- -D warnings
+
+      # `geo` is outside `full`, so it needs its own pass or it silently rots.
+      - name: Clippy (geo feature)
+        run: cargo clippy -p pingap-plugin --features=geo --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --features=full
+
+  build-release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build admin UI
+        run: |
+          cd web
+          npm ci
+          npm run build
+          cd ..
+          cp -rf web/dist/* dist/
+
+      # Proves the release profile still links, which the debug build does not:
+      # `panic = "abort"` and `lto = true` only apply here.
+      - name: Build release
+        run: cargo build --release
+
+      - name: Verify single pingora version
+        run: |
+          set -euo pipefail
+          versions=$(awk '/^name = "pingora"$/{f=1;next} f&&/^version = /{gsub(/"/,"",$3);print $3;f=0}' Cargo.lock)
+          echo "pingora versions in Cargo.lock: ${versions}"
+          test "$(echo "${versions}" | sort -u | wc -l)" -eq 1
+          test "${versions}" = "0.8.1"
+
+      - name: Verify one ProxyHttp implementation
+        run: |
+          set -euo pipefail
+          count=$(grep -rn "impl ProxyHttp" --include=*.rs . | wc -l)
+          echo "impl ProxyHttp count: ${count}"
+          test "${count}" -eq 1

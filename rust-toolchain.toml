@@ -1,0 +1,10 @@
+[toolchain]
+# Pinned rather than left at `stable`. This fork is a deployed security product,
+# so the compiler is part of the reproducible build surface: an unpinned channel
+# means a clippy release can turn CI red without a single source change.
+#
+# Upstream pingap declares MSRV 1.88 in its root manifest and tests a matrix up
+# to stable. Nothing here lowers that floor — this pin sits above it, so code
+# accepted locally still satisfies the vendored crates' stated minimum.
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]

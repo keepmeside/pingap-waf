@@ -1,0 +1,359 @@
+import { LoadingPage } from "@/components/loading";
+import useConfigState from "@/states/config";
+import { ExForm, ExFormItem } from "@/components/ex-form";
+import { z } from "zod";
+import { useI18n } from "@/i18n";
+import {
+  ExFormItemCategory,
+  newStringOptions,
+  newBooleanOptions,
+} from "@/constants";
+import { newZodBytes, newZodDuration, newZodNumber } from "@/helpers/util";
+import useBasicState from "@/states/basic";
+import { useShallow } from "zustand/react/shallow";
+import History from "@/pages/History";
+import { PageShell } from "@/components/page-shell";
+
+export default function Basic() {
+  const basicI18n = useI18n("basic");
+  const [basicInfo] = useBasicState(useShallow((state) => [state.data]));
+  const [config, initialized, update, version] = useConfigState(
+    useShallow((state) => [
+      state.data,
+      state.initialized,
+      state.update,
+      state.version,
+    ]),
+  );
+  if (!initialized) {
+    return <LoadingPage />;
+  }
+  const basic = config.basic;
+
+  const sec = {
+    core: basicI18n("sectionCore"),
+    logging: basicI18n("sectionLogging"),
+    process: basicI18n("sectionProcess"),
+    notify: basicI18n("sectionNotify"),
+    advanced: basicI18n("sectionAdvanced"),
+  };
+
+  // Core + Logging shown by default; Process / Notify / Advanced behind "More Settings".
+  const items: ExFormItem[] = [
+    // ── Core ──────────────────────────────────────────────
+    {
+      name: "name",
+      label: basicI18n("name"),
+      placeholder: basicI18n("namePlaceholder"),
+      defaultValue: basic.name,
+      span: 6,
+      section: sec.core,
+      category: ExFormItemCategory.TEXT,
+    },
+    {
+      name: "threads",
+      label: basicI18n("threads"),
+      placeholder: basicI18n("threadsPlaceholder"),
+      tips: basicI18n("threadsTips"),
+      defaultValue: basic.threads,
+      span: 3,
+      section: sec.core,
+      category: ExFormItemCategory.NUMBER,
+    },
+    {
+      name: "work_stealing",
+      label: basicI18n("workStealing"),
+      placeholder: "",
+      tips: basicI18n("workStealingTips"),
+      defaultValue: basic.work_stealing || null,
+      span: 3,
+      section: sec.core,
+      category: ExFormItemCategory.RADIOS,
+      options: newBooleanOptions(),
+    },
+    {
+      name: "listener_tasks_per_fd",
+      label: basicI18n("listenerTasksPerFd"),
+      placeholder: basicI18n("listenerTasksPerFdPlaceholder"),
+      tips: basicI18n("listenerTasksPerFdTips"),
+      defaultValue: basic.listener_tasks_per_fd,
+      span: 3,
+      section: sec.core,
+      category: ExFormItemCategory.NUMBER,
+    },
+    {
+      name: "upstream_keepalive_pool_size",
+      label: basicI18n("upstreamKeepalivePoolSize"),
+      placeholder: basicI18n("upstreamKeepalivePoolSizePlaceholder"),
+      tips: basicI18n("upstreamKeepalivePoolSizeTips"),
+      defaultValue: basic.upstream_keepalive_pool_size,
+      span: 3,
+      section: sec.core,
+      category: ExFormItemCategory.NUMBER,
+    },
+    // ── Logging ───────────────────────────────────────────
+    {
+      name: "log_level",
+      label: basicI18n("logLevel"),
+      placeholder: basicI18n("logLevelPlaceholder"),
+      tips: basicI18n("logLevelTips"),
+      defaultValue: basic.log_level,
+      span: 3,
+      section: sec.logging,
+      // INPUT_SELECT, not SELECT: log_level also accepts a tracing filter
+      // string (e.g. `info,pingap_proxy=debug`), which the fixed list can't
+      // express. The switch toggles to free text; the placeholder's two halves
+      // (split on " : ") describe each mode.
+      category: ExFormItemCategory.INPUT_SELECT,
+      options: newStringOptions(
+        ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"],
+        false,
+        true,
+      ),
+    },
+    {
+      name: "log_format_json",
+      label: basicI18n("logFormatJson"),
+      placeholder: "",
+      defaultValue: basic.log_format_json,
+      span: 3,
+      section: sec.logging,
+      category: ExFormItemCategory.RADIOS,
+      options: newBooleanOptions(),
+    },
+    {
+      name: "log_buffered_size",
+      label: basicI18n("logBufferedSize"),
+      placeholder: basicI18n("logBufferedSizePlaceholder"),
+      tips: basicI18n("logBufferedSizeTips"),
+      defaultValue: basic.log_buffered_size,
+      span: 3,
+      section: sec.logging,
+      category: ExFormItemCategory.TEXT,
+    },
+    {
+      name: "log_compress_algorithm",
+      label: basicI18n("logCompressAlgorithm"),
+      placeholder: basicI18n("logCompressAlgorithmPlaceholder"),
+      defaultValue: basic.log_compress_algorithm,
+      span: 3,
+      section: sec.logging,
+      category: ExFormItemCategory.SELECT,
+      options: newStringOptions(["gzip", "zstd"], false, true),
+    },
+    {
+      name: "log_compress_level",
+      label: basicI18n("logCompressLevel"),
+      placeholder: basicI18n("logCompressLevelPlaceholder"),
+      defaultValue: basic.log_compress_level,
+      span: 3,
+      section: sec.logging,
+      category: ExFormItemCategory.NUMBER,
+    },
+    {
+      name: "log_compress_days_ago",
+      label: basicI18n("logCompressDaysAgo"),
+      placeholder: basicI18n("logCompressDaysAgoPlaceholder"),
+      defaultValue: basic.log_compress_days_ago,
+      span: 3,
+      section: sec.logging,
+      category: ExFormItemCategory.NUMBER,
+    },
+    {
+      name: "log_compress_time_point_hour",
+      label: basicI18n("logCompressTimePointHour"),
+      placeholder: basicI18n("logCompressTimePointHourPlaceholder"),
+      defaultValue: basic.log_compress_time_point_hour,
+      span: 3,
+      section: sec.logging,
+      category: ExFormItemCategory.NUMBER,
+    },
+    // ── Process (more settings) ───────────────────────────
+    {
+      name: "grace_period",
+      label: basicI18n("gracePeriod"),
+      placeholder: basicI18n("gracePeriodPlaceholder"),
+      tips: basicI18n("gracePeriodTips"),
+      defaultValue: basic.grace_period,
+      span: 3,
+      section: sec.process,
+      category: ExFormItemCategory.TEXT,
+    },
+    {
+      name: "graceful_shutdown_timeout",
+      label: basicI18n("gracefulShutdownTimeout"),
+      placeholder: basicI18n("gracefulShutdownTimeoutPlaceholder"),
+      tips: basicI18n("gracefulShutdownTimeoutTips"),
+      defaultValue: basic.graceful_shutdown_timeout,
+      span: 3,
+      section: sec.process,
+      category: ExFormItemCategory.TEXT,
+    },
+    {
+      name: "auto_restart_check_interval",
+      label: basicI18n("autoRestartCheckInterval"),
+      placeholder: basicI18n("autoRestartCheckIntervalPlaceholder"),
+      tips: basicI18n("autoRestartCheckIntervalTips"),
+      defaultValue: basic.auto_restart_check_interval,
+      span: 3,
+      section: sec.process,
+      category: ExFormItemCategory.TEXT,
+    },
+    {
+      name: "pid_file",
+      label: basicI18n("pidFile"),
+      placeholder: basicI18n("pidFilePlaceholder"),
+      defaultValue: basic.pid_file,
+      span: 3,
+      section: sec.process,
+      category: ExFormItemCategory.TEXT,
+    },
+    {
+      name: "upgrade_sock",
+      label: basicI18n("upgradeSock"),
+      placeholder: basicI18n("upgradeSockPlaceholder"),
+      tips: basicI18n("upgradeSockTips"),
+      defaultValue: basic.upgrade_sock,
+      span: 3,
+      section: sec.process,
+      category: ExFormItemCategory.TEXT,
+    },
+    {
+      name: "user",
+      label: basicI18n("user"),
+      placeholder: basicI18n("userPlaceholder"),
+      defaultValue: basic.user,
+      span: 3,
+      section: sec.process,
+      category: ExFormItemCategory.TEXT,
+    },
+    {
+      name: "group",
+      label: basicI18n("group"),
+      placeholder: basicI18n("groupPlaceholder"),
+      defaultValue: basic.group,
+      span: 3,
+      section: sec.process,
+      category: ExFormItemCategory.TEXT,
+    },
+    // ── Notify ────────────────────────────────────────────
+    {
+      name: "webhook_type",
+      label: basicI18n("webhookType"),
+      placeholder: basicI18n("webhookTypePlaceholder"),
+      defaultValue: basic.webhook_type,
+      span: 3,
+      section: sec.notify,
+      category: ExFormItemCategory.SELECT,
+      options: newStringOptions(["normal", "wecom", "dingtalk"], true),
+    },
+    {
+      name: "webhook_notifications",
+      label: basicI18n("webhookNotifications"),
+      placeholder: basicI18n("webhookNotificationsPlaceholder"),
+      defaultValue: basic.webhook_notifications,
+      span: 3,
+      section: sec.notify,
+      category: ExFormItemCategory.MULTI_SELECT,
+      options: newStringOptions(
+        [
+          "backend_status",
+          "lets_encrypt",
+          "diff_config",
+          "restart",
+          "restart_fail",
+          "reload_config",
+          "reload_config_fail",
+          "tls_validity",
+          "parse_certificate_fail",
+          "service_discover_fail",
+          "upstream_status",
+        ].sort(),
+        true,
+      ),
+    },
+    {
+      name: "webhook",
+      label: basicI18n("webhook"),
+      placeholder: basicI18n("webhookPlaceholder"),
+      defaultValue: basic.webhook,
+      span: 6,
+      section: sec.notify,
+      category: ExFormItemCategory.TEXT,
+    },
+  ];
+
+  if (basicInfo.features.includes("tracing")) {
+    items.push({
+      name: "sentry",
+      label: basicI18n("sentry"),
+      placeholder: basicI18n("sentryPlaceholder"),
+      defaultValue: basic.sentry,
+      span: 6,
+      section: sec.notify,
+      category: ExFormItemCategory.TEXT,
+    });
+  }
+  if (basicInfo.features.includes("pyroscope")) {
+    items.push({
+      name: "pyroscope",
+      label: basicI18n("pyroscope"),
+      placeholder: basicI18n("pyroscopePlaceholder"),
+      defaultValue: basic.pyroscope,
+      span: 6,
+      section: sec.notify,
+      category: ExFormItemCategory.TEXT,
+    });
+  }
+
+  items.push({
+    name: "error_template",
+    label: basicI18n("errorTemplate"),
+    placeholder: basicI18n("errorTemplatePlaceholder"),
+    tips: basicI18n("errorTemplateTips"),
+    defaultValue: basic.error_template,
+    span: 6,
+    rows: 8,
+    section: sec.advanced,
+    category: ExFormItemCategory.TEXTAREA,
+  });
+
+  // Core (5) + Logging (7) = 12 default fields.
+  const defaultShow = 12;
+
+  const schema = z.object({
+    name: z.string().optional(),
+    threads: newZodNumber().optional(),
+    log_level: z.string().optional().or(z.null()),
+    log_buffered_size: newZodBytes().optional(),
+    grace_period: newZodDuration().optional(),
+    graceful_shutdown_timeout: newZodDuration().optional(),
+    auto_restart_check_interval: newZodDuration().optional(),
+    cache_max_size: newZodBytes().optional(),
+  });
+
+  return (
+    <PageShell
+      eyebrow="basic"
+      title={basicI18n("title")}
+      description={basicI18n("description")}
+      width="narrow"
+      actions={
+        <History
+          category="basic"
+          name=""
+          onRestore={async (data) => update("pingap", "basic", data)}
+        />
+      }
+    >
+      <ExForm
+        key={version}
+        category="basic"
+        items={items}
+        schema={schema}
+        defaultShow={defaultShow}
+        onSave={async (value) => update("pingap", "basic", value)}
+      />
+    </PageShell>
+  );
+}

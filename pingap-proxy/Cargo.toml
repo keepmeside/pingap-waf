@@ -1,0 +1,51 @@
+[package]
+name = "pingap-proxy"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "proxy"]
+description = "Proxy for pingap"
+
+
+[dependencies]
+ahash = { workspace = true }
+async-trait = { workspace = true }
+bstr = { workspace = true }
+bytes = { workspace = true }
+cfg-if = { workspace = true }
+http = { workspace = true }
+humantime = { workspace = true, optional = true }
+itoa = { workspace = true }
+num_cpus = { workspace = true }
+pingap-acme = { workspace = true }
+pingap-certificate = { workspace = true }
+pingap-config = { workspace = true }
+pingap-core = { workspace = true }
+pingap-location = { workspace = true }
+pingap-logger = { workspace = true }
+pingap-otel = { workspace = true, optional = true }
+pingap-performance = { workspace = true }
+pingap-upstream = { workspace = true }
+pingap-util = { workspace = true }
+pingora = { workspace = true }
+scopeguard = { workspace = true }
+snafu = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = "3.21.0"
+tokio-test = "0.4.4"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[features]
+tracing = [
+    "pingap-otel",
+    "humantime",
+    "pingap-core/tracing",
+    "pingap-performance/tracing",
+]

@@ -1,0 +1,18 @@
+[package]
+name = "pingap-waf"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+keywords = ["pingap", "waf"]
+description = "WAF rule engine and detectors for pingap"
+# Not published: this crate exists only inside this workspace.
+publish = false
+
+[lib]
+name = "pingap_waf"
+path = "src/lib.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

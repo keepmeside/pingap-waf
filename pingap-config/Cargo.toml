@@ -1,0 +1,59 @@
+[package]
+name = "pingap-config"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "config"]
+description = "Config for pingap"
+
+[lib]
+name = "pingap_config"
+path = "src/lib.rs"
+
+
+[dependencies]
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytesize = { workspace = true }
+crc32fast = { workspace = true }
+diff = { workspace = true }
+etcd-client = { workspace = true }
+glob = { workspace = true }
+http = { workspace = true }
+humantime-serde = { workspace = true }
+pingap-core = { workspace = true }
+pingap-discovery = { workspace = true }
+pingap-util = { workspace = true }
+regex = { workspace = true }
+rustls-pki-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_qs = { workspace = true }
+snafu = { workspace = true }
+strum = { workspace = true }
+substring = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+hcl-rs = { workspace = true }
+kdl = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+
+[package.metadata.cargo-machete]
+ignored = ["humantime-serde", "hcl-rs", "kdl"]
+
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tokio-test = "0.4.4"
+nanoid = { workspace = true }
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

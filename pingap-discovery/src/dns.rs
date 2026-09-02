@@ -1,0 +1,544 @@
+// Copyright 2024-2025 Tree xie.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::{Addr, Error, Result, format_addrs};
+use super::{DNS_DISCOVERY, Discovery, LOG_TARGET};
+use async_trait::async_trait;
+use futures::future::join_all;
+use hickory_resolver::TokioResolver;
+use hickory_resolver::config::{
+    LookupIpStrategy, NameServerConfig, ResolverConfig, ResolverOpts,
+};
+use hickory_resolver::lookup_ip::LookupIp;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::Name;
+use hickory_resolver::system_conf::read_system_conf;
+use http::Extensions;
+use pingap_core::NotificationSender;
+use pingap_core::{NotificationData, NotificationLevel};
+use pingora::lb::discovery::ServiceDiscovery;
+use pingora::lb::{Backend, Backends};
+use pingora::protocols::l4::socket::SocketAddr;
+use std::collections::{BTreeSet, HashMap};
+use std::net::{IpAddr, SocketAddr as StdSocketAddr};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+use tracing::{debug, error, info};
+
+/// How long a built `Resolver` may be reused before re-reading system conf.
+const RESOLVER_REFRESH: Duration = Duration::from_secs(60);
+/// Floor / ceiling for DNS-TTL-based result caching.
+const DISCOVERY_CACHE_MIN: Duration = Duration::from_secs(5);
+const DISCOVERY_CACHE_MAX: Duration = Duration::from_secs(300);
+
+struct CachedResolver {
+    resolver: Arc<TokioResolver>,
+    built_at: Instant,
+}
+
+struct DiscoveryCache {
+    backends: BTreeSet<Backend>,
+    failed_hosts: Vec<String>,
+    valid_until: Instant,
+}
+
+/// DNS service discovery implementation
+struct Dns {
+    ipv4_only: bool,
+    hosts: Vec<Addr>,
+    sender: Option<Arc<NotificationSender>>,
+    name_server: Option<String>,
+    domain: Option<String>,
+    search: Option<String>,
+    /// Reused across discovery ticks; rebuilt when system DNS conf may have changed.
+    resolver: Mutex<Option<CachedResolver>>,
+    /// Successful (or partial) discovery result held until the shortest DNS TTL.
+    discovery_cache: Mutex<Option<DiscoveryCache>>,
+}
+
+/// Checks if the discovery type is DNS
+pub fn is_dns_discovery(value: &str) -> bool {
+    value == DNS_DISCOVERY
+}
+
+impl Dns {
+    /// Creates a new DNS discovery instance
+    ///
+    /// # Arguments
+    /// * `addrs` - List of addresses to resolve
+    /// * `tls` - Whether to use TLS
+    /// * `ipv4_only` - Whether to only use IPv4 addresses
+    ///
+    /// # Returns
+    /// * `Result<Self>` - New DNS discovery instance
+    fn new(addrs: &[String], tls: bool, ipv4_only: bool) -> Result<Self> {
+        let hosts = format_addrs(addrs, tls);
+        Ok(Self {
+            hosts,
+            ipv4_only,
+            sender: None,
+            name_server: None,
+            domain: None,
+            search: None,
+            resolver: Mutex::new(None),
+            discovery_cache: Mutex::new(None),
+        })
+    }
+
+    /// Returns a shared resolver, rebuilding at most every `RESOLVER_REFRESH`
+    /// so `/etc/resolv.conf` changes are still picked up without paying the
+    /// rebuild cost on every discovery tick.
+    async fn get_resolver(&self) -> Result<Arc<TokioResolver>> {
+        let mut slot = self.resolver.lock().await;
+        if let Some(cached) = slot.as_ref()
+            && cached.built_at.elapsed() < RESOLVER_REFRESH
+        {
+            return Ok(cached.resolver.clone());
+        }
+        let provider = TokioRuntimeProvider::default();
+        let (config, options) = self.read_system_conf()?;
+        let mut builder = TokioResolver::builder_with_config(config, provider);
+        *builder.options_mut() = options;
+        let resolver =
+            builder.build().map_err(|e| Error::Resolve { source: e })?;
+        let resolver = Arc::new(resolver);
+        *slot = Some(CachedResolver {
+            resolver: resolver.clone(),
+            built_at: Instant::now(),
+        });
+        Ok(resolver)
+    }
+    /// Sets the name server
+    ///
+    /// # Arguments
+    /// * `name_server` - The name server
+    ///
+    /// # Returns
+    /// * `Self` - The DNS discovery instance
+    pub fn with_name_server(mut self, name_server: String) -> Self {
+        if name_server.is_empty() {
+            return self;
+        }
+        self.name_server = Some(name_server);
+        self
+    }
+
+    /// Sets the domain
+    ///
+    /// # Arguments
+    /// * `domain` - The domain
+    ///
+    /// # Returns
+    /// * `Self` - The DNS discovery instance
+    pub fn with_domain(mut self, domain: String) -> Self {
+        self.domain = Some(domain);
+        self
+    }
+
+    /// Sets the search
+    ///
+    /// # Arguments
+    /// * `search` - The search
+    ///
+    /// # Returns
+    /// * `Self` - The DNS discovery instance
+    pub fn with_search(mut self, search: String) -> Self {
+        self.search = Some(search);
+        self
+    }
+
+    /// Sets the notification sender
+    ///
+    /// # Arguments
+    /// * `sender` - The notification sender
+    ///
+    /// # Returns
+    /// * `Self` - The DNS discovery instance
+    pub fn with_sender(
+        mut self,
+        sender: Option<Arc<NotificationSender>>,
+    ) -> Self {
+        self.sender = sender;
+        self
+    }
+
+    /// Reads system DNS resolver configuration
+    ///
+    /// # Returns
+    /// * `Result<(ResolverConfig, ResolverOpts)>` - Resolver configuration and options
+    fn read_system_conf(&self) -> Result<(ResolverConfig, ResolverOpts)> {
+        // read_system_conf returns ProtoError on macOS and NetError on other
+        // unix targets — `.into()` is required on macOS and a no-op elsewhere.
+        #[allow(clippy::useless_conversion)]
+        let (mut config, mut options) = read_system_conf()
+            .map_err(|e| Error::Resolve { source: e.into() })?;
+
+        if let Some(domain) = &self.domain
+            && let Ok(name) = Name::from_str(domain)
+        {
+            config.set_domain(name);
+        }
+
+        if let Some(search) = &self.search {
+            search
+                .split(',')
+                .filter_map(|s| Name::from_str(s).ok())
+                .for_each(|item| config.add_search(item));
+        }
+
+        if let Some(name_server) = &self.name_server {
+            let name_servers = name_server
+                .split(',')
+                .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+                .map(NameServerConfig::udp_and_tcp)
+                .collect::<Vec<_>>();
+            config = ResolverConfig::from_parts(
+                config.domain().cloned(),
+                config.search().to_vec(),
+                name_servers,
+            );
+        }
+
+        options.ip_strategy = if self.ipv4_only {
+            LookupIpStrategy::Ipv4Only
+        } else {
+            LookupIpStrategy::Ipv4AndIpv6
+        };
+
+        Ok((config, options))
+    }
+
+    /// Performs DNS lookups for configured hosts using tokio runtime
+    ///
+    /// # Returns
+    /// * `Result<(Vec<Option<LookupIp>>, Vec<String>)>` - Per-host DNS lookup
+    ///   results, index-aligned with `self.hosts` (`None` marks a failed
+    ///   lookup), plus the failed host names
+    async fn tokio_lookup_ip(
+        &self,
+    ) -> Result<(Vec<Option<LookupIp>>, Vec<String>)> {
+        let resolver = self.get_resolver().await?;
+
+        // One slot per host, in host order. The caller pairs each result with
+        // that host's port and weight by position, so a failed lookup MUST
+        // keep its slot: compacting the list would shift every later result
+        // onto the wrong host, sending one domain's traffic to another
+        // domain's port and weight.
+        let mut lookup_ips = Vec::with_capacity(self.hosts.len());
+        let mut failed_hosts = Vec::new();
+
+        let lookup_futures = self
+            .hosts
+            .iter()
+            .map(|(host, _, _)| resolver.lookup_ip(host.as_str()));
+
+        let results = join_all(lookup_futures).await;
+
+        for (index, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(lookup) => {
+                    lookup_ips.push(Some(lookup));
+                },
+                Err(e) => {
+                    let host = self
+                        .hosts
+                        .get(index)
+                        .map(|item| item.0.clone())
+                        .unwrap_or_default();
+                    error!(
+                        target: LOG_TARGET,
+                        error = %e,
+                        host,
+                        "dns lookup failed"
+                    );
+                    failed_hosts.push(host);
+                    lookup_ips.push(None);
+                },
+            }
+        }
+        if lookup_ips.iter().all(|lookup| lookup.is_none()) {
+            return Err(Error::Invalid {
+                message: "resolve dns failed".to_string(),
+            });
+        }
+        Ok((lookup_ips, failed_hosts))
+    }
+
+    /// Discovers backend services by resolving DNS
+    ///
+    /// # Returns
+    /// * `Result<(BTreeSet<Backend>, HashMap<u64, bool>, Vec<String>)>` -
+    ///   backends, enablement map, and hosts that failed to resolve
+    async fn run_discover(
+        &self,
+    ) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>, Vec<String>)> {
+        // Honour DNS TTLs: health-check / update loops may call us more often
+        // than records change; reuse the last set until the shortest TTL
+        // expires (clamped to [MIN, MAX]).
+        {
+            let cache = self.discovery_cache.lock().await;
+            if let Some(cached) = cache.as_ref()
+                && Instant::now() < cached.valid_until
+            {
+                debug!(
+                    hosts = ?self.hosts,
+                    remaining_ms = cached
+                        .valid_until
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                    "dns discover cache hit"
+                );
+                return Ok((
+                    cached.backends.clone(),
+                    HashMap::new(),
+                    cached.failed_hosts.clone(),
+                ));
+            }
+        }
+
+        let mut upstreams = BTreeSet::new();
+
+        debug!(
+            hosts = ?self.hosts,
+            "dns discover is running"
+        );
+
+        let (lookup_ips, failed_hosts) = self.tokio_lookup_ip().await?;
+
+        let now = Instant::now();
+        let mut valid_until = now + DISCOVERY_CACHE_MAX;
+        for lookup in lookup_ips.iter().flatten() {
+            let until = lookup.valid_until();
+            if until < valid_until {
+                valid_until = until;
+            }
+        }
+        if valid_until < now + DISCOVERY_CACHE_MIN {
+            valid_until = now + DISCOVERY_CACHE_MIN;
+        }
+        if valid_until > now + DISCOVERY_CACHE_MAX {
+            valid_until = now + DISCOVERY_CACHE_MAX;
+        }
+
+        for ((_, port, weight), lookup_ip) in
+            self.hosts.iter().zip(lookup_ips.iter())
+        {
+            // A failed lookup keeps its backends out of this refresh; the
+            // host stays in `failed_hosts` for the notification below.
+            let Some(lookup_ip) = lookup_ip else {
+                continue;
+            };
+            for ip in lookup_ip
+                .iter()
+                .filter(|ip| !self.ipv4_only || ip.is_ipv4())
+            {
+                // Build SocketAddr directly — avoid format! + to_socket_addrs.
+                let socket_addr = if port.is_empty() {
+                    StdSocketAddr::new(ip, 0)
+                } else {
+                    let port_num: u16 =
+                        port.parse().map_err(|e| Error::Invalid {
+                            message: format!(
+                                "invalid port {port} for host: {e}"
+                            ),
+                        })?;
+                    StdSocketAddr::new(ip, port_num)
+                };
+
+                upstreams.insert(Backend {
+                    addr: SocketAddr::Inet(socket_addr),
+                    weight: *weight,
+                    ext: Extensions::new(),
+                });
+            }
+        }
+
+        {
+            let mut cache = self.discovery_cache.lock().await;
+            *cache = Some(DiscoveryCache {
+                backends: upstreams.clone(),
+                failed_hosts: failed_hosts.clone(),
+                valid_until,
+            });
+        }
+
+        Ok((upstreams, HashMap::new(), failed_hosts))
+    }
+}
+
+#[async_trait]
+impl ServiceDiscovery for Dns {
+    async fn discover(
+        &self,
+    ) -> pingora::Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
+        let start_time = Instant::now();
+        let hosts: Vec<String> =
+            self.hosts.iter().map(|item| item.0.clone()).collect();
+        match self.run_discover().await {
+            Ok((upstreams, enablement, failed_hosts)) => {
+                let addrs: Vec<String> = upstreams
+                    .iter()
+                    .map(|item| item.addr.to_string())
+                    .collect();
+
+                info!(
+                    target: LOG_TARGET,
+                    hosts = hosts.join(","),
+                    addrs = addrs.join(","),
+                    elapsed = format!("{}ms", start_time.elapsed().as_millis()),
+                    "dns discover success"
+                );
+                if !failed_hosts.is_empty()
+                    && let Some(sender) = &self.sender
+                {
+                    sender
+                        .notify(NotificationData {
+                            category: "service_discover_fail".to_string(),
+                            level: NotificationLevel::Warn,
+                            message: format!(
+                                "dns discovery resolve failed: {failed_hosts:?}"
+                            ),
+                            ..Default::default()
+                        })
+                        .await;
+                }
+                return Ok((upstreams, enablement));
+            },
+            Err(e) => {
+                error!(
+                    target: LOG_TARGET,
+                    error = %e,
+                    hosts = hosts.join(","),
+                    elapsed = format!(
+                        "{}ms",
+                        start_time.elapsed().as_millis()
+                    ),
+                    "dns discover fail"
+                );
+                if let Some(sender) = &self.sender {
+                    sender
+                        .notify(NotificationData {
+                            category: "service_discover_fail".to_string(),
+                            level: NotificationLevel::Warn,
+                            message: format!(
+                                "dns discovery {:?}, error: {e}",
+                                self.hosts
+                            ),
+                            ..Default::default()
+                        })
+                        .await;
+                }
+                Err(e.into())
+            },
+        }
+    }
+}
+
+/// Creates a new DNS-based service discovery backend
+///
+/// # Arguments
+/// * `discovery` - The discovery configuration
+///
+/// # Returns
+/// * `Result<Backends>` - Configured service discovery backend
+pub fn new_dns_discover_backends(discovery: &Discovery) -> Result<Backends> {
+    let mut dns =
+        Dns::new(&discovery.addr, discovery.tls, discovery.ipv4_only)?;
+    if let Some(dns_server) = &discovery.dns_server {
+        dns = dns.with_name_server(dns_server.clone());
+    }
+    if let Some(domain) = &discovery.dns_domain {
+        dns = dns.with_domain(domain.clone());
+    }
+    if let Some(search) = &discovery.dns_search {
+        dns = dns.with_search(search.clone());
+    }
+    let backends =
+        Backends::new(Box::new(dns.with_sender(discovery.sender.clone())));
+    Ok(backends)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Dns, is_dns_discovery, new_dns_discover_backends};
+    use crate::Discovery;
+    use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn test_async_dns_discover() {
+        assert_eq!(true, is_dns_discovery("dns"));
+        let dns = Dns::new(&["api".to_string()], true, true)
+            .unwrap()
+            .with_name_server("8.8.8.8".to_string())
+            .with_domain("github.com".to_string());
+        let (ip_list, _) = dns.tokio_lookup_ip().await.unwrap();
+        assert_eq!(true, !ip_list.is_empty());
+
+        let (backends, _, _) = dns.run_discover().await.unwrap();
+        assert_eq!(true, !backends.is_empty());
+
+        // new dns discover backends
+        let result = new_dns_discover_backends(&Discovery {
+            addr: vec!["api".to_string()],
+            tls: true,
+            ipv4_only: true,
+            dns_server: Some("8.8.8.8".to_string()),
+            dns_domain: Some("github.com".to_string()),
+            dns_search: Some("local".to_string()),
+            sender: None,
+        });
+        assert_eq!(true, result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_dns_discover_partial_failure_keeps_alignment() {
+        // The first host cannot resolve, the second can, and they declare
+        // different ports. Results are paired with hosts by position, so the
+        // failed lookup must keep its slot: compacting used to shift the
+        // second host's IPs onto the first host's port.
+        let dns = Dns::new(
+            &[
+                "no-such-host-pingap-test:8080".to_string(),
+                "api:443".to_string(),
+            ],
+            true,
+            true,
+        )
+        .unwrap()
+        .with_name_server("8.8.8.8".to_string())
+        .with_domain("github.com".to_string());
+
+        let (ip_list, failed_hosts) = dns.tokio_lookup_ip().await.unwrap();
+        assert_eq!(2, ip_list.len());
+        assert_eq!(true, ip_list[0].is_none());
+        assert_eq!(true, ip_list[1].is_some());
+        assert_eq!(vec!["no-such-host-pingap-test".to_string()], failed_hosts);
+
+        let (backends, _, failed_hosts) = dns.run_discover().await.unwrap();
+        assert_eq!(true, !backends.is_empty());
+        assert_eq!(1, failed_hosts.len());
+        // Every backend belongs to the host that resolved - none may carry
+        // the failed host's port.
+        for backend in backends.iter() {
+            assert_eq!(
+                true,
+                backend.addr.to_string().ends_with(":443"),
+                "{} must not be on the failed host's port",
+                backend.addr
+            );
+        }
+    }
+}

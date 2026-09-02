@@ -1,0 +1,34 @@
+[package]
+name = "pingap-health"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "health"]
+description = "Health check handler for pingap"
+[lib]
+name = "pingap_health"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+humantime = { workspace = true }
+http = { workspace = true }
+pingora = { workspace = true }
+snafu = { workspace = true }
+strum = { workspace = true }
+tracing = { workspace = true }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = "3.21.0"
+tokio-test = "0.4.4"
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

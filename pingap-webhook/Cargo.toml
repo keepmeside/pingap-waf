@@ -1,0 +1,23 @@
+[package]
+name = "pingap-webhook"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "webhook"]
+description = "Webhook for pingap"
+
+
+[dependencies]
+async-trait = { workspace = true }
+local-ip-address = { workspace = true }
+pingap-core = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

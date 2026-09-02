@@ -1,0 +1,119 @@
+# The single version every crate inherits, read straight out of the manifest.
+# Scoped to the `[workspace.package]` section because the root `[package]` says
+# `version.workspace = true` and `[workspace.dependencies]` repeats a version
+# per member, so an unscoped match would find the wrong line.
+#
+# Not `cargo pkgid`: that reads Cargo.lock, which still holds the old number in
+# the one moment this is for - just after the manifest was bumped, before any
+# cargo command has refreshed the lock.
+VERSION := $(shell awk '/^\[workspace\.package\]/{f=1;next} \
+	f&&/^version = /{gsub(/"/,"",$$3);print $$3;exit}' Cargo.toml)
+
+lint:
+	typos
+	cargo clippy --features=full --all-targets --all -- --deny=warnings
+	# `geo` is not part of `full`, so it needs its own pass or it silently rots.
+	cargo clippy -p pingap-plugin --features=geo --all-targets -- --deny=warnings
+
+fmt:
+	cargo fmt --all
+
+build-web:
+	rm -rf dist \
+	&& cd web \
+	&& npm install && npm run  build \
+	&& cp -rf dist ../
+
+
+bench-all:
+	cargo bench -p pingap-core
+	cargo bench -p pingap-logger
+	cargo bench -p pingap-location
+
+bench:
+	cargo bench
+
+dev:
+	bacon run --  --features=full -- -c="~/tmp/pingap?separation=true&enable_history=true" --admin=pingap:123123@127.0.0.1:3018 --autoreload
+
+devfile:
+	bacon run --  --features=full -- -c="~/tmp/pingap.toml" --admin=pingap:123123@127.0.0.1:3018 --autoreload
+
+devetcd:
+	bacon run -- -- -c="etcd://127.0.0.1:2379/pingap?timeout=10s&connect_timeout=5s&enable_history=true" --admin=127.0.0.1:3018 --autoreload
+
+mermaid:
+	cargo run --bin generate-mermaid
+
+udeps:
+	cargo +nightly udeps
+
+msrv:
+	cargo msrv list
+
+
+bloat:
+	cargo bloat --release --crates --bin pingap
+
+outdated:
+	cargo outdated
+
+unused-features:
+	unused-features analyze
+
+test:
+	cargo test --workspace --features=full
+
+cov:
+	cargo llvm-cov --workspace --html --open
+
+release:
+	cargo build --release
+	ls -lh target/release
+
+release-full:
+	cargo build --release --features=full
+	ls -lh target/release
+
+
+release-all:
+	cargo build --release --features=full
+	mv target/release/pingap target/release/pingap-full
+	cargo build --release
+	ls -lh target/release
+
+release-perf:
+	cargo build --profile=release-perf --features=perf
+	ls -lh target/release-perf
+release-pyro:
+	cargo build --profile=release-perf --features=pyro
+	ls -lh target/release-perf
+
+publish:
+	make build-web
+	cargo publish --registry crates-io --no-verify
+
+hooks:
+	cp hooks/* .git/hooks/
+
+version:
+	git cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
+
+# Bump both places the version lives: [workspace.package] and the per-member
+# requirements in [workspace.dependencies]. `make bump V=1.2.3` sets it outright.
+bump-major:
+	./scripts/bump-version.sh major
+
+bump-minor:
+	./scripts/bump-version.sh minor
+
+bump-patch:
+	./scripts/bump-version.sh patch
+
+bump:
+	@test -n "$(V)" || { echo "usage: make bump V=1.2.3"; exit 1; }
+	./scripts/bump-version.sh $(V)
+
+# Fails when the two places disagree, which builds from a path checkout hide.
+check-version:
+	./scripts/bump-version.sh --check

@@ -1,0 +1,54 @@
+[package]
+name = "pingap-imageoptim"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "imageoptim"]
+description = "ImageOptim for pingap"
+
+
+[lib]
+name = "pingap_imageoptim"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+bytemuck = "1.25.0"
+bytes = { workspace = true }
+ctor = { workspace = true }
+http = { workspace = true }
+# Only the four formats this crate actually handles. `image`'s defaults enable
+# sixteen, and the unused `exr` decoder was dragging in pulp -> paste
+# (RUSTSEC-2024-0436) along with ten other codecs nothing here calls.
+image = { version = "0.25.10", default-features = false, features = [
+    "rayon",
+    "png",
+    "jpeg",
+    "webp",
+    "avif",
+] }
+imagequant = { version = "4.4.1", default-features = false }
+lodepng = "3.12.2"
+mozjpeg = "0.10.13"
+pingap-config = { workspace = true }
+pingap-core = { workspace = true }
+pingap-plugin = { workspace = true }
+pingora = { workspace = true }
+rgb = { version = "0.8.52", features = ["bytemuck"] }
+snafu = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+pretty_assertions = "1.4.1"
+tempfile = "3.21.0"
+tokio-test = "0.4.4"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+toml = { workspace = true }
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

@@ -1,0 +1,75 @@
+[package]
+name = "pingap-plugin"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "plugin"]
+description = "Plugin for pingap"
+
+
+[lib]
+name = "pingap_plugin"
+path = "src/lib.rs"
+
+[features]
+geo = []
+
+[dependencies]
+# Newer versions require 1.89.0
+tor-geoip = { version = "0.39", default-features = false, features = ["embedded-db"] }
+ahash = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bstr = { workspace = true }
+bytes = { workspace = true }
+bytesize = { workspace = true }
+chrono = { workspace = true }
+cookie = { workspace = true }
+ctor = { workspace = true }
+crc32fast = { workspace = true }
+dashmap = { workspace = true }
+fancy-regex = { workspace = true }
+glob = { workspace = true }
+hex = { workspace = true }
+http = { workspace = true }
+jsonwebtoken = { workspace = true }
+hmac-sha256 = { workspace = true }
+hmac-sha512 = { workspace = true, default-features = false }
+humantime = { workspace = true }
+mime_guess = { workspace = true }
+nanoid = { workspace = true }
+path-absolutize = { workspace = true }
+pingap-cache = { workspace = true }
+pingap-config = { workspace = true }
+pingap-core = { workspace = true }
+pingap-util = { workspace = true }
+pingora = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+smallvec = { workspace = true }
+snafu = { workspace = true }
+substring = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
+uuid = { workspace = true }
+
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = { workspace = true }
+tokio-test = "0.4.4"
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

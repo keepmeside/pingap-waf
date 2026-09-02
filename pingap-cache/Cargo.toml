@@ -1,0 +1,57 @@
+[package]
+name = "pingap-cache"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "cache"]
+description = "Cache for pingap"
+
+
+[lib]
+name = "pingap_cache"
+path = "src/lib.rs"
+
+[features]
+tracing = ["prometheus"]
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+bytesize = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+http = { workspace = true }
+humantime-serde = { workspace = true }
+path-absolutize = { workspace = true }
+pingap-core = { workspace = true }
+pingora = { workspace = true }
+prometheus = { workspace = true, optional = true }
+scopeguard = { workspace = true }
+serde = { workspace = true }
+serde_qs = { workspace = true }
+snafu = { workspace = true }
+strum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+filetime = "0.2.26"
+pretty_assertions = "1.4.1"
+tempfile = "3.21.0"
+tokio-test = "0.4.4"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[package.metadata.cargo-machete]
+ignored = ["humantime-serde"]
+
+[[bench]]
+name = "bench"
+harness = false
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

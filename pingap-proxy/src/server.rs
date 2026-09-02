@@ -1,0 +1,2240 @@
+// Copyright 2024-2025 Tree xie.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#[cfg(feature = "tracing")]
+use super::tracing::{
+    initialize_telemetry, inject_telemetry_headers, set_otel_request_attrs,
+    set_otel_upstream_attrs,
+};
+use super::{LOG_TARGET, ServerConf, set_append_proxy_headers};
+use crate::ServerLocationsProvider;
+use async_trait::async_trait;
+use bstr::ByteSlice;
+use bytes::Bytes;
+use bytes::BytesMut;
+use http::StatusCode;
+use pingap_acme::handle_lets_encrypt;
+use pingap_certificate::CertificateProvider;
+use pingap_certificate::{GlobalCertificate, TlsSettingParams};
+use pingap_config::ConfigManager;
+use pingap_core::BackgroundTask;
+#[cfg(feature = "tracing")]
+use pingap_core::HttpResponse;
+use pingap_core::LocationInstance;
+use pingap_core::PluginProvider;
+use pingap_core::{
+    CompressionStat, Ctx, PluginStep, RequestPluginResult,
+    ResponseBodyPluginResult, ResponsePluginResult, get_cache_key,
+};
+use pingap_core::{HTTP_HEADER_NAME_X_REQUEST_ID, get_digest_detail};
+use pingap_core::{NamedPlugin, new_internal_error};
+use pingap_location::{Location, LocationProvider};
+use pingap_logger::{Parser, parse_access_log_directive};
+#[cfg(feature = "tracing")]
+use pingap_otel::{KeyValue, trace::Span};
+#[cfg(feature = "tracing")]
+use pingap_performance::{
+    Prometheus, new_prometheus, new_prometheus_push_service,
+};
+use pingap_performance::{accept_request, end_request};
+use pingap_upstream::{Upstream, UpstreamProvider};
+use pingora::apps::HttpServerOptions;
+use pingora::cache::cache_control::CacheControl;
+use pingora::cache::filters::resp_cacheable;
+use pingora::cache::key::CacheHashKey;
+use pingora::cache::{
+    CacheKey, CacheMetaDefaults, NoCacheReason, RespCacheable,
+};
+use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::listeners::TcpSocketOptions;
+use pingora::modules::http::HttpModules;
+use pingora::modules::http::compression::{
+    ResponseCompression, ResponseCompressionBuilder,
+};
+use pingora::modules::http::grpc_web::{GrpcWeb, GrpcWebBridge};
+use pingora::protocols::Digest;
+use pingora::protocols::http::error_resp;
+use pingora::proxy::{FailToProxy, HttpProxy, http_proxy_service};
+use pingora::proxy::{ProxyHttp, Session};
+use pingora::server::configuration;
+use pingora::services::listening::Service;
+use pingora::upstreams::peer::{HttpPeer, Peer};
+use scopeguard::defer;
+use snafu::Snafu;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::Sender;
+use tracing::{debug, error, info};
+
+/// Access-log lines dropped because the async logger channel was full.
+static ACCESS_LOG_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Common error, category: {category}, {message}"))]
+    Common { category: String, message: String },
+}
+type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[inline]
+pub fn get_start_time(started_at: &Instant) -> i32 {
+    // the offset of start time
+    let value = started_at.elapsed().as_millis() as i32;
+    if value == 0 {
+        return -1;
+    }
+    -value
+}
+
+#[inline]
+pub fn get_latency(started_at: &Instant, value: &Option<i32>) -> Option<i32> {
+    let Some(value) = value else {
+        return None;
+    };
+    if *value >= 0 {
+        return None;
+    }
+    let latency = started_at.elapsed().as_millis() as i32 + *value;
+
+    Some(latency)
+}
+
+/// Core HTTP proxy server implementation that handles request processing, caching, and monitoring.
+/// Manages server configuration, connection lifecycle, and integration with various modules.
+pub struct Server {
+    /// Server name identifier used for logging and metrics
+    name: String,
+
+    /// Whether this instance serves admin endpoints and functionality
+    admin: bool,
+
+    /// Comma-separated list of listening addresses (e.g. "127.0.0.1:8080,127.0.0.1:8081")
+    addr: String,
+
+    /// Counter tracking total number of accepted connections since server start
+    accepted: AtomicU64,
+
+    /// Counter tracking number of currently active request processing operations
+    processing: AtomicI32,
+
+    /// Optional parser for customizing access log format and output
+    log_parser: Option<Parser>,
+
+    /// HTML/JSON template used for rendering error responses
+    error_template: String,
+
+    /// Number of worker threads for request processing. None uses default.
+    threads: Option<usize>,
+
+    /// OpenSSL cipher list string for TLS connections
+    tls_cipher_list: Option<String>,
+
+    /// TLS 1.3 cipher suites configuration
+    tls_ciphersuites: Option<String>,
+
+    /// Minimum TLS protocol version to accept (e.g. "TLSv1.2")
+    tls_min_version: Option<String>,
+
+    /// Maximum TLS protocol version to accept
+    tls_max_version: Option<String>,
+
+    /// Whether HTTP/2 protocol is enabled
+    enabled_h2: bool,
+
+    /// Whether Let's Encrypt certificate automation is enabled
+    lets_encrypt_enabled: bool,
+
+    /// Whether to use global certificate store for TLS
+    global_certificates: bool,
+
+    /// TCP socket configuration options (keepalive, TCP fastopen etc)
+    tcp_socket_options: Option<TcpSocketOptions>,
+
+    /// Prometheus metrics registry when metrics collection is enabled
+    #[cfg(feature = "tracing")]
+    prometheus: Option<Arc<Prometheus>>,
+
+    /// Whether to push metrics to remote Prometheus pushgateway
+    prometheus_push_mode: bool,
+
+    /// Prometheus metrics endpoint path or push gateway URL
+    #[cfg(feature = "tracing")]
+    prometheus_metrics: String,
+
+    /// Whether OpenTelemetry tracing is enabled
+    #[cfg(feature = "tracing")]
+    enabled_otel: bool,
+
+    /// List of enabled modules (e.g. "grpc-web")
+    modules: Option<Vec<String>>,
+
+    /// Whether to enable server-timing header
+    enable_server_timing: bool,
+
+    // downstream read timeout
+    downstream_read_timeout: Option<Duration>,
+    // downstream write timeout
+    downstream_write_timeout: Option<Duration>,
+
+    // server locations
+    server_locations_provider: Arc<dyn ServerLocationsProvider>,
+    // plugin loader
+    plugin_provider: Arc<dyn PluginProvider>,
+
+    // locations
+    location_provider: Arc<dyn LocationProvider>,
+
+    // upstreams
+    upstream_provider: Arc<dyn UpstreamProvider>,
+
+    // certificates
+    certificate_provider: Arc<dyn CertificateProvider>,
+
+    // config manager
+    config_manager: Arc<ConfigManager>,
+
+    // logger
+    access_logger: Option<Sender<BytesMut>>,
+}
+
+pub struct ServerServices {
+    pub lb: Service<HttpProxy<Server>>,
+}
+
+const META_DEFAULTS: CacheMetaDefaults =
+    CacheMetaDefaults::new(|_| Some(Duration::from_secs(1)), 1, 1);
+
+static HTTP_500_RESPONSE: LazyLock<ResponseHeader> =
+    LazyLock::new(|| error_resp::gen_error_response(500));
+
+#[derive(Clone)]
+pub struct AppContext {
+    pub logger: Option<Sender<BytesMut>>,
+    pub config_manager: Arc<ConfigManager>,
+    pub server_locations_provider: Arc<dyn ServerLocationsProvider>,
+    pub location_provider: Arc<dyn LocationProvider>,
+    pub upstream_provider: Arc<dyn UpstreamProvider>,
+    pub plugin_provider: Arc<dyn PluginProvider>,
+    pub certificate_provider: Arc<dyn CertificateProvider>,
+}
+
+impl Server {
+    /// Creates a new HTTP proxy server instance with the given configuration.
+    /// Initializes all server components including:
+    /// - TCP socket options
+    /// - TLS settings
+    /// - Prometheus metrics (if enabled)
+    /// - Threading configuration
+    pub fn new(conf: &ServerConf, ctx: AppContext) -> Result<Self> {
+        debug!(target: LOG_TARGET, config = conf.to_string(), "new server");
+        let mut p = None;
+        let (access_log, _) =
+            parse_access_log_directive(conf.access_log.as_ref());
+        if let Some(access_log) = access_log {
+            p = Some(Parser::from(access_log.as_str()));
+        }
+        let tcp_socket_options = if conf.tcp_fastopen.is_some()
+            || conf.tcp_keepalive.is_some()
+            || conf.reuse_port.is_some()
+        {
+            let mut opts = TcpSocketOptions::default();
+            opts.tcp_fastopen = conf.tcp_fastopen;
+            opts.tcp_keepalive.clone_from(&conf.tcp_keepalive);
+            opts.so_reuseport = conf.reuse_port;
+            Some(opts)
+        } else {
+            None
+        };
+        let prometheus_metrics =
+            conf.prometheus_metrics.clone().unwrap_or_default();
+        #[cfg(feature = "tracing")]
+        let prometheus = if prometheus_metrics.is_empty() {
+            None
+        } else {
+            let p = new_prometheus(&conf.name).map_err(|e| Error::Common {
+                category: "prometheus".to_string(),
+                message: e.to_string(),
+            })?;
+            Some(Arc::new(p))
+        };
+        let s = Server {
+            name: conf.name.clone(),
+            admin: conf.admin,
+            accepted: AtomicU64::new(0),
+            processing: AtomicI32::new(0),
+            addr: conf.addr.clone(),
+            log_parser: p,
+            error_template: conf.error_template.clone(),
+            tls_cipher_list: conf.tls_cipher_list.clone(),
+            tls_ciphersuites: conf.tls_ciphersuites.clone(),
+            tls_min_version: conf.tls_min_version.clone(),
+            tls_max_version: conf.tls_max_version.clone(),
+            threads: conf.threads,
+            lets_encrypt_enabled: false,
+            global_certificates: conf.global_certificates,
+            enabled_h2: conf.enabled_h2,
+            tcp_socket_options,
+            prometheus_push_mode: prometheus_metrics.contains("://"),
+            #[cfg(feature = "tracing")]
+            enabled_otel: conf.otlp_exporter.is_some(),
+            #[cfg(feature = "tracing")]
+            prometheus_metrics,
+            #[cfg(feature = "tracing")]
+            prometheus,
+            enable_server_timing: conf.enable_server_timing,
+            modules: conf.modules.clone(),
+            downstream_read_timeout: conf.downstream_read_timeout,
+            downstream_write_timeout: conf.downstream_write_timeout,
+            server_locations_provider: ctx.server_locations_provider,
+            location_provider: ctx.location_provider,
+            upstream_provider: ctx.upstream_provider,
+            plugin_provider: ctx.plugin_provider,
+            certificate_provider: ctx.certificate_provider,
+            access_logger: ctx.logger,
+            config_manager: ctx.config_manager,
+        };
+        Ok(s)
+    }
+    /// Enable lets encrypt proxy plugin for handling ACME challenges at
+    /// `/.well-known/acme-challenge` path
+    pub fn enable_lets_encrypt(&mut self) {
+        self.lets_encrypt_enabled = true;
+    }
+    /// Get the prometheus push service configuration if enabled.
+    /// Returns a tuple of (metrics endpoint, service future) if push mode is configured.
+    pub fn get_prometheus_push_service(
+        &self,
+    ) -> Option<Box<dyn BackgroundTask>> {
+        if !self.prometheus_push_mode {
+            return None;
+        }
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "tracing")] {
+                let Some(prometheus) = &self.prometheus else {
+                    return None;
+                };
+                match new_prometheus_push_service(
+                    &self.name,
+                    &self.prometheus_metrics,
+                    prometheus.clone(),
+                ) {
+                    Ok(service) => Some(service),
+                    Err(e) => {
+                        error!(
+                            target: LOG_TARGET,
+                            error = %e,
+                            name = self.name,
+                            "new prometheus push service fail"
+                        );
+                        None
+                    },
+                }
+            } else {
+               None
+            }
+        }
+    }
+
+    /// Starts the server and sets up TCP/TLS listening endpoints.
+    /// - Configures listeners for each address
+    /// - Sets up TLS if enabled
+    /// - Initializes HTTP/2 support
+    /// - Configures thread pool
+    pub fn run(
+        self,
+        conf: Arc<configuration::ServerConf>,
+    ) -> Result<ServerServices> {
+        let addr = self.addr.clone();
+        let tcp_socket_options = self.tcp_socket_options.clone();
+
+        let name = self.name.clone();
+        let mut dynamic_cert = None;
+        // tls
+        if self.global_certificates {
+            dynamic_cert =
+                Some(GlobalCertificate::new(self.certificate_provider.clone()));
+        }
+
+        let is_tls = dynamic_cert.is_some();
+
+        let enabled_h2 = self.enabled_h2;
+        let threads = if let Some(threads) = self.threads {
+            // use cpus when set threads:0
+            let value = if threads == 0 {
+                num_cpus::get()
+            } else {
+                threads
+            };
+            Some(value)
+        } else {
+            None
+        };
+
+        info!(
+            target: LOG_TARGET,
+            name,
+            addr,
+            threads,
+            is_tls,
+            h2 = enabled_h2,
+            tcp_socket_options = format!("{:?}", tcp_socket_options),
+            "server is listening"
+        );
+        let cipher_list = self.tls_cipher_list.clone();
+        let cipher_suites = self.tls_ciphersuites.clone();
+        let tls_min_version = self.tls_min_version.clone();
+        let tls_max_version = self.tls_max_version.clone();
+        let mut lb = http_proxy_service(&conf, self);
+        // use h2c if not tls and enable http2
+        if !is_tls
+            && enabled_h2
+            && let Some(http_logic) = lb.app_logic_mut()
+        {
+            let mut http_server_options = HttpServerOptions::default();
+            http_server_options.h2c = true;
+            http_logic.server_options = Some(http_server_options);
+        }
+        lb.threads = threads;
+        // support listen multi address
+        for addr in addr.split(',') {
+            // tls
+            if let Some(dynamic_cert) = &dynamic_cert {
+                let tls_settings = dynamic_cert
+                    .new_tls_settings(&TlsSettingParams {
+                        server_name: name.clone(),
+                        enabled_h2,
+                        cipher_list: cipher_list.clone(),
+                        cipher_suites: cipher_suites.clone(),
+                        tls_min_version: tls_min_version.clone(),
+                        tls_max_version: tls_max_version.clone(),
+                    })
+                    .map_err(|e| Error::Common {
+                        category: "tls".to_string(),
+                        message: e.to_string(),
+                    })?;
+                lb.add_tls_with_settings(
+                    addr,
+                    tcp_socket_options.clone(),
+                    tls_settings,
+                );
+            } else if let Some(opt) = &tcp_socket_options {
+                lb.add_tcp_with_settings(addr, opt.clone());
+            } else {
+                lb.add_tcp(addr);
+            }
+        }
+        Ok(ServerServices { lb })
+    }
+    /// Handles requests to the admin interface.
+    /// Processes admin-specific plugins and returns response if handled.
+    async fn serve_admin(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<bool> {
+        if let Some(plugin) = self.plugin_provider.get("pingap:admin") {
+            let result = plugin
+                .handle_request(PluginStep::Request, session, ctx)
+                .await?;
+            if let RequestPluginResult::Respond(resp) = result {
+                ctx.state.status = Some(resp.status);
+                resp.send(session).await?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    #[inline]
+    fn initialize_context(&self, session: &mut Session, ctx: &mut Ctx) {
+        session.set_read_timeout(self.downstream_read_timeout);
+        session.set_write_timeout(self.downstream_write_timeout);
+
+        if let Some(stream) = session.stream() {
+            ctx.conn.id = stream.id() as usize;
+        }
+        // get digest of timing and tls
+        if let Some(digest) = session.digest() {
+            let digest_detail = get_digest_detail(digest);
+            ctx.timing.connection_duration = digest_detail.connection_time;
+            ctx.conn.reused = digest_detail.connection_reused;
+
+            if !ctx.conn.reused
+                && digest_detail.tls_established
+                    >= digest_detail.tcp_established
+            {
+                let latency = digest_detail.tls_established
+                    - digest_detail.tcp_established;
+                ctx.timing.tls_handshake = Some(latency as i32);
+            }
+            ctx.conn.tls_cipher = digest_detail.tls_cipher;
+            ctx.conn.tls_version = digest_detail.tls_version;
+        };
+        accept_request();
+
+        ctx.state.processing_count =
+            self.processing.fetch_add(1, Ordering::Relaxed) + 1;
+        ctx.state.accepted_count =
+            self.accepted.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some((remote_addr, remote_port)) =
+            pingap_core::get_remote_addr(session)
+        {
+            ctx.conn.remote_addr = Some(remote_addr);
+            ctx.conn.remote_port = Some(remote_port);
+        }
+        if let Some(addr) =
+            session.server_addr().and_then(|addr| addr.as_inet())
+        {
+            ctx.conn.server_addr = Some(addr.ip().to_string());
+            ctx.conn.server_port = Some(addr.port());
+        }
+    }
+
+    #[inline]
+    async fn find_and_apply_location(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<()> {
+        let header = session.req_header();
+        let host = pingap_core::get_host(header).unwrap_or_default();
+        let path = header.uri.path();
+
+        // locations not found
+        let Some(route) = self.server_locations_provider.get(&self.name) else {
+            return Ok(());
+        };
+
+        // Host-bucket index shrinks candidates; weight order is preserved so
+        // the first full match equals a linear scan of `route.ordered`.
+        let matched_info = route
+            .host_index
+            .candidate_indices(host)
+            .into_iter()
+            .find_map(|idx| {
+                let name = route.ordered.get(idx)?;
+                let location = self.location_provider.get(name)?;
+                let (matched, captures) = location.match_host_path(host, path);
+                if matched && location.match_conditions(header) {
+                    Some((location, captures))
+                } else {
+                    None
+                }
+            });
+
+        let Some((location, captures)) = matched_info else {
+            return Ok(());
+        };
+
+        // only execute all subsequent operations after successtracingy matching location
+        ctx.upstream.location = location.name.clone();
+        ctx.upstream.location_instance = Some(location.clone());
+        ctx.upstream.max_retries = location.max_retries;
+        ctx.upstream.max_retry_window = location.max_retry_window;
+        if let Some(captures) = captures {
+            ctx.extend_variables(captures);
+        }
+
+        debug!(
+            target: LOG_TARGET,
+            "variables: {:?}",
+            ctx.features.as_ref().map(|item| &item.variables)
+        );
+
+        // set prometheus stats
+        #[cfg(feature = "tracing")]
+        if let Some(prom) = &self.prometheus {
+            prom.before(&ctx.upstream.location);
+        }
+
+        // validate content length
+        location
+            .validate_content_length(header)
+            .map_err(|e| new_internal_error(413, e))?;
+
+        // limit processing
+        let (accepted, processing) = location.on_request()?;
+        ctx.state.location_accepted_count = accepted;
+        ctx.state.location_processing_count = processing;
+
+        // initialize gRPC Web
+        if location.support_grpc_web() {
+            let grpc_web = session
+                .downstream_modules_ctx
+                .get_mut::<GrpcWebBridge>()
+                .ok_or_else(|| {
+                    new_internal_error(
+                        500,
+                        "grpc web bridge module should be added",
+                    )
+                })?;
+            grpc_web.init();
+        }
+
+        // initialize plugins and execute
+        ctx.plugins = self.get_context_plugins(location.clone());
+        let _ = self
+            .handle_request_plugin(PluginStep::EarlyRequest, session, ctx)
+            .await?;
+
+        Ok(())
+    }
+
+    #[inline]
+    async fn handle_admin_request(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> Option<pingora::Result<bool>> {
+        if self.admin {
+            match self.serve_admin(session, ctx).await {
+                Ok(true) => return Some(Ok(true)), // handled
+                Ok(false) => {}, // not admin request, continue
+                Err(e) => return Some(Err(e)), // error
+            }
+        }
+        None // not admin service, continue
+    }
+    #[inline]
+    async fn handle_acme_challenge(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> Option<pingora::Result<bool>> {
+        if self.lets_encrypt_enabled {
+            return match handle_lets_encrypt(
+                self.config_manager.clone(),
+                session,
+                ctx,
+            )
+            .await
+            {
+                Ok(true) => Some(Ok(true)), // handle ACME request
+                Ok(false) => None,          // not ACME request, continue
+                Err(e) => Some(Err(e)),
+            };
+        }
+        None // not enable ACME, continue
+    }
+    #[inline]
+    #[cfg(feature = "tracing")]
+    async fn handle_metrics_request(
+        &self,
+        session: &mut Session,
+        _ctx: &mut Ctx,
+    ) -> Option<pingora::Result<bool>> {
+        let header = session.req_header();
+        let should_handle = !self.prometheus_push_mode
+            && self.prometheus.is_some()
+            && header.uri.path() == self.prometheus_metrics;
+
+        if should_handle {
+            let prom = self.prometheus.as_ref().unwrap(); // is_some() 检查已通过
+            let result = async {
+                let body =
+                    prom.metrics().map_err(|e| new_internal_error(500, e))?;
+                HttpResponse::text(body).send(session).await?;
+                Ok(true)
+            }
+            .await;
+            return Some(result);
+        }
+        None
+    }
+    #[inline]
+    async fn handle_standard_request(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<bool> {
+        let Some(location) = &ctx.upstream.location_instance else {
+            let header = session.req_header();
+            let host = pingap_core::get_host(header).unwrap_or_default();
+            let message = format!(
+                "No matching location, host:{host} path:{}",
+                header.uri.path()
+            );
+            return Err(pingap_core::new_internal_error(500, message));
+        };
+
+        debug!(
+            target: LOG_TARGET,
+            server = self.name,
+            location = location.name(),
+            "location is matched"
+        );
+
+        let variables = if let Some(features) = &mut ctx.features {
+            features.variables.take()
+        } else {
+            None
+        };
+
+        let (_, capture_variables) =
+            location.rewrite(session.req_header_mut(), variables);
+        if let Some(capture_variables) = capture_variables {
+            ctx.extend_variables(capture_variables);
+        }
+
+        if self
+            .handle_request_plugin(PluginStep::Request, session, ctx)
+            .await?
+        {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+}
+
+const MODULE_GRPC_WEB: &str = "grpc-web";
+
+impl Server {
+    #[inline]
+    fn get_context_plugins(
+        &self,
+        location: Arc<Location>,
+    ) -> Option<Vec<NamedPlugin>> {
+        let plugins = location.plugins.as_ref()?;
+
+        let location_plugins: Vec<_> = plugins
+            .iter()
+            .filter_map(|name| {
+                self.plugin_provider
+                    .get(name)
+                    .map(|plugin| (name.clone(), plugin))
+            })
+            .collect();
+
+        // use then_some to handle empty collection
+        (!location_plugins.is_empty()).then_some(location_plugins)
+    }
+
+    /// Executes request plugins in the configured chain
+    /// Returns true if a plugin handled the request completely
+    #[inline]
+    pub async fn handle_request_plugin(
+        &self,
+        step: PluginStep,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<bool> {
+        let plugins = match ctx.plugins.take() {
+            Some(p) => p,
+            None => return Ok(false), // No plugins, exit early.
+        };
+        if plugins.is_empty() {
+            return Ok(false);
+        }
+
+        let result = async {
+            let mut request_done = false;
+            for (name, plugin) in plugins.iter() {
+                let now = Instant::now();
+                let result = plugin.handle_request(step, session, ctx).await?;
+                let elapsed = now.elapsed().as_millis() as u32;
+
+                // extract repeated logging and timing logic
+                let mut record_time = |msg: &str| {
+                    debug!(
+                        target: LOG_TARGET,
+                        name = &**name,
+                        elapsed,
+                        step = step.to_string(),
+                        "{msg}"
+                    );
+                    ctx.add_plugin_processing_time(name, elapsed);
+                };
+
+                match result {
+                    RequestPluginResult::Skipped => {
+                        continue;
+                    },
+                    RequestPluginResult::Respond(resp) => {
+                        record_time("request plugin create new response");
+                        // ignore status >= 900
+                        if resp.status.as_u16() < 900 {
+                            ctx.state.status = Some(resp.status);
+                            resp.send(session).await?;
+                        }
+                        request_done = true;
+                        break;
+                    },
+                    RequestPluginResult::Continue => {
+                        record_time("request plugin run and continue request");
+                    },
+                }
+            }
+            Ok(request_done)
+        }
+        .await;
+        ctx.plugins = Some(plugins);
+        result
+    }
+
+    /// Run response plugins
+    #[inline]
+    pub async fn handle_response_plugin(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        upstream_response: &mut ResponseHeader,
+    ) -> pingora::Result<()> {
+        let plugins = match ctx.plugins.take() {
+            Some(p) => p,
+            None => return Ok(()), // No plugins, exit early.
+        };
+        if plugins.is_empty() {
+            return Ok(());
+        }
+
+        let result = async {
+            for (name, plugin) in plugins.iter() {
+                let now = Instant::now();
+                if let ResponsePluginResult::Modified = plugin
+                    .handle_response(session, ctx, upstream_response)
+                    .await?
+                {
+                    let elapsed = now.elapsed().as_millis() as u32;
+                    debug!(
+                        target: LOG_TARGET,
+                        name = &**name, elapsed, "response plugin modify headers"
+                    );
+                    ctx.add_plugin_processing_time(name, elapsed);
+                };
+            }
+            Ok(())
+        }
+        .await;
+        ctx.plugins = Some(plugins);
+        result
+    }
+
+    #[inline]
+    pub fn handle_upstream_response_plugin(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        upstream_response: &mut ResponseHeader,
+    ) -> pingora::Result<()> {
+        let plugins = match ctx.plugins.take() {
+            Some(p) => p,
+            None => return Ok(()), // No plugins, exit early.
+        };
+        if plugins.is_empty() {
+            return Ok(());
+        }
+
+        let result = {
+            for (name, plugin) in plugins.iter() {
+                let now = Instant::now();
+                if let ResponsePluginResult::Modified = plugin
+                    .handle_upstream_response(session, ctx, upstream_response)?
+                {
+                    let elapsed = now.elapsed().as_millis() as u32;
+                    debug!(
+                        target: LOG_TARGET,
+                        name = &**name,
+                        elapsed,
+                        "upstream response plugin modify headers"
+                    );
+                    ctx.add_plugin_processing_time(name, elapsed);
+                };
+            }
+            Ok(())
+        };
+        ctx.plugins = Some(plugins);
+        result
+    }
+
+    #[inline]
+    pub fn handle_upstream_response_body_plugin(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<()> {
+        // Same reasoning as handle_response_body_plugin: after the 101 these
+        // bytes are the upgraded protocol, not a body to rewrite.
+        if session.was_upgraded() {
+            return Ok(());
+        }
+        let plugins = match ctx.plugins.take() {
+            Some(p) => p,
+            None => return Ok(()), // No plugins, exit early.
+        };
+        if plugins.is_empty() {
+            return Ok(());
+        }
+
+        let result = {
+            for (name, plugin) in plugins.iter() {
+                let now = Instant::now();
+                match plugin.handle_upstream_response_body(
+                    session,
+                    ctx,
+                    body,
+                    end_of_stream,
+                )? {
+                    ResponseBodyPluginResult::PartialReplaced
+                    | ResponseBodyPluginResult::FullyReplaced => {
+                        let elapsed = now.elapsed().as_millis() as u32;
+                        ctx.add_plugin_processing_time(name, elapsed);
+                        debug!(
+                            target: LOG_TARGET,
+                            name = &**name, elapsed, "response body plugin modify body"
+                        );
+                    },
+                    _ => {},
+                }
+            }
+            Ok(())
+        };
+        ctx.plugins = Some(plugins);
+        result
+    }
+
+    #[inline]
+    pub fn handle_response_body_plugin(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<()> {
+        // Once the upstream answered 101 the connection carries the upgraded
+        // protocol, not an HTTP body, so a body-rewriting plugin would corrupt
+        // it (#114, sub_filter breaking websockets).
+        //
+        // The test is `was_upgraded`, which is only true after the backend's
+        // 101, never `is_upgrade_req`: pingora treats any HTTP/1.1 request
+        // carrying an `Upgrade` header as an upgrade request without checking
+        // its value, so keying off the request would let a client turn plugins
+        // off with one header.
+        if session.was_upgraded() {
+            return Ok(());
+        }
+        let plugins = match ctx.plugins.take() {
+            Some(p) => p,
+            None => return Ok(()), // No plugins, exit early.
+        };
+        if plugins.is_empty() {
+            return Ok(());
+        }
+        let result = {
+            for (name, plugin) in plugins.iter() {
+                let now = Instant::now();
+                match plugin.handle_response_body(
+                    session,
+                    ctx,
+                    body,
+                    end_of_stream,
+                )? {
+                    ResponseBodyPluginResult::PartialReplaced
+                    | ResponseBodyPluginResult::FullyReplaced => {
+                        let elapsed = now.elapsed().as_millis() as u32;
+                        ctx.add_plugin_processing_time(name, elapsed);
+                        debug!(
+                            target: LOG_TARGET,
+                            name = &**name, elapsed, "response body plugin modify body"
+                        );
+                    },
+                    _ => {},
+                }
+            }
+            Ok(())
+        };
+        ctx.plugins = Some(plugins);
+        result
+    }
+}
+
+#[inline]
+fn get_upstream_with_variables(
+    upstream: &str,
+    ctx: &Ctx,
+    upstreams: &dyn UpstreamProvider,
+) -> Option<Arc<Upstream>> {
+    let key = upstream
+        .strip_prefix('$')
+        .and_then(|var_name| ctx.get_variable(var_name))
+        .unwrap_or(upstream);
+    upstreams.get(key)
+}
+
+#[async_trait]
+impl ProxyHttp for Server {
+    type CTX = Ctx;
+    fn new_ctx(&self) -> Self::CTX {
+        debug!(target: LOG_TARGET, "new ctx");
+        Ctx::new()
+    }
+    fn init_downstream_modules(&self, modules: &mut HttpModules) {
+        debug!(target: LOG_TARGET, "--> init downstream modules");
+        defer!(debug!(target: LOG_TARGET, "<-- init downstream modules"););
+        // Add disabled downstream compression module by default
+        modules.add_module(ResponseCompressionBuilder::enable(0));
+
+        self.modules.iter().flatten().for_each(|item| {
+            if item == MODULE_GRPC_WEB {
+                modules.add_module(Box::new(GrpcWeb));
+            }
+        });
+    }
+    /// Handles early request processing before main request handling.
+    /// Key responsibilities:
+    /// - Sets up connection tracking and metrics
+    /// - Records timing information
+    /// - Initializes OpenTelemetry tracing
+    /// - Matches request to location configuration
+    /// - Validates request parameters
+    /// - Initializes compression and gRPC modules if needed
+    async fn early_request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> early request filter");
+        defer!(debug!(target: LOG_TARGET, "<-- early request filter"););
+
+        self.initialize_context(session, ctx);
+        #[cfg(feature = "tracing")]
+        if self.enabled_otel {
+            initialize_telemetry(&self.name, session, ctx);
+        }
+        self.find_and_apply_location(session, ctx).await?;
+
+        Ok(())
+    }
+    /// Main request processing filter.
+    /// Handles:
+    /// - Admin interface requests
+    /// - Let's Encrypt certificate challenges
+    /// - Location-specific processing
+    /// - URL rewriting
+    /// - Plugin execution
+    async fn request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<bool>
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> request filter");
+        defer!(debug!(target: LOG_TARGET, "<-- request filter"););
+        // try to handle special requests in order
+        // admin route
+        if let Some(result) = self.handle_admin_request(session, ctx).await {
+            return result;
+        }
+        // acme http challengt
+        if let Some(result) = self.handle_acme_challenge(session, ctx).await {
+            return result;
+        }
+        // prometheus metrics pull request
+        #[cfg(feature = "tracing")]
+        if let Some(result) = self.handle_metrics_request(session, ctx).await {
+            return result;
+        }
+
+        self.handle_standard_request(session, ctx).await
+    }
+
+    /// Filters requests before sending to upstream.
+    /// Allows modifying request before proxying.
+    async fn proxy_upstream_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<bool>
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> proxy upstream filter");
+        defer!(debug!(target: LOG_TARGET, "<-- proxy upstream filter"););
+        let done = self
+            .handle_request_plugin(PluginStep::ProxyUpstream, session, ctx)
+            .await?;
+
+        if done {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Selects and configures the upstream peer to proxy to.
+    /// Handles upstream connection pooling and health checking.
+    async fn upstream_peer(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<Box<HttpPeer>> {
+        debug!(target: LOG_TARGET, "--> upstream peer");
+        defer!(debug!(target: LOG_TARGET, "<-- upstream peer"););
+
+        let peer = ctx
+            .upstream
+            .location_instance
+            .clone()
+            .as_ref()
+            .and_then(|location| {
+                let upstream = if ctx.upstream.name.is_empty() {
+                    get_upstream_with_variables(
+                        location.upstream(),
+                        ctx,
+                        self.upstream_provider.as_ref(),
+                    )?
+                } else {
+                    // override upstream by other plugin
+                    get_upstream_with_variables(
+                        &ctx.upstream.name,
+                        ctx,
+                        self.upstream_provider.as_ref(),
+                    )?
+                };
+                ctx.upstream.upstream_instance = Some(upstream.clone());
+                Some(upstream)
+            })
+            .and_then(|upstream| {
+                ctx.upstream.connected_count = upstream.connected();
+                ctx.upstream.name = upstream.name.clone();
+                #[cfg(feature = "tracing")]
+                if let Some(features) = &ctx.features
+                    && let Some(tracer) = &features.otel_tracer
+                {
+                    let name = format!("upstream.{}", upstream.name);
+                    let mut span = tracer.new_upstream_span(&name);
+                    span.set_attribute(KeyValue::new(
+                        "upstream.connected",
+                        ctx.upstream.connected_count.unwrap_or_default() as i64,
+                    ));
+                    let features = ctx.features.get_or_insert_default();
+                    features.upstream_span = Some(span);
+                }
+                // Count processing only on the first attempt: pingora re-calls
+                // upstream_peer on every retry, and completed() runs once.
+                let first_attempt = ctx.upstream.retries == 0;
+                upstream
+                    .new_http_peer(
+                        session,
+                        &mut ctx.conn.client_ip,
+                        first_attempt,
+                    )
+                    .inspect(|peer| {
+                        ctx.upstream.address = peer.address().to_string();
+                    })
+            })
+            .ok_or_else(|| {
+                new_internal_error(
+                    503,
+                    format!(
+                        "No available upstream for {}",
+                        ctx.upstream.location
+                    ),
+                )
+            })?;
+
+        // start connect to upstream
+        ctx.timing.upstream_connect =
+            Some(get_start_time(&ctx.timing.created_at));
+
+        Ok(Box::new(peer))
+    }
+    /// Called when connection is established to upstream.
+    /// Records timing metrics and TLS details.
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        reused: bool,
+        _peer: &HttpPeer,
+        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
+        #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
+        digest: Option<&Digest>,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> connected to upstream");
+        defer!(debug!(target: LOG_TARGET, "<-- connected to upstream"););
+        ctx.timing.upstream_connect =
+            get_latency(&ctx.timing.created_at, &ctx.timing.upstream_connect);
+        if let Some(digest) = digest {
+            ctx.update_upstream_timing_from_digest(digest, reused);
+        }
+        ctx.upstream.reused = reused;
+
+        // upstream start processing
+        ctx.timing.upstream_processing =
+            Some(get_start_time(&ctx.timing.created_at));
+
+        Ok(())
+    }
+    fn fail_to_connect(
+        &self,
+        _session: &mut Session,
+        peer: &HttpPeer,
+        ctx: &mut Self::CTX,
+        mut e: Box<pingora::Error>,
+    ) -> Box<pingora::Error> {
+        if let Some(upstream_instance) = &ctx.upstream.upstream_instance {
+            upstream_instance.on_transport_failure(&peer.address().to_string());
+        }
+        let Some(max_retries) = ctx.upstream.max_retries else {
+            return e;
+        };
+        if ctx.upstream.retries >= max_retries {
+            return e;
+        }
+        if let Some(max_retry_window) = ctx.upstream.max_retry_window
+            && ctx.timing.created_at.elapsed() > max_retry_window
+        {
+            return e;
+        }
+        ctx.upstream.retries += 1;
+        e.set_retry(true);
+        e
+    }
+    /// Filters upstream request before sending.
+    /// Adds proxy headers and performs any request modifications.
+    async fn upstream_request_filter(
+        &self,
+        session: &mut Session,
+        upstream_response: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> upstream request filter");
+        defer!(debug!(target: LOG_TARGET, "<-- upstream request filter"););
+        set_append_proxy_headers(session, ctx, upstream_response);
+        Ok(())
+    }
+    /// Filters request body chunks before sending upstream.
+    /// Tracks payload size and enforces size limits.
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> request body filter");
+        defer!(debug!(target: LOG_TARGET, "<-- request body filter"););
+        if let Some(buf) = body {
+            ctx.state.payload_size += buf.len();
+            if let Some(location) = &ctx.upstream.location_instance {
+                let size = location.client_body_size_limit();
+                if size > 0 && ctx.state.payload_size > size {
+                    return Err(new_internal_error(
+                        413,
+                        format!("Request Entity Too Large, max:{size}"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Generates cache keys for request caching.
+    /// Combines:
+    /// - Cache namespace
+    /// - Request method
+    /// - URL path and query
+    /// - Optional custom prefix
+    fn cache_key_callback(
+        &self,
+        session: &Session,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<CacheKey> {
+        debug!(target: LOG_TARGET, "--> cache key callback");
+        defer!(debug!(target: LOG_TARGET, "<-- cache key callback"););
+        let key = get_cache_key(
+            ctx,
+            session.req_header().method.as_ref(),
+            &session.req_header().uri,
+        );
+        debug!(
+            target: LOG_TARGET,
+            namespace = key.namespace_str(),
+            primary = key.primary_key_str(),
+            user_tag = key.user_tag(),
+            "cache key callback"
+        );
+        Ok(key)
+    }
+
+    /// Determines if and how responses should be cached.
+    /// Checks:
+    /// - Cache-Control headers
+    /// - TTL settings
+    /// - Cache privacy settings
+    /// - Custom cache control directives
+    fn response_cache_filter(
+        &self,
+        _session: &Session,
+        resp: &ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<RespCacheable> {
+        debug!(target: LOG_TARGET, "--> response cache filter");
+        defer!(debug!(target: LOG_TARGET, "<-- response cache filter"););
+
+        let (check_cache_control, max_ttl) = ctx.cache.as_ref().map_or(
+            (false, None), // ctx.cache is None
+            |c| (c.check_cache_control, c.max_ttl),
+        );
+
+        let mut cc = CacheControl::from_resp_headers(resp);
+
+        if let Some(c) = &mut cc {
+            // delegate all complex validation and modification logic to the helper function
+            if let Err(reason) = crate::cache::process_cache_control(c, max_ttl)
+            {
+                return Ok(RespCacheable::Uncacheable(reason));
+            }
+        } else if check_cache_control {
+            // if Cache-Control header is required but it doesn't exist or parsing fails
+            return Ok(RespCacheable::Uncacheable(
+                NoCacheReason::OriginNotCache,
+            ));
+        }
+
+        Ok(resp_cacheable(
+            cc.as_ref(),
+            resp.clone(),
+            false,
+            &META_DEFAULTS,
+        ))
+    }
+
+    async fn response_filter(
+        &self,
+        session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> response filter");
+        defer!(debug!(target: LOG_TARGET, "<-- response filter"););
+        if session.cache.enabled() {
+            crate::cache::handle_cache_headers(session, upstream_response, ctx);
+        }
+
+        // call response plugin
+        self.handle_response_plugin(session, ctx, upstream_response)
+            .await?;
+
+        // add server-timing response header
+        if self.enable_server_timing {
+            let _ = upstream_response
+                .insert_header("server-timing", ctx.generate_server_timing());
+        }
+        Ok(())
+    }
+
+    async fn upstream_response_filter(
+        &self,
+        session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        debug!(target: LOG_TARGET, "--> upstream response filter");
+        defer!(debug!(target: LOG_TARGET, "<-- upstream response filter"););
+        self.handle_upstream_response_plugin(session, ctx, upstream_response)?;
+        #[cfg(feature = "tracing")]
+        inject_telemetry_headers(ctx, upstream_response);
+        ctx.upstream.status = Some(upstream_response.status);
+
+        if ctx.state.status.is_none() {
+            ctx.state.status = Some(upstream_response.status);
+            // start to get upstream response data
+            ctx.timing.upstream_response =
+                Some(get_start_time(&ctx.timing.created_at));
+        }
+
+        if let Some(id) = &ctx.state.request_id {
+            let _ = upstream_response
+                .insert_header(&HTTP_HEADER_NAME_X_REQUEST_ID, id);
+        }
+
+        ctx.timing.upstream_processing = get_latency(
+            &ctx.timing.created_at,
+            &ctx.timing.upstream_processing,
+        );
+
+        if let Some(upstream_instance) = &ctx.upstream.upstream_instance {
+            upstream_instance
+                .on_response(&ctx.upstream.address, upstream_response.status);
+        }
+
+        Ok(())
+    }
+
+    /// Filters upstream response body chunks.
+    /// Records timing metrics and finalizes spans.
+    fn upstream_response_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<Option<std::time::Duration>> {
+        debug!(target: LOG_TARGET, "--> upstream response body filter");
+        defer!(debug!(target: LOG_TARGET, "<-- upstream response body filter"););
+
+        self.handle_upstream_response_body_plugin(
+            session,
+            ctx,
+            body,
+            end_of_stream,
+        )?;
+
+        if end_of_stream {
+            ctx.timing.upstream_response = get_latency(
+                &ctx.timing.created_at,
+                &ctx.timing.upstream_response,
+            );
+
+            #[cfg(feature = "tracing")]
+            set_otel_upstream_attrs(ctx);
+            // self.finalize_upstream_session(ctx);
+        }
+        Ok(None)
+    }
+
+    /// Final filter for response body before sending to client.
+    /// Handles response body modifications and compression.
+    fn response_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<Option<std::time::Duration>>
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> response body filter");
+        defer!(debug!(target: LOG_TARGET, "<-- response body filter"););
+        self.handle_response_body_plugin(session, ctx, body, end_of_stream)?;
+        Ok(None)
+    }
+
+    /// Handles proxy failures and generates appropriate error responses.
+    /// Error handling for:
+    /// - Upstream connection failures (502, 504)
+    /// - Client timeouts (408)
+    /// - Client disconnections (499)
+    /// Generates error pages using configured template
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &pingora::Error,
+        ctx: &mut Self::CTX,
+    ) -> FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> fail to proxy");
+        defer!(debug!(target: LOG_TARGET, "<-- fail to proxy"););
+        let server_session = session.as_mut();
+
+        let code = match e.etype() {
+            pingora::HTTPStatus(code) => *code,
+            // spellchecker:off
+            _ => match e.esource() {
+                pingora::ErrorSource::Upstream => 502,
+                pingora::ErrorSource::Downstream => match e.etype() {
+                    pingora::ErrorType::ConnectTimedout => 408,
+                    // client close the connection
+                    pingora::ErrorType::ConnectionClosed => 499,
+                    _ => 500,
+                },
+                pingora::ErrorSource::Internal
+                | pingora::ErrorSource::Unset => 500,
+            },
+            // spellchecker:on
+        };
+        let mut resp = match code {
+            502 => error_resp::HTTP_502_RESPONSE.clone(),
+            400 => error_resp::HTTP_400_RESPONSE.clone(),
+            500 => HTTP_500_RESPONSE.clone(),
+            _ => error_resp::gen_error_response(code),
+        };
+
+        let error_type = e.etype().as_str();
+        let content = self
+            .error_template
+            .replace("{{version}}", pingap_util::get_pkg_version())
+            .replace("{{content}}", &e.to_string())
+            .replace("{{error_type}}", error_type);
+        let buf = Bytes::from(content);
+        ctx.state.status = Some(
+            StatusCode::from_u16(code)
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        let content_type = if buf.starts_with(b"{") {
+            "application/json; charset=utf-8"
+        } else {
+            "text/html; charset=utf-8"
+        };
+        let _ = resp.insert_header(http::header::CONTENT_TYPE, content_type);
+        let _ = resp.insert_header("X-Pingap-EType", error_type);
+        let _ = resp
+            .insert_header(http::header::CONTENT_LENGTH, buf.len().to_string());
+
+        let user_agent = server_session
+            .get_header(http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+
+        error!(
+            target: LOG_TARGET,
+            error = %e,
+            remote_addr = ctx.conn.remote_addr,
+            client_ip = ctx.conn.client_ip,
+            user_agent,
+            error_type,
+            path = server_session.req_header().uri.path(),
+            "fail to proxy"
+        );
+
+        // TODO: we shouldn't be closing downstream connections on internally generated errors
+        // and possibly other upstream connect() errors (connection refused, timeout, etc)
+        //
+        // This change is only here because we DO NOT re-use downstream connections
+        // today on these errors and we should signal to the client that pingora is dropping it
+        // rather than a misleading the client with 'keep-alive'
+        server_session.set_keepalive(None);
+
+        server_session
+            .write_response_header(Box::new(resp))
+            .await
+            .unwrap_or_else(|e| {
+                error!(
+                    target: LOG_TARGET,
+                    error = %e,
+                    "send error response to downstream fail"
+                );
+            });
+
+        let _ = server_session.write_response_body(buf, true).await;
+        FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
+    }
+    /// Performs request logging and cleanup after request completion.
+    /// Handles:
+    /// - Request counting cleanup
+    /// - Compression statistics
+    /// - Prometheus metrics
+    /// - OpenTelemetry span completion
+    /// - Access logging
+    async fn logging(
+        &self,
+        session: &mut Session,
+        _e: Option<&pingora::Error>,
+        ctx: &mut Self::CTX,
+    ) where
+        Self::CTX: Send + Sync,
+    {
+        debug!(target: LOG_TARGET, "--> logging");
+        defer!(debug!(target: LOG_TARGET, "<-- logging"););
+        end_request();
+        self.processing.fetch_sub(1, Ordering::Relaxed);
+        if let Some(location) = &ctx.upstream.location_instance {
+            location.on_response();
+        }
+        // get from cache does not connect to upstream
+        if let Some(upstream_instance) = &ctx.upstream.upstream_instance {
+            ctx.upstream.processing_count = Some(upstream_instance.completed());
+        }
+        if ctx.state.status.is_none()
+            && let Some(header) = session.response_written()
+        {
+            ctx.state.status = Some(header.status);
+        }
+        #[cfg(feature = "tracing")]
+        // enable open telemetry and proxy upstream fail
+        if let Some(features) = ctx.features.as_mut()
+            && let Some(ref mut span) = features.upstream_span.as_mut()
+        {
+            span.end();
+        }
+
+        if let Some(c) =
+            session.downstream_modules_ctx.get::<ResponseCompression>()
+            && c.is_enabled()
+            && let Some((algorithm, in_bytes, out_bytes, took)) = c.get_info()
+        {
+            let features = ctx.features.get_or_insert_default();
+            features.compression_stat = Some(CompressionStat {
+                algorithm: algorithm.to_string(),
+                in_bytes,
+                out_bytes,
+                duration: took,
+            });
+        }
+        #[cfg(feature = "tracing")]
+        if let Some(prom) = &self.prometheus {
+            // because prom.before will not be called if location is empty
+            if !ctx.upstream.location.is_empty() {
+                prom.after(session, ctx);
+            }
+        }
+
+        #[cfg(feature = "tracing")]
+        set_otel_request_attrs(session, ctx);
+
+        if let Some(p) = &self.log_parser {
+            let buf = p.format(session, ctx);
+            if let Some(logger) = &self.access_logger {
+                if logger.try_send(buf).is_err() {
+                    // Channel full: drop the line rather than block the request
+                    // path, but surface the loss so operators can size the buffer.
+                    let dropped =
+                        ACCESS_LOG_DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Rate-limit the warning: log every power-of-two drop so a
+                    // saturated channel does not flood the error log.
+                    if dropped.is_power_of_two() {
+                        error!(
+                            target: LOG_TARGET,
+                            dropped,
+                            "access log channel full, dropping lines"
+                        );
+                    }
+                }
+            } else {
+                let msg = buf.as_bstr();
+                info!(target: LOG_TARGET, "{msg}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server_conf::parse_from_conf;
+    use ahash::AHashMap;
+    use pingap_certificate::{DynamicCertificates, TlsCertificate};
+    use pingap_config::{PingapConfig, new_file_config_manager};
+    use pingap_core::{CacheInfo, Ctx, Plugin, UpstreamInfo};
+    use pingap_location::LocationStats;
+    use pingora::http::ResponseHeader;
+    use pingora::protocols::tls::SslDigest;
+    use pingora::protocols::tls::SslDigestExtension;
+    use pingora::protocols::{Digest, TimingDigest};
+    use pingora::proxy::{ProxyHttp, Session};
+    use pingora::server::configuration;
+    use pingora::services::Service;
+    use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, SystemTime};
+    use tokio_test::io::Builder;
+
+    #[test]
+    fn test_get_digest_detail() {
+        let digest = Digest {
+            timing_digest: vec![Some(TimingDigest {
+                established_ts: SystemTime::UNIX_EPOCH
+                    .checked_add(Duration::from_secs(10))
+                    .unwrap(),
+            })],
+            ssl_digest: Some(Arc::new(SslDigest {
+                cipher: "123".into(),
+                version: "1.3".into(),
+                organization: None,
+                serial_number: None,
+                cert_digest: vec![],
+                extension: SslDigestExtension::default(),
+            })),
+            ..Default::default()
+        };
+        let result = get_digest_detail(&digest);
+        assert_eq!(10000, result.tcp_established);
+        assert_eq!("1.3", result.tls_version.unwrap_or_default());
+    }
+
+    /// Creates a new test server instance with default configuration.
+    /// Pass a plugin provider to exercise the plugin chain; the default one
+    /// resolves nothing, which is enough for tests that ignore plugins.
+    fn new_server_with(
+        plugin_provider: Option<Arc<dyn PluginProvider>>,
+    ) -> Server {
+        let toml_data = r###"
+[upstreams.charts]
+# upstream address list
+addrs = ["127.0.0.1:5000"]
+
+
+[upstreams.diving]
+addrs = ["127.0.0.1:5001"]
+
+
+[locations.lo]
+# upstream of location (default none)
+upstream = "charts"
+
+# location match path (default none)
+path = "/"
+
+# location match host, multiple domain names are separated by commas (default none)
+host = ""
+
+# set headers to request (default none)
+includes = ["proxySetHeader"]
+
+# add headers to request (default none)
+proxy_add_headers = ["name:value"]
+
+
+# the weigh of location (default none)
+weight = 1024
+
+
+# plugin list for location
+plugins = ["pingap:requestId", "stats"]
+
+[servers.test]
+# server linsten address, multiple addresses are separated by commas (default none)
+addr = "0.0.0.0:6188"
+
+# access log format (default none)
+access_log = "tiny"
+
+# the locations for server
+locations = ["lo"]
+
+# the threads count for server (default 1)
+threads = 1
+
+[plugins.stats]
+value = "/stats"
+category = "stats"
+
+[storages.authToken]
+category = "secret"
+secret = "123123"
+value = "PLpKJqvfkjTcYTDpauJf+2JnEayP+bm+0Oe60Jk="
+
+[storages.proxySetHeader]
+category = "config"
+value = 'proxy_set_headers = ["name:value"]'
+        "###;
+        let pingap_conf = PingapConfig::new(toml_data.as_ref(), false).unwrap();
+
+        let location = Arc::new(
+            Location::new("lo", pingap_conf.locations.get("lo").unwrap())
+                .unwrap(),
+        );
+        let upstream = Arc::new(
+            Upstream::new(
+                "charts",
+                pingap_conf.upstreams.get("charts").unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        struct TmpPluginLoader {}
+        impl PluginProvider for TmpPluginLoader {
+            fn get(&self, _name: &str) -> Option<Arc<dyn Plugin>> {
+                None
+            }
+        }
+        let plugin_provider =
+            plugin_provider.unwrap_or_else(|| Arc::new(TmpPluginLoader {}));
+        struct TmpLocationLoader {
+            location: Arc<Location>,
+        }
+        impl LocationProvider for TmpLocationLoader {
+            fn get(&self, _name: &str) -> Option<Arc<Location>> {
+                Some(self.location.clone())
+            }
+            fn stats(&self) -> HashMap<String, LocationStats> {
+                HashMap::new()
+            }
+        }
+        struct TmpUpstreamLoader {
+            upstream: Arc<Upstream>,
+        }
+        impl UpstreamProvider for TmpUpstreamLoader {
+            fn get(&self, _name: &str) -> Option<Arc<Upstream>> {
+                Some(self.upstream.clone())
+            }
+            fn list(&self) -> Vec<(String, Arc<Upstream>)> {
+                vec![("charts".to_string(), self.upstream.clone())]
+            }
+        }
+        struct TmpServerLocationsLoader {
+            route: Arc<crate::ServerLocationRoute>,
+        }
+        impl ServerLocationsProvider for TmpServerLocationsLoader {
+            fn get(
+                &self,
+                _name: &str,
+            ) -> Option<Arc<crate::ServerLocationRoute>> {
+                Some(self.route.clone())
+            }
+        }
+
+        struct TmpCertificateLoader {}
+        impl CertificateProvider for TmpCertificateLoader {
+            fn get(&self, _sni: &str) -> Option<Arc<TlsCertificate>> {
+                None
+            }
+            fn list(&self) -> Arc<DynamicCertificates> {
+                Arc::new(AHashMap::new())
+            }
+            fn store(&self, _data: DynamicCertificates) {}
+        }
+
+        let confs = parse_from_conf(pingap_conf);
+        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
+
+        Server::new(
+            &confs[0],
+            AppContext {
+                logger: None,
+                config_manager: Arc::new(
+                    new_file_config_manager(&file.path().to_string_lossy())
+                        .unwrap(),
+                ),
+                server_locations_provider: Arc::new({
+                    let location_for_index = location.clone();
+                    let route = crate::ServerLocationRoute::build(
+                        vec!["lo".to_string()],
+                        move |_| Some(location_for_index.clone()),
+                    );
+                    TmpServerLocationsLoader {
+                        route: Arc::new(route),
+                    }
+                }),
+                location_provider: Arc::new(TmpLocationLoader { location }),
+                upstream_provider: Arc::new(TmpUpstreamLoader { upstream }),
+                plugin_provider,
+                certificate_provider: Arc::new(TmpCertificateLoader {}),
+            },
+        )
+        .unwrap()
+    }
+
+    fn new_server() -> Server {
+        new_server_with(None)
+    }
+
+    #[test]
+    fn test_new_server() {
+        let server = new_server();
+        let services = server
+            .run(Arc::new(configuration::ServerConf::default()))
+            .unwrap();
+
+        assert_eq!("Pingora HTTP Proxy Service", services.lb.name());
+    }
+
+    #[tokio::test]
+    async fn test_early_request_filter() {
+        let server = new_server();
+
+        let headers = [""].join("\r\n");
+        let input_header =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let mut ctx = Ctx::default();
+        server
+            .early_request_filter(&mut session, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!("lo", ctx.upstream.location.as_ref());
+    }
+
+    /// Stands in for a plugin that gates a request, e.g. `basic_auth`. It only
+    /// counts, so a test can tell "the chain ran" from "the chain was skipped"
+    /// without the session having to write a response.
+    #[derive(Default)]
+    struct CountingPlugin {
+        request_calls: Arc<AtomicUsize>,
+        body_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Plugin for CountingPlugin {
+        async fn handle_request(
+            &self,
+            _step: PluginStep,
+            _session: &mut Session,
+            _ctx: &mut Ctx,
+        ) -> pingora::Result<RequestPluginResult> {
+            self.request_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(RequestPluginResult::Continue)
+        }
+
+        fn handle_response_body(
+            &self,
+            _session: &mut Session,
+            _ctx: &mut Ctx,
+            _body: &mut Option<bytes::Bytes>,
+            _end_of_stream: bool,
+        ) -> pingora::Result<ResponseBodyPluginResult> {
+            self.body_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ResponseBodyPluginResult::Unchanged)
+        }
+    }
+
+    struct CountingPluginProvider {
+        plugin: Arc<dyn Plugin>,
+    }
+    impl PluginProvider for CountingPluginProvider {
+        fn get(&self, _name: &str) -> Option<Arc<dyn Plugin>> {
+            Some(self.plugin.clone())
+        }
+    }
+
+    /// Server plus the counters of the single plugin every location resolves to.
+    fn new_server_counting() -> (Server, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let plugin = CountingPlugin::default();
+        let request_calls = plugin.request_calls.clone();
+        let body_calls = plugin.body_calls.clone();
+        let server = new_server_with(Some(Arc::new(CountingPluginProvider {
+            plugin: Arc::new(plugin),
+        })));
+        (server, request_calls, body_calls)
+    }
+
+    /// Regression for the pre-auth bypass reported in #215.
+    ///
+    /// `get_context_plugins` used to return `None` when `session.is_upgrade_req()`,
+    /// leaving `ctx.plugins` empty for the whole request and turning every plugin
+    /// step into a no-op — authentication included. pingora treats any HTTP/1.1
+    /// request carrying an `Upgrade` header as an upgrade request without looking
+    /// at the value, so `Upgrade: x` on any path was enough to walk past
+    /// `basic_auth`, `key_auth`, `jwt`, `ip_restriction` and the rest and still be
+    /// proxied upstream.
+    #[tokio::test]
+    async fn test_upgrade_request_cannot_skip_plugins() {
+        for headers in [
+            // No upgrade at all, as the control.
+            "",
+            // What pingora accepts as an upgrade: an `Upgrade` header whose
+            // value it never inspects.
+            "Upgrade: x\r\n",
+            // A well-formed websocket handshake.
+            "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n",
+        ] {
+            let (server, request_calls, _) = new_server_counting();
+
+            let input_header =
+                format!("GET /vicanso/pingap HTTP/1.1\r\n{headers}\r\n");
+            let mock_io = Builder::new().read(input_header.as_bytes()).build();
+            let mut session = Session::new_h1(Box::new(mock_io));
+            session.read_request().await.unwrap();
+
+            let mut ctx = Ctx::default();
+            server
+                .early_request_filter(&mut session, &mut ctx)
+                .await
+                .unwrap();
+
+            assert!(
+                ctx.plugins.is_some(),
+                "plugin chain was dropped for headers {headers:?}"
+            );
+            assert!(
+                request_calls.load(Ordering::SeqCst) > 0,
+                "request plugins never ran for headers {headers:?}"
+            );
+
+            // And they keep running at the Request step, not just EarlyRequest.
+            let before = request_calls.load(Ordering::SeqCst);
+            server
+                .handle_request_plugin(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut ctx,
+                )
+                .await
+                .unwrap();
+            assert!(
+                request_calls.load(Ordering::SeqCst) > before,
+                "Request step was skipped for headers {headers:?}"
+            );
+        }
+    }
+
+    /// The websocket breakage that motivated the original skip (#114) is a
+    /// response-body concern, so the guard belongs on the body hooks — and it
+    /// has to key off the completed handshake, not the request header, or a
+    /// client could switch the hooks off on demand.
+    #[tokio::test]
+    async fn test_response_body_plugins_wait_for_the_handshake() {
+        let (server, _, body_calls) = new_server_counting();
+
+        let input_header =
+            "GET /vicanso/pingap HTTP/1.1\r\nUpgrade: websocket\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        // The client asked to upgrade, but no 101 came back, so this is still a
+        // plain HTTP response and the body hooks must stay live. Only pingora
+        // flips `was_upgraded`, and only on the 101, which is exactly why the
+        // guard reads it instead of the request header.
+        assert!(session.is_upgrade_req());
+        assert!(!session.was_upgraded());
+
+        let location = server.location_provider.get("lo").unwrap();
+        let mut ctx = Ctx {
+            plugins: server.get_context_plugins(location),
+            ..Default::default()
+        };
+        let mut body = Some(bytes::Bytes::from_static(b"hello"));
+        server
+            .handle_response_body_plugin(
+                &mut session,
+                &mut ctx,
+                &mut body,
+                true,
+            )
+            .unwrap();
+        server
+            .handle_upstream_response_body_plugin(
+                &mut session,
+                &mut ctx,
+                &mut body,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            2,
+            body_calls.load(Ordering::SeqCst),
+            "body hooks must not bail out before the handshake completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_filter() {
+        let server = new_server();
+
+        let headers = [""].join("\r\n");
+        let input_header =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let location = server.location_provider.get("lo").unwrap();
+        let mut ctx = Ctx {
+            upstream: UpstreamInfo {
+                location: "lo".to_string().into(),
+                location_instance: Some(location.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let done = server.request_filter(&mut session, &mut ctx).await.unwrap();
+        assert_eq!(false, done);
+    }
+
+    #[tokio::test]
+    async fn test_cache_key_callback() {
+        let server = new_server();
+
+        let headers = [""].join("\r\n");
+        let input_header =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let key = server
+            .cache_key_callback(
+                &session,
+                &mut Ctx {
+                    cache: Some(CacheInfo {
+                        namespace: Some("pingap".to_string()),
+                        keys: Some(vec!["ss".to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            key.primary_key_str(),
+            Some("ss:GET:/vicanso/pingap?size=1")
+        );
+        assert_eq!(key.namespace_str(), Some("pingap"));
+        assert_eq!(
+            r#"CacheKey { namespace: [112, 105, 110, 103, 97, 112], primary: [115, 115, 58, 71, 69, 84, 58, 47, 118, 105, 99, 97, 110, 115, 111, 47, 112, 105, 110, 103, 97, 112, 63, 115, 105, 122, 101, 61, 49], primary_bin_override: None, variance: None, user_tag: "", extensions: {} }"#,
+            format!("{key:?}")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_cache_filter() {
+        let server = new_server();
+
+        let headers = [""].join("\r\n");
+        let input_header =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let mut upstream_response =
+            ResponseHeader::build_no_case(200, None).unwrap();
+        upstream_response
+            .append_header("Content-Type", "application/json")
+            .unwrap();
+        let result = server
+            .response_cache_filter(
+                &session,
+                &upstream_response,
+                &mut Ctx {
+                    cache: Some(CacheInfo {
+                        keys: Some(vec!["ss".to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(true, result.is_cacheable());
+
+        let mut upstream_response =
+            ResponseHeader::build_no_case(200, None).unwrap();
+        upstream_response
+            .append_header("Cache-Control", "no-cache")
+            .unwrap();
+        let result = server
+            .response_cache_filter(
+                &session,
+                &upstream_response,
+                &mut Ctx {
+                    cache: Some(CacheInfo {
+                        keys: Some(vec!["ss".to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(false, result.is_cacheable());
+
+        let mut upstream_response =
+            ResponseHeader::build_no_case(200, None).unwrap();
+        upstream_response
+            .append_header("Cache-Control", "no-store")
+            .unwrap();
+        let result = server
+            .response_cache_filter(
+                &session,
+                &upstream_response,
+                &mut Ctx {
+                    cache: Some(CacheInfo {
+                        keys: Some(vec!["ss".to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(false, result.is_cacheable());
+
+        let mut upstream_response =
+            ResponseHeader::build_no_case(200, None).unwrap();
+        upstream_response
+            .append_header("Cache-Control", "private, max-age=100")
+            .unwrap();
+        let result = server
+            .response_cache_filter(
+                &session,
+                &upstream_response,
+                &mut Ctx {
+                    cache: Some(CacheInfo {
+                        keys: Some(vec!["ss".to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(false, result.is_cacheable());
+    }
+
+    fn create_session(path: &str) -> Session {
+        let headers = ["Host: example.com"].join("\r\n");
+        let input_header =
+            format!("GET {} HTTP/1.1\r\n{headers}\r\n\r\n", path);
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        Session::new_h1(Box::new(mock_io))
+    }
+
+    #[tokio::test]
+    async fn test_handle_acme_challenge_not_enabled() {
+        let server = new_server();
+
+        let mut session = create_session("/");
+        session.read_request().await.unwrap();
+
+        let result = server
+            .handle_acme_challenge(&mut session, &mut Ctx::default())
+            .await;
+        assert!(
+            result.is_none(),
+            "When ACME not enabled, should return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_acme_challenge_non_challenge_returns_none() {
+        let mut server = new_server();
+        server.enable_lets_encrypt();
+
+        let test_paths = ["/", "/api", "/test.html", "/normal/path"];
+
+        for path in test_paths {
+            let mut session = create_session(path);
+            session.read_request().await.unwrap();
+
+            let result = server
+                .handle_acme_challenge(&mut session, &mut Ctx::default())
+                .await;
+            assert!(
+                result.is_none(),
+                "Path '{}' should return None to continue processing (bug returns Some(Ok(false)))",
+                path
+            );
+        }
+    }
+}

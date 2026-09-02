@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+    </head>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+        }
+        .pingap-header {
+            background-color: rgba(255, 255, 255, 0.6);
+            border-bottom: 1px solid rgba(228, 228, 231, 0.4);
+            padding: 15px;
+            line-height: 24px;
+        }
+        .pingap-header-content {
+            max-width: 1000px;
+            margin: auto;
+        }
+        .pingap-logo {
+            color: rgb(9, 9, 11);
+            font-weight: bolder;
+            font-size: 24px;
+        }
+        .pingap-version {
+            font-size: 16px;
+        }
+        .pingap-error {
+            margin: 15px;
+            text-align: center;
+            font-size: 18px;
+            line-height: 24px;
+        }
+        @media (prefers-color-scheme: dark) {
+            html,
+            body {
+                background-color: rgb(9, 9, 11);
+            }
+            .pingap-header {
+                background-color: rgba(9, 9, 11, 0.6);
+                border-bottom-color: rgba(39, 39, 42, 0.4);
+            }
+            .pingap-logo {
+                color: rgb(250, 250, 250);
+            }
+            .pingap-error {
+                color: rgb(250, 250, 250);
+            }
+        }
+    </style>
+    <body>
+        <header class="pingap-header">
+            <div class="pingap-header-content">
+                <span class="pingap-logo"
+                    >Pingap
+                    <span class="pingap-version">{{version}}</span></span
+                >
+            </div>
+        </header>
+        <p class="pingap-error">{{error_type}}</p>
+        <p class="pingap-error">{{content}}</p>
+    </body>
+</html>

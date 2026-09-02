@@ -1,0 +1,57 @@
+[package]
+name = "pingap-logger"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "logger"]
+description = "Logger for pingap"
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+bytesize = { workspace = true }
+chrono = { workspace = true }
+flate2 = { workspace = true }
+http = { workspace = true }
+humantime-serde = { workspace = true }
+itoa = { workspace = true }
+pingap-core = { workspace = true }
+pingap-util = { workspace = true }
+pingora = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_qs = { workspace = true }
+snafu = { workspace = true }
+substring = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-log = { workspace = true }
+tracing-subscriber = { workspace = true }
+walkdir = { workspace = true }
+zstd = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+syslog = "7.0.0"
+
+
+[package.metadata.cargo-machete]
+ignored = ["humantime-serde"]
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = { workspace = true }
+tokio-test = "0.4.4"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "bench"
+harness = false
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

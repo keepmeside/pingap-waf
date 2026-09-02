@@ -1,0 +1,283 @@
+// Copyright 2024-2025 Tree xie.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// External crate imports for async operations, etcd client, and error handling
+use etcd_client::WatchStream;
+use glob::glob;
+use snafu::Snafu;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::fs;
+use tracing::debug;
+
+mod common;
+mod config_convert;
+mod etcd_storage;
+mod file_storage;
+pub mod hcl;
+pub mod kdl;
+mod manager;
+mod memory_storage;
+mod storage;
+
+// Error enum for all possible configuration-related errors
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Invalid error {message}"))]
+    Invalid { message: String },
+    #[snafu(display("Glob pattern error {source}, {path}"))]
+    Pattern {
+        source: glob::PatternError,
+        path: String,
+    },
+    #[snafu(display("Glob error {source}"))]
+    Glob { source: glob::GlobError },
+    #[snafu(display("Io error {source}, {file}"))]
+    Io {
+        source: std::io::Error,
+        file: String,
+    },
+    #[snafu(display("Toml de error {source}"))]
+    De { source: toml::de::Error },
+    #[snafu(display("Toml ser error {source}"))]
+    Ser { source: toml::ser::Error },
+    #[snafu(display("Url parse error {source}, {url}"))]
+    UrlParse {
+        source: url::ParseError,
+        url: String,
+    },
+    #[snafu(display("Addr parse error {source}, {addr}"))]
+    AddrParse {
+        source: std::net::AddrParseError,
+        addr: String,
+    },
+    #[snafu(display("Base64 decode error {source}"))]
+    Base64Decode { source: base64::DecodeError },
+    #[snafu(display("Regex error {source}"))]
+    Regex { source: regex::Error },
+    #[snafu(display("Etcd error {source}"))]
+    Etcd { source: Box<etcd_client::Error> },
+}
+type Result<T, E = Error> = std::result::Result<T, E>;
+
+// Observer struct for watching configuration changes
+pub struct Observer {
+    // Optional watch stream for etcd-based configuration
+    etcd_watch_stream: Option<WatchStream>,
+}
+
+impl Observer {
+    // Watches for configuration changes, returns true if changes detected
+    pub async fn watch(&mut self) -> Result<bool> {
+        let sleep_time = Duration::from_secs(30);
+        // no watch stream, just sleep a moment
+        let Some(stream) = self.etcd_watch_stream.as_mut() else {
+            tokio::time::sleep(sleep_time).await;
+            return Ok(false);
+        };
+        let resp = stream.message().await.map_err(|e| Error::Etcd {
+            source: Box::new(e),
+        })?;
+
+        Ok(resp.is_some())
+    }
+}
+
+#[derive(PartialEq, Clone, Debug)]
+pub enum Category {
+    Basic,
+    Server,
+    Location,
+    Upstream,
+    Plugin,
+    Certificate,
+    Storage,
+}
+
+impl std::fmt::Display for Category {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 使用 match 来为每个变体指定其字符串表示
+        // write! 宏将字符串写入格式化器
+        match self {
+            Category::Basic => write!(f, "basic"),
+            Category::Server => write!(f, "server"),
+            Category::Location => write!(f, "location"),
+            Category::Upstream => write!(f, "upstream"),
+            Category::Plugin => write!(f, "plugin"),
+            Category::Certificate => write!(f, "certificate"),
+            Category::Storage => write!(f, "storage"),
+        }
+    }
+}
+impl FromStr for Category {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "basic" => Ok(Category::Basic),
+            "server" => Ok(Category::Server),
+            "location" => Ok(Category::Location),
+            "upstream" => Ok(Category::Upstream),
+            "plugin" => Ok(Category::Plugin),
+            "certificate" => Ok(Category::Certificate),
+            "storage" => Ok(Category::Storage),
+            _ => Err(Error::Invalid {
+                message: format!("invalid category: {s}"),
+            }),
+        }
+    }
+}
+
+pub fn new_config_manager(value: &str) -> Result<ConfigManager> {
+    if value.starts_with(etcd_storage::ETCD_PROTOCOL) {
+        new_etcd_config_manager(value)
+    } else {
+        new_file_config_manager(value)
+    }
+}
+
+/// Build a detailed error message when a config file cannot be read due to
+/// permission issues, including the file's owner/group/mode so the operator
+/// knows exactly what to fix.
+fn permission_error_message(
+    path: &std::path::Path,
+    source: std::io::Error,
+) -> Error {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if source.kind() == std::io::ErrorKind::PermissionDenied
+            && let Ok(meta) = std::fs::metadata(path)
+        {
+            let mode = meta.mode() & 0o7777;
+            let uid = meta.uid();
+            let gid = meta.gid();
+            return Error::Invalid {
+                message: format!(
+                    "Config file '{}' is not readable: permission denied \
+                         (owner uid:{} gid:{}, mode:{:04o}). \
+                         Please ensure the pingap process user can read this file, \
+                         e.g.: chown <pingap-user>:<pingap-group> '{}' or chmod o+r '{}'",
+                    path.display(),
+                    uid,
+                    gid,
+                    mode,
+                    path.display(),
+                    path.display(),
+                ),
+            };
+        }
+    }
+    Error::Io {
+        source,
+        file: path.to_string_lossy().to_string(),
+    }
+}
+
+pub async fn read_all_config_files(dir: &str) -> Result<Vec<u8>> {
+    let mut data = vec![];
+    // Collect .toml files first
+    let toml_files: std::result::Result<Vec<_>, _> =
+        glob(&format!("{dir}/**/*.toml"))
+            .map_err(|e| Error::Pattern {
+                source: e,
+                path: dir.to_string(),
+            })?
+            .collect();
+    let toml_files = toml_files.map_err(|e| Error::Glob { source: e })?;
+
+    if !toml_files.is_empty() {
+        // .toml files found, use only .toml
+        for f in toml_files {
+            let buf = fs::read(&f)
+                .await
+                .map_err(|e| permission_error_message(&f, e))?;
+            toml::from_str::<toml::Value>(&String::from_utf8_lossy(&buf))
+                .map_err(|e| Error::Invalid {
+                    message: format!("{}: {e}", f.display()),
+                })?;
+            debug!(filename = format!("{f:?}"), "read toml file");
+            data.extend_from_slice(&buf);
+            data.push(0x0a);
+        }
+    } else {
+        // No .toml files, check for .hcl
+        let hcl_files: std::result::Result<Vec<_>, _> =
+            glob(&format!("{dir}/**/*.hcl"))
+                .map_err(|e| Error::Pattern {
+                    source: e,
+                    path: dir.to_string(),
+                })?
+                .collect();
+        let hcl_files = hcl_files.map_err(|e| Error::Glob { source: e })?;
+
+        if !hcl_files.is_empty() {
+            for f in hcl_files {
+                let buf = fs::read(&f)
+                    .await
+                    .map_err(|e| permission_error_message(&f, e))?;
+                debug!(filename = format!("{f:?}"), "read hcl file");
+                let hcl_str = String::from_utf8_lossy(&buf);
+                let toml_str = hcl::convert_hcl_to_toml(&hcl_str)?;
+                data.extend_from_slice(toml_str.as_bytes());
+                data.push(0x0a);
+            }
+        } else {
+            // No .hcl files, fall back to .kdl
+            for entry in glob(&format!("{dir}/**/*.kdl")).map_err(|e| {
+                Error::Pattern {
+                    source: e,
+                    path: dir.to_string(),
+                }
+            })? {
+                let f = entry.map_err(|e| Error::Glob { source: e })?;
+                let buf = fs::read(&f)
+                    .await
+                    .map_err(|e| permission_error_message(&f, e))?;
+                debug!(filename = format!("{f:?}"), "read kdl file");
+                let kdl_str = String::from_utf8_lossy(&buf);
+                let toml_str =
+                    kdl::convert_kdl_to_toml(&kdl_str).map_err(|e| {
+                        Error::Invalid {
+                            message: format!("{}: {e}", f.display()),
+                        }
+                    })?;
+                data.extend_from_slice(toml_str.as_bytes());
+                data.push(0x0a);
+            }
+        }
+    }
+    Ok(data)
+}
+
+pub async fn sync_to_path(
+    config_manager: Arc<ConfigManager>,
+    path: &str,
+) -> Result<()> {
+    let config = config_manager.get_current_config();
+    let config = toml::to_string_pretty(&config.as_ref().clone())
+        .map_err(|e| Error::Ser { source: e })?;
+    let config = toml::from_str::<PingapTomlConfig>(&config)
+        .map_err(|e| Error::De { source: e })?;
+    let new_config_manager = new_config_manager(path)?;
+    new_config_manager.save_all(&config).await?;
+    Ok(())
+}
+
+pub use common::*;
+pub use etcd_storage::ETCD_PROTOCOL;
+pub use manager::*;
+pub use memory_storage::MemoryStorage;
+pub use storage::*;

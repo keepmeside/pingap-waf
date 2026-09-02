@@ -1,0 +1,18 @@
+services:
+  pingap:
+    image: vicanso/pingap
+    restart: always
+    ports:
+      - 80:80
+      - 443:443
+      - 3018:3018
+    volumes:
+      - ./conf:/opt/pingap/conf
+    environment:
+      PINGAP_CONF: /opt/pingap/conf
+      PINGAP_ADMIN_ADDR: 0.0.0.0:3018
+      PINGAP_ADMIN_USER: pingap
+      PINGAP_ADMIN_PASSWORD: 135790
+      PINGAP_AUTORELOAD: true
+    entrypoint: |
+      pingap

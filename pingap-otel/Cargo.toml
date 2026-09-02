@@ -1,0 +1,32 @@
+[package]
+name = "pingap-otel"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "opentelemetry"]
+description = "OpenTelemetry for pingap"
+
+[lib]
+name = "pingap_otel"
+path = "src/lib.rs"
+
+[dependencies]
+ahash = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+humantime = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-http = { workspace = true }
+opentelemetry-jaeger-propagator = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+pingora = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

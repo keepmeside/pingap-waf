@@ -1,0 +1,49 @@
+[package]
+name = "pingap-upstream"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "upstream"]
+description = "Upstream for pingap"
+
+[lib]
+name = "pingap_upstream"
+path = "src/lib.rs"
+
+[dependencies]
+ahash = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+bytesize = { workspace = true }
+dashmap = { workspace = true }
+derive_more = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+http = { workspace = true }
+pingap-config = { workspace = true }
+pingap-core = { workspace = true }
+pingap-discovery = { workspace = true }
+pingap-health = { workspace = true }
+pingora = { workspace = true }
+pingora-runtime = { workspace = true }
+serde = { workspace = true }
+snafu = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tokio-test = "0.4.4"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "bench"
+harness = false
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

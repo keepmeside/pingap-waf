@@ -1,0 +1,27 @@
+[package]
+name = "pingap-pyroscope"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "pyroscope"]
+description = "Pyroscope for pingap"
+
+[lib]
+name = "pingap_pyroscope"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+pingora = { workspace = true }
+pyroscope = { version = "2.0.0", features = ["backend-pprof-rs"] }
+snafu = { workspace = true }
+substring = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"

@@ -1,0 +1,516 @@
+// Copyright 2024-2025 Tree xie.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::{
+    Error, get_hash_key, get_int_conf, get_str_conf, get_str_slice_conf,
+};
+use ahash::AHashMap;
+use async_trait::async_trait;
+use bytes::Bytes;
+use hex::ToHex;
+use http::StatusCode;
+use pingap_config::PluginConf;
+use pingap_core::{
+    Ctx, HTTP_HEADER_NO_STORE, HttpResponse, Plugin, PluginStep,
+    RequestPluginResult,
+};
+use pingap_core::{ensure_client_ip, get_query_value, now_sec};
+use pingora::proxy::Session;
+use sha2::{Digest, Sha256};
+use std::borrow::Cow;
+use tracing::debug;
+
+type Result<T, E = Error> = std::result::Result<T, E>;
+
+const CATEGORY: &str = "combined_auth";
+
+/// A secret of `*` disables every check for that app, including the ip list.
+const SUPER_USER_SECRET: &str = "*";
+
+// AuthParam defines the authentication configuration for a single application
+struct AuthParam {
+    // Optional IP rules for restricting access to specific IP addresses or CIDR ranges
+    // Example: ["127.0.0.1", "192.168.1.0/24"]
+    ip_rules: Option<pingap_util::IpRules>,
+
+    // Secret key used for HMAC authentication
+    // Special value "*" bypasses all authentication (super user mode)
+    secret: String,
+
+    // Maximum allowed time difference between request timestamp and server time
+    // Helps prevent replay attacks by rejecting old requests
+    // Value is in seconds, typical values: 30-300
+    deviation: i64,
+}
+
+pub struct CombinedAuth {
+    // Unique identifier for this plugin instance
+    hash_value: String,
+    // Plugin execution phase (must be PluginStep::Request)
+    plugin_step: PluginStep,
+    // Map of app_id to their authentication parameters
+    auths: AHashMap<String, AuthParam>,
+}
+
+/// Converts a plugin configuration into a CombinedAuth instance
+///
+/// # Arguments
+/// * `value` - The plugin configuration containing authorization settings
+///
+/// # Returns
+/// * `Result<Self>` - A new CombinedAuth instance or an error if configuration is invalid
+///
+/// # Configuration Format
+/// ```toml
+/// authorizations = [
+///   { app_id = "myapp", secret = "mysecret", deviation = 60, ip_list = ["127.0.0.1"] }
+/// ]
+/// ```
+impl TryFrom<&PluginConf> for CombinedAuth {
+    type Error = Error;
+    fn try_from(value: &PluginConf) -> Result<Self> {
+        let hash_value = get_hash_key(value);
+
+        let Some(authorizations) = value.get("authorizations") else {
+            return Err(Error::Invalid {
+                category: CATEGORY.to_string(),
+                message: "authorizations is empty".to_string(),
+            });
+        };
+        let Some(authorizations) = authorizations.as_array() else {
+            return Err(Error::Invalid {
+                category: CATEGORY.to_string(),
+                message: "authorizations is not array".to_string(),
+            });
+        };
+        let mut auths = AHashMap::new();
+        for item in authorizations.iter() {
+            let Some(value) = item.as_table() else {
+                continue;
+            };
+            let app_id = get_str_conf(value, "app_id");
+            if app_id.is_empty() {
+                continue;
+            }
+            let mut ip_rules = None;
+            let ip_list = get_str_slice_conf(value, "ip_list");
+            if !ip_list.is_empty() {
+                ip_rules = Some(pingap_util::IpRules::new(&ip_list));
+            }
+            // `deviation` bounds the replay window, so it has to be a
+            // deliberate choice. It used to default to 0, which rejects every
+            // request whose timestamp is not exactly the current second — a
+            // config that appears to work only when the clocks happen to line
+            // up.
+            let deviation = get_int_conf(value, "deviation");
+            let secret = get_str_conf(value, "secret");
+            if deviation <= 0 && secret != SUPER_USER_SECRET {
+                return Err(Error::Invalid {
+                    category: CATEGORY.to_string(),
+                    message: format!(
+                        "deviation of app({app_id}) must be greater than 0 seconds"
+                    ),
+                });
+            }
+            auths.insert(
+                app_id,
+                AuthParam {
+                    ip_rules,
+                    secret,
+                    deviation,
+                },
+            );
+        }
+
+        Ok(Self {
+            plugin_step: PluginStep::Request,
+            hash_value,
+            auths,
+        })
+    }
+}
+
+impl CombinedAuth {
+    /// Creates a new CombinedAuth plugin instance from the provided configuration
+    ///
+    /// # Arguments
+    /// * `params` - Plugin configuration parameters
+    ///
+    /// # Returns
+    /// * `Result<Self>` - A new plugin instance or an error if configuration is invalid
+    pub fn new(params: &PluginConf) -> Result<Self> {
+        debug!(params = params.to_string(), "new combined auth plugin");
+        Self::try_from(params)
+    }
+
+    /// Validates an incoming request against the configured authentication rules
+    ///
+    /// # Arguments
+    /// * `session` - The HTTP session containing the request details
+    ///
+    /// # Returns
+    /// * `Result<()>` - Ok if validation passes, Error if any check fails
+    ///
+    /// # Authentication Steps
+    /// 1. Validates app_id from query parameters
+    /// 2. Checks IP restrictions (if configured)
+    /// 3. Validates timestamp to prevent replay attacks
+    /// 4. Verifies HMAC digest for request authenticity
+    ///
+    /// # Query Parameters Required
+    /// * `app_id` - Application identifier
+    /// * `ts` - Unix timestamp
+    /// * `digest` - SHA-256 HMAC of `secret:timestamp`
+    #[inline]
+    fn validate(&self, session: &Session, ctx: &mut Ctx) -> Result<()> {
+        let category = CATEGORY;
+        let req_header = session.req_header();
+
+        // Step 1: Extract and validate app_id
+        // The app_id must be provided as a query parameter: ?app_id=your_app_id
+        let Some(app_id) = get_query_value(req_header, "app_id") else {
+            return Err(Error::Invalid {
+                category: category.to_string(),
+                message: "app id is empty".to_string(),
+            });
+        };
+
+        // Step 2: Lookup authentication configuration for this app_id
+        let Some(auth_param) = self.auths.get(app_id) else {
+            return Err(Error::Invalid {
+                category: category.to_string(),
+                message: "app id is invalid".to_string(),
+            });
+        };
+
+        // Step 3: Super user check
+        // If secret is "*", this app has unlimited access
+        // USE WITH CAUTION: This bypasses all security checks
+        if auth_param.secret == SUPER_USER_SECRET {
+            return Ok(());
+        }
+
+        // Step 4: IP validation (if configured)
+        // Checks if the client IP is in the allowed list
+        // Uses X-Forwarded-For header for IP detection behind proxies
+        if let Some(ip_rules) = &auth_param.ip_rules {
+            let ip = ensure_client_ip(session, ctx);
+            if !ip_rules.is_match(ip).unwrap_or_default() {
+                return Err(Error::Invalid {
+                    category: category.to_string(),
+                    message: "ip is invalid".to_string(),
+                });
+            }
+        }
+
+        // Step 5: Timestamp validation
+        // Requires a Unix timestamp as query parameter: ?ts=1234567890
+        let ts = get_query_value(req_header, "ts").unwrap_or_default();
+        if ts.is_empty() {
+            return Err(Error::Invalid {
+                category: category.to_string(),
+                message: "timestamp is empty".to_string(),
+            });
+        }
+
+        // Convert timestamp to i64 and validate it's within acceptable range
+        let value = ts.parse::<i64>().map_err(|e| Error::Invalid {
+            category: category.to_string(),
+            message: e.to_string(),
+        })?;
+        let now = now_sec() as i64;
+        if (now - value).abs() > auth_param.deviation {
+            return Err(Error::Invalid {
+                category: category.to_string(),
+                message: "timestamp deviation is invalid".to_string(),
+            });
+        }
+
+        // Step 6: HMAC Authentication
+        // Requires a hex-encoded SHA-256 HMAC digest as query parameter: ?digest=abc123...
+        // digest = hex(SHA256(secret:timestamp))
+        let digest = get_query_value(req_header, "digest").unwrap_or_default();
+        if digest.is_empty() {
+            return Err(Error::Invalid {
+                category: category.to_string(),
+                message: "digest is empty".to_string(),
+            });
+        }
+
+        // Calculate expected digest
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}:{ts}", auth_param.secret).as_bytes());
+        let hash256 = hasher.finalize();
+
+        // Compare digests in constant time to prevent timing attacks.
+        if !pingap_core::constant_time_eq(
+            digest.to_lowercase().as_bytes(),
+            hash256.encode_hex::<String>().as_bytes(),
+        ) {
+            return Err(Error::Invalid {
+                category: category.to_string(),
+                message: "digest is invalid".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Plugin for CombinedAuth {
+    /// Returns the unique hash key for this plugin instance
+    #[inline]
+    fn config_key(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.hash_value)
+    }
+
+    /// Handles incoming HTTP requests by performing authentication checks
+    ///
+    /// # Arguments
+    /// * `step` - The current plugin execution step
+    /// * `session` - The HTTP session containing request details
+    /// * `_ctx` - Plugin state context
+    ///
+    /// # Returns
+    /// * `pingora::Result<Option<HttpResponse>>` - None if authentication passes,
+    ///   or an HTTP 401 response if authentication fails
+    #[inline]
+    async fn handle_request(
+        &self,
+        step: PluginStep,
+        session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<RequestPluginResult> {
+        if step != self.plugin_step {
+            return Ok(RequestPluginResult::Skipped);
+        }
+        if let Err(e) = self.validate(session, ctx) {
+            return Ok(RequestPluginResult::Respond(HttpResponse {
+                status: StatusCode::UNAUTHORIZED,
+                headers: Some(vec![HTTP_HEADER_NO_STORE.clone()]),
+                body: Bytes::from(e.to_string()),
+                ..Default::default()
+            }));
+        }
+
+        Ok(RequestPluginResult::Continue)
+    }
+}
+
+register_plugin!("combined_auth", CombinedAuth);
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthParam, CombinedAuth};
+    use ahash::AHashMap;
+    use hex::ToHex;
+    use pingap_config::PluginConf;
+    use pingap_core::{Ctx, PluginStep};
+    use pingora::proxy::Session;
+    use pretty_assertions::assert_eq;
+    use sha2::{Digest, Sha256};
+    use tokio_test::io::Builder;
+
+    /// `deviation` bounds the replay window. It used to default to 0, which
+    /// rejects every request whose timestamp is not exactly the current second.
+    #[test]
+    fn test_combined_auth_requires_deviation() {
+        let result = CombinedAuth::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+[[authorizations]]
+app_id = "pingap"
+secret = "123123"
+"###,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            "Plugin combined_auth invalid, message: deviation of app(pingap) must be greater than 0 seconds",
+            result.err().unwrap().to_string()
+        );
+
+        let params = CombinedAuth::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+[[authorizations]]
+app_id = "pingap"
+secret = "123123"
+deviation = 60
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(60, params.auths.get("pingap").unwrap().deviation);
+
+        // A super user app has no timestamp check to bound.
+        let params = CombinedAuth::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+[[authorizations]]
+app_id = "internal"
+secret = "*"
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(true, params.auths.contains_key("internal"));
+    }
+
+    #[tokio::test]
+    async fn test_combined_auth() {
+        let mut auths = AHashMap::new();
+        let secret = "abcd";
+        auths.insert(
+            "pingap".to_string(),
+            AuthParam {
+                ip_rules: Some(pingap_util::IpRules::new(&[
+                    "127.0.0.1".to_string(),
+                    "192.168.1.0/24".to_string(),
+                ])),
+                secret: secret.to_string(),
+                deviation: 60,
+            },
+        );
+        let combined_auth = CombinedAuth {
+            plugin_step: PluginStep::Request,
+            hash_value: "".to_string(),
+            auths,
+        };
+
+        // no app id
+        let headers = [""].join("\r\n");
+        let input_header =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = combined_auth.validate(&session, &mut Ctx::default());
+        assert_eq!(true, result.is_err());
+        assert_eq!(
+            "Plugin combined_auth invalid, message: app id is empty",
+            result.unwrap_err().to_string()
+        );
+
+        // app id is invalid
+        let headers = [""].join("\r\n");
+        let input_header = format!(
+            "GET /vicanso/pingap?app_id=abc HTTP/1.1\r\n{headers}\r\n\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = combined_auth.validate(&session, &mut Ctx::default());
+        assert_eq!(true, result.is_err());
+        assert_eq!(
+            "Plugin combined_auth invalid, message: app id is invalid",
+            result.unwrap_err().to_string()
+        );
+
+        // ip is invalid
+        let headers = ["X-Forwarded-For: 1.1.1.1"].join("\r\n");
+        let input_header = format!(
+            "GET /vicanso/pingap?app_id=pingap HTTP/1.1\r\n{headers}\r\n\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = combined_auth.validate(&session, &mut Ctx::default());
+        assert_eq!(true, result.is_err());
+        assert_eq!(
+            "Plugin combined_auth invalid, message: ip is invalid",
+            result.unwrap_err().to_string()
+        );
+
+        // timestamp is empty
+        let headers = ["X-Forwarded-For: 192.168.1.10"].join("\r\n");
+        let input_header = format!(
+            "GET /vicanso/pingap?app_id=pingap HTTP/1.1\r\n{headers}\r\n\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = combined_auth.validate(&session, &mut Ctx::default());
+        assert_eq!(true, result.is_err());
+        assert_eq!(
+            "Plugin combined_auth invalid, message: timestamp is empty",
+            result.unwrap_err().to_string()
+        );
+
+        // timestamp is invalid
+        let headers = ["X-Forwarded-For: 192.168.1.10"].join("\r\n");
+        let input_header = format!(
+            "GET /vicanso/pingap?app_id=pingap&ts=123 HTTP/1.1\r\n{headers}\r\n\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = combined_auth.validate(&session, &mut Ctx::default());
+        assert_eq!(true, result.is_err());
+        assert_eq!(
+            "Plugin combined_auth invalid, message: timestamp deviation is invalid",
+            result.unwrap_err().to_string()
+        );
+
+        // digest is empty
+        let headers = ["X-Forwarded-For: 192.168.1.10"].join("\r\n");
+        let ts = pingap_core::now_sec() as i64;
+        let input_header = format!(
+            "GET /vicanso/pingap?app_id=pingap&ts={ts} HTTP/1.1\r\n{headers}\r\n\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = combined_auth.validate(&session, &mut Ctx::default());
+        assert_eq!(true, result.is_err());
+        assert_eq!(
+            "Plugin combined_auth invalid, message: digest is empty",
+            result.unwrap_err().to_string()
+        );
+
+        // digest is invalid
+        let headers = ["X-Forwarded-For: 192.168.1.10"].join("\r\n");
+        let ts = pingap_core::now_sec() as i64;
+        let input_header = format!(
+            "GET /vicanso/pingap?app_id=pingap&ts={ts}&digest=abc HTTP/1.1\r\n{headers}\r\n\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = combined_auth.validate(&session, &mut Ctx::default());
+        assert_eq!(true, result.is_err());
+        assert_eq!(
+            "Plugin combined_auth invalid, message: digest is invalid",
+            result.unwrap_err().to_string()
+        );
+
+        let headers = ["X-Forwarded-For: 192.168.1.10"].join("\r\n");
+        let ts = pingap_core::now_sec() as i64;
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{secret}:{ts}",).as_bytes());
+        let hash256 = hasher.finalize();
+        let digest = hash256.encode_hex::<String>();
+        let input_header = format!(
+            "GET /vicanso/pingap?app_id=pingap&ts={ts}&digest={digest} HTTP/1.1\r\n{headers}\r\n\r\n"
+        );
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = combined_auth.validate(&session, &mut Ctx::default());
+        assert_eq!(true, result.is_ok());
+    }
+}

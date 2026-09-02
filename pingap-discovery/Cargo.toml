@@ -1,0 +1,36 @@
+[package]
+name = "pingap-discovery"
+version.workspace = true
+edition = "2024"
+authors = ["Tree Xie <tree.xie@outlook.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/vicanso/pingap"
+repository = "https://github.com/vicanso/pingap"
+keywords = ["pingap", "discovery"]
+description = "Discovery for pingap"
+
+[lib]
+name = "pingap_discovery"
+path = "src/lib.rs"
+
+
+[dependencies]
+async-trait = { workspace = true }
+bollard = { workspace = true }
+futures = { workspace = true }
+hickory-resolver = { workspace = true }
+http = { workspace = true }
+pingap-core = { workspace = true }
+pingora = { workspace = true }
+snafu = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = "3.21.0"
+tokio-test = "0.4.4"
+
+[lints.clippy]
+# Set the unwrap_used lint level to deny
+unwrap_used = "deny"
