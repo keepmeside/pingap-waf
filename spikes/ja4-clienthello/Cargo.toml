@@ -1,0 +1,24 @@
+[package]
+name = "spike-ja4-clienthello"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway. Phase 02 Spike A only — the decision gate for Phase 16 (full JA4
+# over the TLS ClientHello). A no-go cuts Phase 16 entirely and Phase 06 ships
+# JA4H alone. Not in the workspace `members`.
+
+[dependencies]
+# Same openssl surface pingap uses. `vendored` is deliberately NOT enabled here:
+# the question is whether the ossl111 cfg holds against what actually links, and
+# forcing a vendored build would answer a different question.
+openssl = "0.10"
+openssl-sys = "0.9"
+libc = "0.2"
+# Needed for ForeignTypeRef::as_ptr on SslRef; openssl 0.10 re-exports nothing.
+foreign-types = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+
+[build-dependencies]
+openssl-sys = "0.9"

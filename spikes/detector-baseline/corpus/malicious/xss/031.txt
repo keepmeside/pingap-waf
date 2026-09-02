@@ -1,0 +1,1 @@
+<input onfocus=alert(1) autofocus>

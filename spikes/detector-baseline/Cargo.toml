@@ -1,0 +1,17 @@
+[package]
+name = "spike-detector-baseline"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway. Phase 02 Spike C only — measures the false-positive rate of
+# pingora-waf's detector patterns as written, so Phase 04 has a regression
+# target rather than an opinion. Not in the workspace `members`.
+
+[dependencies]
+# Same engine pingora-waf uses, so the measurement reflects its real behaviour
+# rather than a re-implementation in a different regex dialect.
+regex = "1"
+once_cell = "1"
+sha2 = "0.10"
+hex = "0.4"

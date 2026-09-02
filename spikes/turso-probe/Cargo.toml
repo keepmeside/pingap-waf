@@ -1,0 +1,15 @@
+[package]
+name = "spike-turso-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway. Phase 02 Spike B only — a fallback probe, not a decision gate: the
+# outcome selects the Phase 07 storage driver (turso vs rusqlite on the same file
+# format), not whether Phase 07 proceeds. Not in the workspace `members`.
+
+[dependencies]
+# Pinned exactly. The plan forbids 0.8.0-pre.*, and `cargo search` currently only
+# surfaces that pre-release line, so an inexact requirement would drift onto it.
+turso = "=0.7.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

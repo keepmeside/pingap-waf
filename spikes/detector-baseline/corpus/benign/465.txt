@@ -1,0 +1,1 @@
+https://cdn.example.com/v2/images/photo.4.webp?w=800

@@ -1,0 +1,1 @@
+<style>@import 'javascript:alert(1)';</style>

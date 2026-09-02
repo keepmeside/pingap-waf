@@ -1,0 +1,1 @@
+--verbose --output=json # run 0

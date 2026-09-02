@@ -1,0 +1,1 @@
+/assets/js/vendor.0005.chunk.js

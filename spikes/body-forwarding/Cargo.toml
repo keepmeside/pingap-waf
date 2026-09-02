@@ -1,0 +1,17 @@
+[package]
+name = "spike-body-forwarding"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway. Phase 02 Spike E only — answers which hook can inspect a request
+# body and still forward it byte-identically upstream. Not in the workspace
+# `members`; see the root Cargo.toml `exclude`.
+
+[dependencies]
+pingora = { version = "0.8.1", default-features = false, features = ["lb"] }
+pingora-core = "0.8.1"
+pingora-proxy = "0.8.1"
+async-trait = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }

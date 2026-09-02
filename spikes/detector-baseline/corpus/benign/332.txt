@@ -1,0 +1,1 @@
+{"id":6,"name":"widget-6","tags":["a","b"],"active":true}
