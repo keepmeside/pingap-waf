@@ -2,6 +2,14 @@
 
 - [acme chart](./acme_chart.md)
 - [modules](./modules.md)
+- **WAF** (this fork) — [plugin reference](./waf-plugin.md),
+  [category → CRS lineage](./waf-category-mapping.md),
+  [latency](./waf-benchmark.md), [spike findings](./spikes/)
+- **ACL and domains** (this fork) — [plugin reference](./acl-plugin.md),
+  [domain model](./domain-model.md)
+- **Bot management** (this fork) — [JA4 support and the `bot` plugin](./ja4-support.md)
+- **Control plane** (this fork) — [store, per-user admin auth, driver constraints](./control-plane-store.md),
+  [config projection and versioning](./config-projection.md)
 - **Chinese translations** — [zh/](./zh/) (home, plugins, crates, guide)
 - **Documentation site** (VitePress, bilingual) — assembled by
   [`scripts/build-website.sh`](../scripts/build-website.sh), built under

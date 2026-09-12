@@ -93,7 +93,10 @@ impl ResponseRule for Needle {
             category: self.category,
             severity: self.severity,
             score: self.severity.default_score(),
-            matched_field: MatchedField::ResponseBody { offset: 0 },
+            matched_field: MatchedField::ResponseBody {
+                offset: body.find(self.needle).unwrap_or(0),
+                len: self.needle.len(),
+            },
         })
     }
 }

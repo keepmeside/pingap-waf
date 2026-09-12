@@ -53,6 +53,24 @@ impl IpRules {
         }
     }
 
+    /// How many entries were actually parsed and stored.
+    ///
+    /// `new` drops what it cannot parse, so a typo in a CIDR list produces a rule that
+    /// silently covers less than its author wrote. Callers that validate config compare
+    /// this against the number of entries they passed in and reject the difference;
+    /// without it there is no way to tell "no entries matched" from "the entry was
+    /// never understood".
+    pub fn len(&self) -> usize {
+        self.ip_net_list.len() + self.ip_set.len()
+    }
+
+    /// Whether nothing was stored. An empty allow list and an all-typos allow list are
+    /// both this, which is why callers needing to tell them apart use [`Self::len`]
+    /// against their own input count.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Checks if a given IP address matches any of the stored rules.
     ///
     /// This is the primary method for checking access. It parses the string

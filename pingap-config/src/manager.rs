@@ -323,6 +323,12 @@ impl ConfigManager {
         // client-IP resolution (X-Forwarded-For handling) is applied on both
         // boot and every reload without a separate wiring point.
         pingap_core::set_trusted_proxies(&config.basic.trusted_proxies);
+        // Same reason, for the posture taken when a security-enforcing plugin is
+        // configured but not running. Read on the request path, so it lives in a static
+        // rather than being threaded through every Location.
+        pingap_core::set_policy_unavailable_mode(
+            &config.basic.on_policy_unavailable,
+        );
         self.current_config.store(Arc::new(config));
     }
 

@@ -120,13 +120,31 @@ impl fmt::Display for Severity {
 pub enum MatchedField {
     Method,
     Uri,
-    Query { key: String },
-    Header { name: String },
-    Cookie { name: String },
-    Body { offset: usize },
+    Query {
+        key: String,
+    },
+    Header {
+        name: String,
+    },
+    Cookie {
+        name: String,
+    },
+    /// Byte range of the match within the inspected body prefix. The length is
+    /// carried because a redactor has to know how much to mask, and masking a fixed
+    /// guessed window would either leave part of a leak readable or destroy bytes
+    /// around it.
+    Body {
+        offset: usize,
+        len: usize,
+    },
     Status,
-    ResponseHeader { name: String },
-    ResponseBody { offset: usize },
+    ResponseHeader {
+        name: String,
+    },
+    ResponseBody {
+        offset: usize,
+        len: usize,
+    },
 }
 
 impl fmt::Display for MatchedField {
@@ -137,13 +155,13 @@ impl fmt::Display for MatchedField {
             Self::Query { key } => write!(f, "query:{key}"),
             Self::Header { name } => write!(f, "header:{name}"),
             Self::Cookie { name } => write!(f, "cookie:{name}"),
-            Self::Body { offset } => write!(f, "body@{offset}"),
+            Self::Body { offset, len } => write!(f, "body@{offset}+{len}"),
             Self::Status => f.write_str("status"),
             Self::ResponseHeader { name } => {
                 write!(f, "response_header:{name}")
             },
-            Self::ResponseBody { offset } => {
-                write!(f, "response_body@{offset}")
+            Self::ResponseBody { offset, len } => {
+                write!(f, "response_body@{offset}+{len}")
             },
         }
     }
@@ -341,7 +359,11 @@ mod tests {
             name: "user-agent".into(),
         };
         assert_eq!(f.to_string(), "header:user-agent");
-        let b = MatchedField::Body { offset: 42 };
-        assert_eq!(b.to_string(), "body@42");
+        // A body match renders position and length, never the bytes. The length is
+        // what a redactor needs; the bytes are what an attacker wants in your logs.
+        let b = MatchedField::Body { offset: 42, len: 7 };
+        assert_eq!(b.to_string(), "body@42+7");
+        let r = MatchedField::ResponseBody { offset: 0, len: 19 };
+        assert_eq!(r.to_string(), "response_body@0+19");
     }
 }

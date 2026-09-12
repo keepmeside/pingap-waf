@@ -94,6 +94,19 @@ fn engine() -> RuleEngine {
         .expect("bench ruleset builds")
 }
 
+/// The same config, but carrying the full native detector set on top of the eight
+/// operator patterns. This is the number that matters after the port: the engine-only
+/// figures above are the floor it is measured against.
+fn engine_with_detectors() -> RuleEngine {
+    let validated = config().validate().expect("bench config is valid");
+    RuleEngine::build(
+        validated,
+        pingap_waf::detectors::request_rules(),
+        pingap_waf::detectors::response_rules(),
+    )
+    .expect("native ruleset builds")
+}
+
 /// Headers a real browser sends, none of which trips a rule. The allow path is
 /// the one every legitimate request takes, so it is the one whose cost matters.
 const HEADERS: &[(&str, &str)] = &[
@@ -227,6 +240,62 @@ fn bench_engine_build(c: &mut Criterion) {
     });
 }
 
+/// The same three request shapes with the native detectors loaded.
+///
+/// Reported next to the engine-only numbers rather than replacing them, because the
+/// question Phase 04 has to answer is not "is the WAF fast" but "what did the
+/// detectors cost". One number cannot answer that.
+fn bench_with_detectors(c: &mut Criterion) {
+    let engine = engine_with_detectors();
+    let body = benign_body();
+    let mut group = c.benchmark_group("detectors loaded");
+    group.bench_function("headers only", |b| {
+        let input = base_request();
+        b.iter(|| engine.evaluate_request(black_box(&input)));
+    });
+    group.bench_function("1KB body", |b| {
+        let input = RequestInput {
+            method: "POST",
+            body: Some(&body),
+            ..base_request()
+        };
+        b.iter(|| engine.evaluate_request(black_box(&input)));
+    });
+    group.bench_function("blocking", |b| {
+        let query = [("q", "' union select password from users")];
+        let input = RequestInput {
+            uri: "/search?q=%27+union+select+password+from+users",
+            query: &query,
+            ..base_request()
+        };
+        b.iter(|| engine.evaluate_request(black_box(&input)));
+    });
+    group.bench_function("response 1KB prefix", |b| {
+        let input = ResponseInput {
+            status: 200,
+            headers: &[("content-type", "application/json")],
+            body_chunk: Some(&body),
+            request_score: 0,
+            body_truncated: false,
+        };
+        b.iter(|| engine.evaluate_response(black_box(&input)));
+    });
+    group.bench_function("validate + build", |b| {
+        let cfg = config();
+        b.iter(|| {
+            let validated =
+                black_box(cfg.clone()).validate().expect("valid config");
+            RuleEngine::build(
+                validated,
+                pingap_waf::detectors::request_rules(),
+                pingap_waf::detectors::response_rules(),
+            )
+            .expect("builds")
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_headers_only,
@@ -234,5 +303,6 @@ criterion_group!(
     bench_blocking_request,
     bench_response_prefix,
     bench_engine_build,
+    bench_with_detectors,
 );
 criterion_main!(benches);

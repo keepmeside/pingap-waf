@@ -38,7 +38,7 @@ use pingap_core::{
     ResponseBodyPluginResult, ResponsePluginResult, get_cache_key,
 };
 use pingap_core::{HTTP_HEADER_NAME_X_REQUEST_ID, get_digest_detail};
-use pingap_core::{NamedPlugin, new_internal_error};
+use pingap_core::{NamedPlugin, PluginMiss, new_internal_error};
 use pingap_location::{Location, LocationProvider};
 use pingap_logger::{Parser, parse_access_log_directive};
 #[cfg(feature = "tracing")]
@@ -77,7 +77,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Access-log lines dropped because the async logger channel was full.
 static ACCESS_LOG_DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -584,8 +584,13 @@ impl Server {
         }
 
         // initialize plugins and execute
-        ctx.plugins = self.get_context_plugins(location.clone());
-        let _ = self
+        ctx.plugins = self.get_context_plugins(location.clone())?;
+        // The result is kept, not discarded. `early_request_filter` returns
+        // `Result<()>`, which pingora reads as "carry on", so a plugin that
+        // responded here has to hand the decision to `request_filter` — the first
+        // callback with a `bool` to return — or the request is proxied upstream
+        // after the client has already been answered.
+        ctx.state.early_request_handled = self
             .handle_request_plugin(PluginStep::EarlyRequest, session, ctx)
             .await?;
 
@@ -703,23 +708,65 @@ const MODULE_GRPC_WEB: &str = "grpc-web";
 
 impl Server {
     #[inline]
+    /// Resolve a Location's plugin names to instances.
+    ///
+    /// A name that does not resolve was, until now, simply dropped: no error and no log,
+    /// and a Location whose list resolved to empty proxied straight upstream. That is
+    /// right for a broken `compression` and disqualifying for a broken `waf` — the site
+    /// then serves unfiltered traffic while the control plane reports it protected.
+    ///
+    /// So a *configured but unbuildable* plugin in a security-enforcing category refuses
+    /// the request instead. 503, not 403: the client was not denied by policy, the policy
+    /// could not be evaluated, and conflating the two would put config failures into
+    /// block metrics. A name nobody configured keeps the old behaviour, because that is a
+    /// config typo rather than a control that stopped running.
     fn get_context_plugins(
         &self,
         location: Arc<Location>,
-    ) -> Option<Vec<NamedPlugin>> {
-        let plugins = location.plugins.as_ref()?;
+    ) -> pingora::Result<Option<Vec<NamedPlugin>>> {
+        let Some(plugins) = location.plugins.as_ref() else {
+            return Ok(None);
+        };
 
-        let location_plugins: Vec<_> = plugins
-            .iter()
-            .filter_map(|name| {
-                self.plugin_provider
-                    .get(name)
-                    .map(|plugin| (name.clone(), plugin))
-            })
-            .collect();
+        let mut location_plugins = Vec::with_capacity(plugins.len());
+        for name in plugins.iter() {
+            if let Some(plugin) = self.plugin_provider.get(name) {
+                location_plugins.push((name.clone(), plugin));
+                continue;
+            }
+            let PluginMiss::Failed { category, reason } =
+                self.plugin_provider.miss(name)
+            else {
+                continue;
+            };
+            if !pingap_core::is_security_enforcing(&category) {
+                continue;
+            }
+            if pingap_core::policy_fails_open() {
+                warn!(
+                    target: LOG_TARGET,
+                    name = name.as_ref(),
+                    category,
+                    reason,
+                    "a security policy is not running and on_policy_unavailable is fail_open; serving unprotected"
+                );
+                continue;
+            }
+            error!(
+                target: LOG_TARGET,
+                name = name.as_ref(),
+                category,
+                reason,
+                "a security policy is configured but not running; refusing the request"
+            );
+            return Err(new_internal_error(
+                503,
+                format!("policy `{name}` is unavailable"),
+            ));
+        }
 
         // use then_some to handle empty collection
-        (!location_plugins.is_empty()).then_some(location_plugins)
+        Ok((!location_plugins.is_empty()).then_some(location_plugins))
     }
 
     /// Executes request plugins in the configured chain
@@ -855,6 +902,61 @@ impl Server {
             }
             Ok(())
         };
+        ctx.plugins = Some(plugins);
+        result
+    }
+
+    /// Dispatches a request-body chunk to every plugin.
+    ///
+    /// Mirrors `handle_response_body_plugin`, including the `ctx.plugins.take()` and
+    /// restore pair — the borrow checker needs the plugin map out of `ctx` while
+    /// `ctx` is passed mutably to each plugin, and it must go back afterwards or the
+    /// next dispatch in the same request finds none.
+    ///
+    /// A plugin rejects by returning `Err`, which `fail_to_proxy` renders. That is
+    /// the same mechanism the 413 guard below already uses.
+    #[inline]
+    pub fn handle_request_body_plugin(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<()> {
+        let plugins = match ctx.plugins.take() {
+            Some(p) => p,
+            None => return Ok(()), // No plugins, exit early.
+        };
+        if plugins.is_empty() {
+            ctx.plugins = Some(plugins);
+            return Ok(());
+        }
+        let result = {
+            let mut outcome = Ok(());
+            for (name, plugin) in plugins.iter() {
+                let now = Instant::now();
+                outcome = plugin.handle_request_body(
+                    session,
+                    ctx,
+                    body,
+                    end_of_stream,
+                );
+                let elapsed = now.elapsed().as_millis() as u32;
+                if elapsed > 0 {
+                    ctx.add_plugin_processing_time(name, elapsed);
+                }
+                if outcome.is_err() {
+                    debug!(
+                        target: LOG_TARGET,
+                        name = &**name, elapsed, "request body plugin rejected the request"
+                    );
+                    break;
+                }
+            }
+            outcome
+        };
+        // Restored before returning even on the reject path, so a rejected request
+        // still logs its plugin timings.
         ctx.plugins = Some(plugins);
         result
     }
@@ -1039,6 +1141,12 @@ impl ProxyHttp for Server {
     {
         debug!(target: LOG_TARGET, "--> request filter");
         defer!(debug!(target: LOG_TARGET, "<-- request filter"););
+        // Before anything else, including the admin and ACME routes: a plugin that
+        // already answered at `EarlyRequest` has written the response, and this is
+        // the first callback able to tell pingora to stop.
+        if ctx.state.early_request_handled {
+            return Ok(true);
+        }
         // try to handle special requests in order
         // admin route
         if let Some(result) = self.handle_admin_request(session, ctx).await {
@@ -1232,9 +1340,9 @@ impl ProxyHttp for Server {
     /// Tracks payload size and enforces size limits.
     async fn request_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
-        _end_of_stream: bool,
+        end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<()>
     where
@@ -1254,6 +1362,10 @@ impl ProxyHttp for Server {
                 }
             }
         }
+        // After the size guard, so an over-limit body is rejected without being
+        // inspected, and before the chunk continues to the upstream, so a plugin
+        // that rejects does so with zero bytes forwarded.
+        self.handle_request_body_plugin(session, ctx, body, end_of_stream)?;
         Ok(())
     }
     /// Generates cache keys for request caching.
@@ -1642,7 +1754,7 @@ mod tests {
     use ahash::AHashMap;
     use pingap_certificate::{DynamicCertificates, TlsCertificate};
     use pingap_config::{PingapConfig, new_file_config_manager};
-    use pingap_core::{CacheInfo, Ctx, Plugin, UpstreamInfo};
+    use pingap_core::{CacheInfo, Ctx, HttpResponse, Plugin, UpstreamInfo};
     use pingap_location::LocationStats;
     use pingora::http::ResponseHeader;
     use pingora::protocols::tls::SslDigest;
@@ -1931,6 +2043,298 @@ value = 'proxy_set_headers = ["name:value"]'
         (server, request_calls, body_calls)
     }
 
+    /// Denies at one nominated step, and counts how often it is asked to.
+    ///
+    /// Status 999 rather than 403 on purpose: `handle_request_plugin` skips the wire
+    /// write for statuses at or above 900, so the dispatch still records the request
+    /// as handled while the mock IO sees no unexpected write. What is under test is
+    /// where a denial is honoured, not how the bytes are rendered.
+    struct DenyingPlugin {
+        at: PluginStep,
+        denials: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Plugin for DenyingPlugin {
+        async fn handle_request(
+            &self,
+            step: PluginStep,
+            _session: &mut Session,
+            _ctx: &mut Ctx,
+        ) -> pingora::Result<RequestPluginResult> {
+            if step != self.at {
+                return Ok(RequestPluginResult::Skipped);
+            }
+            self.denials.fetch_add(1, Ordering::SeqCst);
+            Ok(RequestPluginResult::Respond(
+                HttpResponse::builder(StatusCode::from_u16(999).unwrap())
+                    .finish(),
+            ))
+        }
+    }
+
+    /// A plugin that denies at `EarlyRequest` must stop the request, not merely
+    /// answer it.
+    ///
+    /// `find_and_apply_location` used to discard the dispatch result with
+    /// `let _ =`, and `early_request_filter` has no way to signal "handled" —
+    /// pingora reads its `Ok(())` as "carry on". So the `Respond` arm wrote a
+    /// response to the client and the request was then proxied upstream anyway:
+    /// an authorization bypass for any denying plugin at that step. Nothing
+    /// shipped in pingap responds at `EarlyRequest`, which is why it stayed
+    /// latent; the WAF is the first plugin that would.
+    #[tokio::test]
+    async fn test_early_request_denial_stops_the_request() {
+        let denials = Arc::new(AtomicUsize::new(0));
+        let server = new_server_with(Some(Arc::new(CountingPluginProvider {
+            plugin: Arc::new(DenyingPlugin {
+                at: PluginStep::EarlyRequest,
+                denials: denials.clone(),
+            }),
+        })));
+
+        let input_header = "GET /vicanso/pingap HTTP/1.1\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let mut ctx = Ctx::default();
+        server
+            .early_request_filter(&mut session, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            1,
+            denials.load(Ordering::SeqCst),
+            "the early step never dispatched"
+        );
+
+        assert_eq!(
+            true,
+            server.request_filter(&mut session, &mut ctx).await.unwrap(),
+            "request_filter reported not-done, so pingora would proxy a denied request upstream"
+        );
+    }
+
+    /// A plugin enforces on the Locations that list it and nowhere else.
+    ///
+    /// This is the whole of per-domain binding: `get_context_plugins` reads
+    /// `location.plugins` and resolves each name through the provider, so a Location
+    /// that does not name the plugin never receives an instance and the dispatch loop
+    /// has nothing to call. Worth asserting rather than assuming, because both failure
+    /// directions are silent — a WAF listed but not resolved serves unprotected
+    /// traffic, and a WAF resolved for a Location that never listed it denies traffic
+    /// nobody meant to protect.
+    #[tokio::test]
+    async fn test_a_plugin_enforces_only_where_its_location_lists_it() {
+        let toml_data = r###"
+[upstreams.charts]
+addrs = ["127.0.0.1:5000"]
+
+[locations.guarded]
+upstream = "charts"
+path = "/"
+plugins = ["deny"]
+
+[locations.open]
+upstream = "charts"
+path = "/"
+plugins = ["stats"]
+"###;
+        let conf = PingapConfig::new(toml_data.as_ref(), false).unwrap();
+
+        // Resolves the denying plugin for one name only, exactly as the real provider
+        // resolves a configured plugin by name and returns `None` for an unknown one.
+        struct ByNameProvider {
+            denials: Arc<AtomicUsize>,
+        }
+        impl PluginProvider for ByNameProvider {
+            fn get(&self, name: &str) -> Option<Arc<dyn Plugin>> {
+                (name == "deny").then(|| {
+                    Arc::new(DenyingPlugin {
+                        at: PluginStep::Request,
+                        denials: self.denials.clone(),
+                    }) as Arc<dyn Plugin>
+                })
+            }
+        }
+
+        let denials = Arc::new(AtomicUsize::new(0));
+        let server = new_server_with(Some(Arc::new(ByNameProvider {
+            denials: denials.clone(),
+        })));
+
+        for (name, expect_denied) in [("guarded", true), ("open", false)] {
+            let location = Arc::new(
+                Location::new(name, conf.locations.get(name).unwrap()).unwrap(),
+            );
+            let mock_io = Builder::new()
+                .read(b"GET /vicanso/pingap HTTP/1.1\r\n\r\n")
+                .build();
+            let mut session = Session::new_h1(Box::new(mock_io));
+            session.read_request().await.unwrap();
+
+            let mut ctx = Ctx {
+                plugins: server.get_context_plugins(location).unwrap(),
+                ..Default::default()
+            };
+            let denied = server
+                .handle_request_plugin(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut ctx,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                expect_denied, denied,
+                "location {name:?} reached the wrong verdict"
+            );
+        }
+        assert_eq!(
+            1,
+            denials.load(Ordering::SeqCst),
+            "the plugin ran for a location that never listed it"
+        );
+    }
+
+    /// A provider in which one name is configured and broken. Stands for the real
+    /// provider after a reload in which that plugin's constructor rejected its config:
+    /// `get` returns `None`, and `miss` says why.
+    struct BrokenPluginProvider {
+        broken: &'static str,
+        category: &'static str,
+    }
+    impl PluginProvider for BrokenPluginProvider {
+        fn get(&self, _name: &str) -> Option<Arc<dyn Plugin>> {
+            None
+        }
+        fn miss(&self, name: &str) -> PluginMiss {
+            if name == self.broken {
+                PluginMiss::Failed {
+                    category: self.category.to_string(),
+                    reason: "constructor rejected the config".to_string(),
+                }
+            } else {
+                PluginMiss::Unknown
+            }
+        }
+    }
+
+    fn location_listing(plugin: &str) -> Arc<Location> {
+        let conf = pingap_config::LocationConf {
+            upstream: Some("charts".to_string()),
+            plugins: Some(vec![plugin.to_string()]),
+            ..Default::default()
+        };
+        Arc::new(Location::new("l", &conf).unwrap())
+    }
+
+    /// `on_policy_unavailable` is one process-global flag and libtest runs tests on
+    /// parallel threads, so the test that sets `fail_open` would otherwise decide the
+    /// outcome of one asserting `fail_closed`. Every test below that touches the posture
+    /// takes this first.
+    ///
+    /// Poisoning is stepped over rather than unwrapped: a test that panicked while holding
+    /// it has already reported the real failure, and turning that into a poison panic in
+    /// three other tests would bury it.
+    static POSTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The fail-closed guard. A Location listing a security-enforcing plugin that is
+    /// configured but not running must refuse the request rather than proxy it
+    /// unfiltered — and refuse with 503, because the client was not denied by policy.
+    #[test]
+    fn test_a_broken_security_plugin_fails_the_request_closed() {
+        let _posture = POSTURE.lock().unwrap_or_else(|e| e.into_inner());
+        pingap_core::set_policy_unavailable_mode(&None);
+        for category in pingap_core::SECURITY_ENFORCING_CATEGORIES {
+            let server =
+                new_server_with(Some(Arc::new(BrokenPluginProvider {
+                    broken: "guard",
+                    category,
+                })));
+            let err =
+                match server.get_context_plugins(location_listing("guard")) {
+                    Err(err) => err,
+                    Ok(_) => panic!(
+                        "a broken `{category}` plugin was silently skipped"
+                    ),
+                };
+            assert!(
+                matches!(err.etype(), pingora::ErrorType::HTTPStatus(503)),
+                "a broken `{category}` plugin refused with {:?}, not 503",
+                err.etype()
+            );
+        }
+    }
+
+    /// The guard is scoped. A broken `compression` must not take a site down: the
+    /// name is dropped and the request continues, exactly as before.
+    #[test]
+    fn test_a_broken_non_enforcing_plugin_is_still_skipped() {
+        let _posture = POSTURE.lock().unwrap_or_else(|e| e.into_inner());
+        pingap_core::set_policy_unavailable_mode(&None);
+        let server = new_server_with(Some(Arc::new(BrokenPluginProvider {
+            broken: "gz",
+            category: "compression",
+        })));
+        let plugins = server
+            .get_context_plugins(location_listing("gz"))
+            .expect("a broken utility plugin must not fail the request");
+        assert!(
+            plugins.is_none(),
+            "a plugin that failed to build was resolved"
+        );
+    }
+
+    /// A name nobody configured is a typo, not a control that stopped running, and
+    /// keeps the old drop-and-continue behaviour even in a security category's slot.
+    #[test]
+    fn test_an_unknown_plugin_name_is_still_skipped() {
+        let _posture = POSTURE.lock().unwrap_or_else(|e| e.into_inner());
+        pingap_core::set_policy_unavailable_mode(&None);
+        let server = new_server_with(Some(Arc::new(BrokenPluginProvider {
+            broken: "something-else",
+            category: "waf",
+        })));
+        let plugins = server
+            .get_context_plugins(location_listing("waf:nope"))
+            .expect("an unconfigured name must not fail the request");
+        assert!(plugins.is_none());
+    }
+
+    /// The operator escape hatch. `fail_open` serves the request; anything that is not
+    /// exactly `fail_open` — including a typo — is `fail_closed`.
+    #[test]
+    fn test_on_policy_unavailable_fail_open_serves_and_a_typo_does_not() {
+        let _posture = POSTURE.lock().unwrap_or_else(|e| e.into_inner());
+        let server = new_server_with(Some(Arc::new(BrokenPluginProvider {
+            broken: "guard",
+            category: "waf",
+        })));
+
+        pingap_core::set_policy_unavailable_mode(&Some(
+            "fail_open".to_string(),
+        ));
+        assert!(
+            server
+                .get_context_plugins(location_listing("guard"))
+                .expect("fail_open must serve")
+                .is_none()
+        );
+
+        for typo in ["fail-open", "open", "FAIL_OPEN", ""] {
+            pingap_core::set_policy_unavailable_mode(&Some(typo.to_string()));
+            assert!(
+                server
+                    .get_context_plugins(location_listing("guard"))
+                    .is_err(),
+                "`{typo}` selected the permissive branch"
+            );
+        }
+        pingap_core::set_policy_unavailable_mode(&None);
+    }
+
     /// Regression for the pre-auth bypass reported in #215.
     ///
     /// `get_context_plugins` used to return `None` when `session.is_upgrade_req()`,
@@ -2014,7 +2418,7 @@ value = 'proxy_set_headers = ["name:value"]'
 
         let location = server.location_provider.get("lo").unwrap();
         let mut ctx = Ctx {
-            plugins: server.get_context_plugins(location),
+            plugins: server.get_context_plugins(location).unwrap(),
             ..Default::default()
         };
         let mut body = Some(bytes::Bytes::from_static(b"hello"));

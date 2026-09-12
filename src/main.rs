@@ -39,6 +39,10 @@ use pingap_core::BackgroundTaskService;
 #[allow(unused_imports)]
 use pingap_imageoptim::ImageOptim;
 use pingap_logger::parse_access_log_directive;
+// Imported for its side effect: the `#[ctor]` in `pingap-waf` registers
+// `category = "waf"` with the plugin factory, and an rlib nothing references can be
+// dropped at link time, taking the constructor with it. Same reason as the
+// `ImageOptim` import above.
 use pingap_logger::{
     AsyncLoggerTask, LogCompressParams, new_async_logger,
     new_log_compress_service,
@@ -51,12 +55,20 @@ use pingap_performance::set_metrics_upstream_provider;
 use pingap_plugin::get_plugin_factory;
 use pingap_proxy::{AppContext, Server, ServerConf, parse_from_conf};
 use pingap_upstream::new_upstream_health_check_task;
+#[allow(unused_imports)]
+use pingap_waf::plugin::Waf;
+// Same reason as the `Waf` import above: an rlib nothing references can be dropped at
+// link time, and the `#[ctor]` that registers `category = "acl"` goes with it.
+#[allow(unused_imports)]
+use pingap_acl::plugin::Acl;
+#[allow(unused_imports)]
+use pingap_bot::plugin::Bot;
 use pingora::server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
 use process::{
     get_admin_addr, get_start_time, new_auto_restart_service,
-    new_observer_service, set_admin_addr,
+    new_observer_service, set_admin_addr, set_config_path,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -73,6 +85,10 @@ mod config_manager;
 mod locations;
 mod plugin;
 mod process;
+// Fork-owned. Wires `pingap-controlplane`'s projection traits to the real config
+// manager, plugin provider and plugin factory, which that crate cannot see, and
+// schedules the drift check.
+mod projection;
 mod quick_start;
 mod server_locations;
 mod upstreams;
@@ -511,6 +527,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     if let Some(admin) = &args.admin {
         set_admin_addr(admin);
     }
+    // Recorded before either branch below parses the admin address, because
+    // the control-plane store defaults to a file beside the config.
+    if let Some(conf) = &args.conf {
+        set_config_path(conf);
+    }
     if args.cp && args.admin.is_some() {
         return run_admin_node(args);
     }
@@ -647,6 +668,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         info!(target: LOG_TARGET, "Validate config success");
         return Ok(());
     }
+
+    // What happens when a security-enforcing plugin is configured but failed to
+    // build. `fail_open` is the choice that serves unprotected traffic, so it is
+    // reported rather than left for an operator to infer from a 200 that should
+    // have been a 503.
+    projection::log_policy_unavailable_posture(
+        &basic_conf.on_policy_unavailable,
+    );
 
     let auto_restart_check_interval = basic_conf
         .auto_restart_check_interval
@@ -854,6 +883,35 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     if let Some(task) = new_storage_clear_service() {
         simple_background_service.add_task("storage_clear", task);
+    }
+
+    // Drift detection: has the running config diverged from the version the control
+    // plane last confirmed enforcing? Reported, never corrected — a hand edit is
+    // either a deliberate emergency change or evidence somebody bypassed the control
+    // plane, and overwriting it destroys that information either way. Only with
+    // `--admin`, because the store that holds the versions to compare against does
+    // not exist without it.
+    if let Some(store_path) = crate::plugin::admin_store_path() {
+        simple_background_service.add_task(
+            "config_drift",
+            projection::new_drift_detection_task(
+                store_path.clone(),
+                config_manager.clone(),
+                webhook::get_webhook_sender(),
+            ),
+        );
+        // A version left `pending` is one nobody confirmed enforcing: the process that
+        // committed it died before reading the data plane back. Left alone the row stays
+        // pending forever and the rollback target skips it, so an operator's rollback
+        // list is missing the version actually running.
+        simple_background_service.add_task(
+            "config_verify",
+            projection::new_pending_verification_task(
+                store_path,
+                config_manager.clone(),
+                projection::DEFAULT_RELOAD_WINDOW,
+            ),
+        );
     }
 
     let enabled_http_challenge = certificates.iter().any(|(_, certificate)| {

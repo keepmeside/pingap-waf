@@ -91,3 +91,69 @@ path, which belongs to Phase 08. What is established here is that the class is
 **non-empty** and includes at least: unknown category, feature-gated category
 absent from the build, and invalid plugin parameters. That is enough to justify
 post-commit verification, which was the decision this spike gated.
+
+## Re-measured during Phase 08 — 2026-09-03
+
+The gate was re-run against the current binary while building the projection, because
+Phase 08 depends on knowing exactly what `-t` catches. Two of the conclusions above need
+correcting, and a third side effect was found that changes *why* the staged copy is
+mandatory.
+
+| Invalid config | `-t` exit | Caught? |
+| --- | --- | --- |
+| Malformed TOML | 1 | yes, with file/line/column |
+| Unknown plugin category | 0 | no — `warn!` only |
+| Real category compiled out of this build (`geo_restriction`) | 0 | no — `warn!` only |
+| Known category, invalid parameter (`waf` with `paranoia = 99`) | **1** | **yes, and it names the plugin** |
+| `limit` with `type = "not_a_valid_limit_type"` | 0 | no — but see below |
+
+### Correction: a known category with bad parameters *is* caught
+
+`validate_plugins` (`src/main.rs`) iterates `config.plugins` and calls
+`factory.create(conf)` on each, so a `[plugins.*]` entry whose constructor rejects its
+parameters fails the gate by name. Row 4 above is the proof:
+`plugin "x" is invalid: Plugin waf invalid, message: waf config: paranoia level 99 out of
+range; expected 1..=4`.
+
+The original spike concluded the opposite from its `limit` case. That case was
+mis-specified in two ways, and neither is `-t` failing:
+
+- the key is `tag`, not `type`, so the config set nothing the plugin reads — an
+  unrecognised key in a plugin table is simply ignored on deserialisation;
+- and `LimitTag::from` falls through `_ => LimitTag::Ip` (`pingap-plugin/src/limit.rs:116`),
+  so even a genuinely bogus `tag` value silently becomes IP-based limiting.
+
+So the plugin constructed successfully from a config that said nothing, and `-t` was right
+to pass it. **The residual hole is narrower than recorded: a category this build does not
+have, and a plugin whose own parser accepts nonsense.** Conclusion 3 above stands and is
+implemented as `projection::PluginCheck`; conclusion 4 is downgraded from "not covered" to
+"covered wherever the plugin validates its own parameters, which most do".
+
+Worth flagging separately, because it is a live defect rather than a gate limitation: a
+typo'd `limit` `tag` silently changes the rate-limit key from cookie or header to client
+IP. Nothing reports it. The projection cannot generate that shape from typed intent, so
+Phase 08 is not exposed to it, but an operator-authored config is.
+
+### New finding: `-t` rewrites the directory passed to `-c`
+
+Every run above renamed `pingap.toml` to `pingap.toml.bak` and wrote seven per-category
+files in its place:
+
+```
+config layout migrated: /tmp/tmp.szZib6eXsB/pingap.toml (renamed to .../pingap.toml.bak)
+files after: basic.toml certificates.toml locations.toml pingap.toml.bak
+             plugins.toml servers.toml storages.toml upstreams.toml
+```
+
+`get_config` calls `migrate_config_layout` (`src/main.rs:265`) before the `args.test`
+branch is reached, folding whatever layout it finds into the current `ConfigMode`.
+
+This is a **filesystem** side effect, and it is a stronger reason for the staged copy than
+the two process-global ones already recorded: validating against the live directory would
+rewrite an operator's config file as a side effect of checking it. It also means
+`pingap -t -c /etc/pingap` is not a read-only operation, which an operator would not
+expect.
+
+Guarded by `crates/pingap-controlplane/tests/projection.rs::validating_never_touches_a_directory_the_caller_owns`,
+which asserts both halves: the caller's directory is untouched, and the staging directory
+*is* rewritten — so the reason for staging stays a measured fact rather than a comment.

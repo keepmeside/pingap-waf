@@ -12,7 +12,62 @@ publish = false
 name = "pingap_acl"
 path = "src/lib.rs"
 
+[features]
+# Same shape as `pingap-waf`: the rule table and its evaluation are pure Rust with
+# no knowledge that Pingora exists, so they stay unit-testable without a proxy. The
+# plugin that binds them into pingap drags in pingora and its OpenSSL `*-sys` chain,
+# so it lives behind a feature.
+default = []
+plugin = [
+    "dep:async-trait",
+    "dep:bytes",
+    "dep:ctor",
+    "dep:http",
+    "dep:pingap-config",
+    "dep:pingap-core",
+    "dep:pingora",
+    "dep:toml",
+    "dep:tracing",
+]
+# GeoIP rules. Enables the same feature on `pingap-plugin`, because the country
+# lookup must come from the one embedded database this process loads rather than a
+# second copy. With this off, a `geo_country` rule fails validation by name instead
+# of silently never matching.
+geo = ["pingap-plugin/geo"]
+
 [dependencies]
+# The allow/deny semantics, the referer host parser, and (behind `geo`) the country
+# lookup all come from here rather than being reimplemented. Two matchers for one
+# field is the defect this crate exists to avoid.
+pingap-plugin = { workspace = true }
+# CIDR parsing and matching: the same type `ip_restriction` and `pingap-waf` use.
+pingap-util = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# Access-list passwords are stored as a digest rather than recoverably. Bounded claim,
+# argued at `AccessList::new`: it keeps a config leak from yielding a usable password
+# and costs about a microsecond, and it is not a substitute for a KDF at rest.
+sha2 = { workspace = true }
+snafu = { workspace = true }
+
+# --- `plugin` feature only -------------------------------------------------------
+async-trait = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+ctor = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+pingap-config = { workspace = true, optional = true }
+pingap-core = { workspace = true, optional = true }
+pingora = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+# For the three-domain divergence test, which needs a real WAF profile beside a real
+# ACL. A dev-dependency only: nothing in this crate's own graph reaches pingap-waf.
+pingap-waf = { workspace = true, features = ["plugin"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-test = "0.4.4"
+toml = { workspace = true }
 
 [lints]
 workspace = true

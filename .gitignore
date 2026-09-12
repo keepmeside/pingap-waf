@@ -55,7 +55,7 @@ web/*.tsbuildinfo
 
 # Cargo.lock is tracked here. Upstream ignores it (it publishes as a library)
 # yet force-tracks it anyway; this fork is a deployed application and a WAF, so
-# a reproducible dependency graph is a security property, and the plan asserts
+# a reproducible dependency graph is a security property, and CI asserts
 # against Cargo.lock directly (exactly one pingora version, no 0.6.0).
 !Cargo.lock
 
@@ -70,12 +70,12 @@ web/*.tsbuildinfo
 # output must never reach history.
 spikes/*/target/
 
-# Third-party reference clones. Each carries its own .git, so tracking them
-# would create gitlinks to repositories nobody else can resolve. Our own
-# analysis artifacts under .xia-src are re-added explicitly.
-/.xia-src/*
-!/.xia-src/EVIDENCE-PACKET.md
-!/.xia-src/candidates/
+# Developer-local working trees, never published. `.xia-src` holds third-party
+# reference clones, each carrying its own .git — tracking them would create
+# gitlinks to repositories nobody else can resolve. `plans` holds the local
+# plan/report tree. Both are inputs to the work, not part of the product.
+/.xia-src/
+/plans/
 
 # Control-plane store (Phase 07) and any local SQLite artifact
 *.db

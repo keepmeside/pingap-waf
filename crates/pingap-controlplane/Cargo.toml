@@ -13,6 +13,60 @@ name = "pingap_controlplane"
 path = "src/lib.rs"
 
 [dependencies]
+# Pinned exactly. The plan forbids `0.8.0-pre.*`, and an inexact requirement would
+# drift onto that pre-release line. Phase 02's Spike B measured this exact version.
+turso = "=0.7.2"
+# argon2id for passwords. `password-hash` ships with it and owns the PHC string
+# format, so a stored hash carries its own parameters and a later parameter change
+# does not invalidate existing credentials.
+argon2 = "0.5.3"
+# RFC 6238 TOTP. Hand-rolling it means hand-rolling base32, the HMAC, the time step
+# and the skew window — four places to be subtly wrong in a security control, and an
+# authenticator app gives no useful error when one of them is.
+# `otpauth` supplies the `otpauth://` URI an authenticator app scans; `gen_secret`
+# supplies the CSPRNG secret generator. Both are off by default, and hand-rolling
+# either is how a 2FA rollout ends up with secrets that are not random or URIs no app
+# will accept.
+totp-rs = { version = "5.7.2", features = ["otpauth", "gen_secret"] }
+async-trait = { workspace = true }
+# The projection compiles control-plane intent into pingap's own config model, so it
+# speaks that model directly rather than re-declaring it and drifting from it.
+pingap-config = { workspace = true }
+# `Notification` is how drift is reported; Phase 12 supplies the channels.
+pingap-core = { workspace = true }
+# Canonical serialisation for the projection, and the plugin-conf type it emits.
+toml = { workspace = true }
+# `client_max_body_size` is a `ByteSize` in the config model.
+bytesize = { workspace = true }
+# Plugin config keys are crc32, to match `pingap_plugin::get_hash_key` exactly.
+crc32fast = { workspace = true }
+# Staging directory for the validation subprocess. A runtime dependency, not a test one.
+tempfile = { workspace = true }
+# Session and refresh tokens are stored hashed, never in the clear.
+sha2 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+# `process` and `fs`: validation stages the candidate config to a temp dir and runs
+# `pingap -t` against it as a subprocess, never in-process.
+tokio = { workspace = true, features = ["sync", "macros", "rt", "process", "fs", "time"] }
+tracing = { workspace = true }
+# TOTP secrets are encrypted at rest with a key from configuration. `pingap-util`
+# already owns the AES helpers the rest of the gateway uses.
+pingap-util = { workspace = true }
+# Primary keys. v7 rather than v4 so an append-heavy table's key index stays
+# append-friendly and rows sort by creation without consulting a timestamp column.
+uuid = { workspace = true }
+
+[features]
+# Exposes `totp_code_for`, which generates the code an authenticator would show.
+# Only a test has any business calling it: a server that can produce the code has
+# nothing left to verify.
+test-support = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

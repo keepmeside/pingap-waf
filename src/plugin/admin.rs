@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{get_hash_key, get_int_conf, get_str_conf, get_str_slice_conf};
+use super::admin_auth::{
+    LazyAdminAuth, LoginRequest, Principal, Refusal, TotpRequest,
+};
+use super::{get_hash_key, get_int_conf, get_str_conf};
 use crate::certificates::new_certificate_provider;
 use crate::config_manager::get_config_manager;
 use crate::process::{get_start_time, restart_now};
@@ -23,22 +26,22 @@ use bytes::{BufMut, BytesMut};
 use ctor::ctor;
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use hex::ToHex;
 use hex::encode;
 use http::Method;
 use http::{HeaderValue, StatusCode, header};
-use humantime::parse_duration;
+use pingap_admin_api::{ApiRequest, ApiResponse, AppState, Caller};
 use pingap_config::hcl::convert_toml_to_hcl;
 use pingap_config::kdl::convert_toml_to_kdl;
 use pingap_config::{
     BasicConf, CATEGORY_CERTIFICATE, CATEGORY_STORAGE, Category,
-    CertificateConf, ConfigManager, LocationConf, PluginCategory, PluginConf,
-    ServerConf, StorageConf, UpstreamConf, Validate, format_category,
+    CertificateConf, ConfigManager, LocationConf, PluginConf, ServerConf,
+    StorageConf, UpstreamConf, Validate, format_category,
 };
 use pingap_config::{
     CATEGORY_LOCATION, CATEGORY_PLUGIN, CATEGORY_SERVER, CATEGORY_UPSTREAM,
     PingapConfig,
 };
+use pingap_controlplane::AuthLevel;
 use pingap_core::{
     Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult, TtlLruLimit,
 };
@@ -53,7 +56,6 @@ use rust_embed::EmbeddedFile;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Write;
@@ -128,12 +130,22 @@ impl From<EmbeddedStaticFile> for HttpResponse {
 
 pub struct AdminServe {
     pub path: String,
-    pub authorizations: Vec<(String, String)>,
     pub plugin_step: PluginStep,
     manager: Arc<ConfigManager>,
-    max_age: Duration,
     hash_value: String,
     ip_fail_limit: TtlLruLimit,
+    /// Per-user sessions from the control-plane store. Replaces the shared
+    /// `authorizations` list, which could not say who did anything.
+    auth: LazyAdminAuth,
+    /// The route table's state, built on first API request.
+    ///
+    /// Deferred for the same reason `auth` is: pingora forks for daemon mode after
+    /// `bootstrap()` and before the service runtimes start, so a store connection
+    /// opened while the plugin was constructed would be handed to a process that
+    /// never opened it. Built from `auth`'s store rather than a second handle, so
+    /// the API and the session lookup are the one writer `TursoStore::shared`
+    /// requires.
+    api: tokio::sync::OnceCell<AppState>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -172,6 +184,9 @@ struct BasicInfo {
     support_history: bool,
     git_hash: String,
     now: u64,
+    /// `None` when reachable; otherwise why not. Reported here rather than as
+    /// a failed request, so a missing store reads as a state and not a crash.
+    control_plane_store_error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -182,48 +197,92 @@ struct FullConfigJson {
     pub original: String,
 }
 
+/// The `authorizations` key, on an admin plugin, is the shared-credential scheme
+/// this fork replaces. Refused rather than ignored: an operator who still has it
+/// in their config believes admin auth is configured, and silently dropping it
+/// would leave them believed-secure. The `--admin user:pass@addr` path does not
+/// hit this — it arrives as `bootstrap`, a different key, because that
+/// credential still has one job: creating the first account.
+///
+/// Scoped to this plugin. `basic_auth` and `combined_auth` also read
+/// `authorizations`, legitimately, and never come through here.
+const LEGACY_AUTHORIZATIONS_MESSAGE: &str = "`authorizations` no longer \
+    configures the admin plugin: admin access is per-user, with accounts in the \
+    control-plane store. Remove the key. To create the first admin, pass \
+    `--admin user:password@addr` (or PINGAP_ADMIN_USER + PINGAP_ADMIN_PASSWORD) \
+    and log in once; that credential bootstraps the account and is not consulted \
+    again.";
+
 impl TryFrom<&PluginConf> for AdminServe {
     type Error = Error;
     fn try_from(value: &PluginConf) -> Result<Self> {
+        Self::build(value, LazyAdminAuth::new)
+    }
+}
+
+/// How `AdminServe::build` makes its auth handle: store path, bootstrap
+/// credential, TOTP key. Production passes `LazyAdminAuth::new`; tests pass
+/// `LazyAdminAuth::private` so each plugin gets its own store.
+type MakeAuth =
+    fn(String, Option<(String, String)>, Option<String>) -> LazyAdminAuth;
+
+impl AdminServe {
+    /// Construction proper, parameterised on how the auth handle is made so
+    /// tests can hand each plugin its own store instead of the process-global
+    /// one.
+    fn build(value: &PluginConf, make_auth: MakeAuth) -> Result<Self> {
         let hash_value = get_hash_key(value);
-        let mut authorizations = vec![];
-        for item in get_str_slice_conf(value, "authorizations").iter() {
-            if item.is_empty() {
-                continue;
-            }
+        if value.contains_key("authorizations") {
+            return Err(Error::Invalid {
+                category: "admin".to_string(),
+                message: LEGACY_AUTHORIZATIONS_MESSAGE.to_string(),
+            });
+        }
+        // The one credential an operator has when the store is empty. Base64
+        // `user:pass`, exactly as `--admin` encodes it.
+        let mut bootstrap = None;
+        let encoded = get_str_conf(value, "bootstrap");
+        if !encoded.is_empty() {
             let data =
-                base64_decode(item).map_err(|e| Error::Base64Decode {
-                    category: PluginCategory::BasicAuth.to_string(),
+                base64_decode(&encoded).map_err(|e| Error::Base64Decode {
+                    category: "admin".to_string(),
                     source: e,
                 })?;
-            if let Some((user, pass)) =
-                std::string::String::from_utf8_lossy(&data).split_once(':')
-            {
-                authorizations.push((user.to_string(), pass.to_string()));
+            match std::string::String::from_utf8_lossy(&data).split_once(':') {
+                Some((user, pass)) if !user.is_empty() && !pass.is_empty() => {
+                    bootstrap = Some((user.to_string(), pass.to_string()));
+                },
+                _ => {
+                    return Err(Error::Invalid {
+                        category: "admin".to_string(),
+                        message: "bootstrap must decode to `user:password` \
+                                  with both parts non-empty"
+                            .to_string(),
+                    });
+                },
             }
         }
         let mut ip_fail_limit = get_int_conf(value, "ip_fail_limit");
         if ip_fail_limit <= 0 {
             ip_fail_limit = 10;
         }
-        let max_age_value = &get_str_conf(value, "max_age");
-        let mut max_age = Duration::from_secs(2 * 24 * 3600);
-        if !max_age_value.is_empty() {
-            max_age = parse_duration(max_age_value).map_err(|e| {
-                Error::ParseDuration {
-                    category: "admin".to_string(),
-                    source: e,
-                }
-            })?;
-        }
         let mut path = get_str_conf(value, "path");
         if path.len() > 1 && path.ends_with("/") {
             path = path.substring(0, path.len() - 1).to_string();
         }
+        let store_path = get_str_conf(value, "store");
+        if store_path.is_empty() {
+            return Err(Error::Invalid {
+                category: "admin".to_string(),
+                message: "store is required: the path of the control-plane \
+                          database that holds admin accounts and sessions"
+                    .to_string(),
+            });
+        }
+        let totp_key = get_str_conf(value, "totp_key");
 
         let params = AdminServe {
             hash_value,
-            max_age,
             plugin_step: PluginStep::Request,
             path,
             ip_fail_limit: TtlLruLimit::new_compact(
@@ -235,23 +294,77 @@ impl TryFrom<&PluginConf> for AdminServe {
                 category: "config_manager".to_string(),
                 message: e.to_string(),
             })?,
-            authorizations,
+            auth: make_auth(
+                store_path,
+                bootstrap,
+                Some(totp_key).filter(|k| !k.is_empty()),
+            ),
+            api: tokio::sync::OnceCell::new(),
         };
 
         Ok(params)
     }
+
+    /// Like `try_from`, over a store private to this instance.
+    #[cfg(test)]
+    fn try_from_private(value: &PluginConf) -> Result<Self> {
+        Self::build(value, LazyAdminAuth::private)
+    }
+
+    /// The route table's state, built on first use.
+    ///
+    /// The store is `auth`'s, not a second handle: `TursoStore::shared` is one writer per
+    /// process and refuses a second path, and splitting the API's writes from the session
+    /// lookup's would split the audit trail even if it did not.
+    ///
+    /// A failure here is a broken installation — `new_applier` only fails when this
+    /// executable's own path cannot be resolved, which is what validation needs to spawn
+    /// `pingap -t`. Reported as a state the operator can read rather than a panic, on the
+    /// same reasoning as an unavailable store: the data plane keeps serving either way.
+    async fn api(&self) -> std::result::Result<&AppState, String> {
+        self.api
+            .get_or_try_init(|| async {
+                let store = self.auth.get().await.store().clone();
+                let applier = crate::projection::new_applier(
+                    store.clone(),
+                    self.manager.clone(),
+                    crate::projection::DEFAULT_RELOAD_WINDOW,
+                )?;
+                Ok(AppState::new(store, Arc::new(applier)))
+            })
+            .await
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct AesParams {
-    category: String,
-    key: String,
-    data: String,
+/// The router's caller, from the session that authenticated.
+///
+/// A conversion rather than a shared type: `Principal` is the binary's, produced by reading
+/// a bearer token against the store, and `Caller` is what the router decides authorisation
+/// from. Keeping them separate is what keeps `pingap-admin-api` free of the auth path — and
+/// therefore testable without one.
+fn caller_of(principal: &Principal) -> Caller {
+    Caller {
+        session_id: principal.session_id.clone(),
+        user_id: principal.user_id.clone(),
+        username: principal.username.clone(),
+        role: principal.role,
+        auth_level: principal.auth_level,
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct AesResp {
-    value: String,
+/// The router's response, in the gateway's own type.
+fn http_response_of(response: ApiResponse) -> HttpResponse {
+    HttpResponse {
+        status: response.status,
+        body: response.body,
+        headers: response.content_type.and_then(|value| {
+            Some(vec![(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(value).ok()?,
+            )])
+        }),
+        ..Default::default()
+    }
 }
 
 async fn get_request_body(session: &mut Session) -> pingora::Result<BytesMut> {
@@ -265,101 +378,55 @@ async fn get_request_body(session: &mut Session) -> pingora::Result<BytesMut> {
 impl AdminServe {
     pub fn new(params: &PluginConf) -> Result<Self> {
         debug!(target: LOG_TARGET, params = params.to_string(), "new admin server plugin");
-        let serve = AdminServe::try_from(params)?;
-
-        // Fail closed, at the boundary every factory-built instance crosses.
-        // `try_from` deliberately still accepts an empty list: it is pure
-        // config-shape parsing, and `authorizations` is an optional
-        // `Vec<(String, String)>`, so an absent or all-empty key parses
-        // successfully and nothing else would ever complain. Refusing here
-        // instead means the plugin cannot exist without credentials, whether it
-        // was configured by `--admin`, by PINGAP_ADMIN_USER/PASSWORD, or by a
-        // `category = "admin"` entry in a config file.
-        if serve.authorizations.is_empty() {
-            return Err(Error::Invalid {
-                category: "admin".to_string(),
-                message: "authorizations is empty: an admin plugin with no \
-                          resolved credentials would serve an unauthenticated \
-                          config-write API. Set `authorizations`, or pass \
-                          credentials as `user:password@addr` / \
-                          PINGAP_ADMIN_USER + PINGAP_ADMIN_PASSWORD."
-                    .to_string(),
-            });
-        }
-
-        Ok(serve)
+        AdminServe::try_from(params)
     }
-    fn auth_validate(&self, req_header: &RequestHeader) -> bool {
-        // No `is_empty() => true` short-circuit. An empty credential list means
-        // no credentials resolved, which must deny rather than allow: upstream
-        // returned true here, so an admin listener started without credentials
-        // served an unauthenticated config-write API. `AdminServe::new` now
-        // refuses to build such an instance, and this path does not rely on that
-        // being the only way one can come into existence.
-        let path = req_header.uri.path();
-        // The login UI's own static assets (js/css/png) and the index page must
-        // load before the user authenticates. But API routes must ALWAYS require
-        // auth: otherwise auth is bypassed by suffixing an API URL with a
-        // static-looking extension, e.g. `GET /api/configs/x.js`. The auth skip
-        // and the `/api` router use different criteria, so they must be kept
-        // mutually exclusive here.
+
+    /// Whether `path` is one the login UI needs before anyone is logged in.
+    ///
+    /// The index page and its static assets (js/css/png) load unauthenticated;
+    /// everything under `/api` never does, even with a static-looking suffix —
+    /// otherwise `GET /api/configs/x.js` would bypass auth. The skip and the
+    /// `/api` router use different criteria, so they are kept mutually exclusive
+    /// here.
+    ///
+    /// One exception, matched exactly rather than by prefix: `/api/health`. A load
+    /// balancer has no session, and the route is built for that — it answers a fixed
+    /// two-field shape with no version, no build, no path and no error text, so there is
+    /// nothing in it an unauthenticated scanner can use. Exact match because
+    /// `starts_with("/api/health")` would also open `/api/health-detail` to anyone who
+    /// later adds it.
+    fn auth_skipped(path: &str) -> bool {
+        if path == "/api/health" {
+            return true;
+        }
         let is_api = path.starts_with("/api") || path.starts_with("api/");
-        if !is_api
+        !is_api
             && (path.len() <= 1
                 || path.ends_with(".js")
                 || path.ends_with(".css")
                 || path.ends_with(".png"))
-        {
-            return true;
-        }
-        let value =
-            pingap_core::get_req_header_value(req_header, "Authorization")
-                .unwrap_or_default();
-        if value.is_empty() {
-            error!(target: LOG_TARGET, path, "auth validate fail: missing authorization header");
-            return false;
-        }
-        let Some((token, ts)) = value.split_once(':') else {
-            error!(target: LOG_TARGET, path, "auth validate fail: malformed authorization, expect token:ts");
-            return false;
-        };
-        let now = pingap_core::now_sec() as i64;
-        let parsed_ts = ts.parse::<i64>().unwrap_or_default();
-        let offset = now - parsed_ts;
-        let max_age = self.max_age.as_secs() as i64;
-        if offset.abs() > max_age {
+    }
+
+    /// Resolve the request's bearer token to a user, or say why not.
+    ///
+    /// Asks the store on every call; nothing is cached, so revoking a session
+    /// or deactivating a user takes effect on the next request. No
+    /// credentials-present check exists here any more because there is no
+    /// credential list: a store with no users and no bootstrap simply has
+    /// nobody who can log in, which is deny by construction.
+    async fn auth_validate(
+        &self,
+        req_header: &RequestHeader,
+    ) -> std::result::Result<Principal, Refusal> {
+        let auth = self.auth.get().await;
+        auth.authenticate(req_header).await.inspect_err(|refusal| {
             error!(
                 target: LOG_TARGET,
-                path,
-                ts,
-                parsed_ts,
-                now,
-                offset,
-                max_age,
-                "auth validate fail: timestamp out of max_age window"
+                path = req_header.uri.path(),
+                refusal = ?refusal,
+                "auth validate fail"
             );
-            return false;
-        }
-
-        for (user, pass) in self.authorizations.iter() {
-            let mut hasher = Sha256::new();
-            hasher.update(format!("{user}:{pass}:{ts}").as_bytes());
-            let hash256 = hasher.finalize();
-            if pingap_core::constant_time_eq(
-                hash256.encode_hex::<String>().as_bytes(),
-                token.as_bytes(),
-            ) {
-                return true;
-            }
-        }
-        error!(
-            target: LOG_TARGET,
-            path,
-            ts,
-            authorizations = self.authorizations.len(),
-            "auth validate fail: token hash mismatch"
-        );
-        false
+        })
     }
     async fn load_config(
         &self,
@@ -598,16 +665,112 @@ async fn handle_request_admin(
     if let Ok(uri) = new_path.parse::<http::Uri>() {
         header.set_uri(uri);
     }
-    if !plugin.auth_validate(header) {
-        plugin.ip_fail_limit.inc(ip);
-        return Ok(Some(HttpResponse {
-            status: StatusCode::UNAUTHORIZED,
-            ..Default::default()
-        }));
-    }
     let (method, mut path) = get_method_path(session);
+
+    // Login is the one API route with no session to check, so it precedes the
+    // gate. It is still behind the IP failure limiter above, and a refused
+    // login counts against that limiter exactly as a bad token does.
+    if path == "/api/auth/login" && method == Method::POST {
+        let ip = ip.to_string();
+        let user_agent = pingap_core::get_req_header_value(
+            session.req_header(),
+            "User-Agent",
+        )
+        .map(str::to_string);
+        let buf = get_request_body(session).await?;
+        let req: LoginRequest = serde_json::from_slice(buf.as_ref())
+            .map_err(|e| pingap_core::new_internal_error(400, e))?;
+        let auth = plugin.auth.get().await;
+        return Ok(Some(
+            match auth.login(req, Some(&ip), user_agent.as_deref()).await {
+                Ok(Some(resp)) => HttpResponse::try_from_json(&resp)
+                    .unwrap_or(HttpResponse::unknown_error("Json serde fail")),
+                Ok(None) => {
+                    plugin.ip_fail_limit.inc(&ip);
+                    HttpResponse {
+                        status: StatusCode::UNAUTHORIZED,
+                        ..Default::default()
+                    }
+                },
+                Err(refusal) => refusal.into_response(),
+            },
+        ));
+    }
+
+    let principal = if AdminServe::auth_skipped(&path) {
+        None
+    } else {
+        match plugin.auth_validate(session.req_header()).await {
+            Ok(principal) => Some(principal),
+            Err(Refusal::Unauthenticated) => {
+                plugin.ip_fail_limit.inc(ip);
+                return Ok(Some(HttpResponse {
+                    status: StatusCode::UNAUTHORIZED,
+                    ..Default::default()
+                }));
+            },
+            // Not counted against the limiter: the caller did nothing wrong.
+            Err(refusal) => return Ok(Some(refusal.into_response())),
+        }
+    };
+
+    // The remaining auth routes act on the session that just authenticated.
+    if let Some(principal) = &principal {
+        if path == "/api/auth/totp" && method == Method::POST {
+            let buf = get_request_body(session).await?;
+            let req: TotpRequest = serde_json::from_slice(buf.as_ref())
+                .map_err(|e| pingap_core::new_internal_error(400, e))?;
+            let auth = plugin.auth.get().await;
+            return Ok(Some(match auth.complete_totp(principal, req).await {
+                Ok(true) => HttpResponse::no_content(),
+                Ok(false) => {
+                    plugin.ip_fail_limit.inc(ip);
+                    HttpResponse {
+                        status: StatusCode::UNAUTHORIZED,
+                        ..Default::default()
+                    }
+                },
+                Err(refusal) => refusal.into_response(),
+            }));
+        }
+        if path == "/api/auth/logout" && method == Method::POST {
+            let auth = plugin.auth.get().await;
+            return Ok(Some(match auth.logout(principal).await {
+                Ok(()) => HttpResponse::no_content(),
+                Err(refusal) => refusal.into_response(),
+            }));
+        }
+        if path == "/api/auth/me" {
+            return Ok(Some(
+                HttpResponse::try_from_json(&json!({
+                    "username": principal.username,
+                    "role": principal.role,
+                    "auth_level": principal.auth_level,
+                }))
+                .unwrap_or(HttpResponse::unknown_error("Json serde fail")),
+            ));
+        }
+        // A password-only session may look but not touch. Decided here, before
+        // any route, from the same predicate the role matrix uses.
+        if principal.auth_level == AuthLevel::PasswordOnly
+            && method != Method::GET
+        {
+            return Ok(Some(HttpResponse {
+                status: StatusCode::FORBIDDEN,
+                body: Bytes::from_static(
+                    b"Forbidden, complete the second factor first",
+                ),
+                ..Default::default()
+            }));
+        }
+    }
     let api_prefix = "/api";
-    if path.starts_with(api_prefix) {
+    // Recorded before the prefix is stripped, because afterwards `/api/users` and a static
+    // asset at `/users` are the same string — and only the first may reach the router. The
+    // auth path above skips authentication for short non-`/api` paths and for
+    // `.js`/`.css`/`.png`, so a route answerable outside the prefix would inherit that skip.
+    let is_api_request = path.starts_with(api_prefix);
+    if is_api_request {
         path = path.substring(api_prefix.len(), path.len()).to_string();
     }
     let params: Vec<String> = path
@@ -730,6 +893,15 @@ async fn handle_request_admin(
             support_history: plugin.manager.support_history(),
             git_hash: GIT_HASH.to_string(),
             now: pingap_core::now_sec(),
+            control_plane_store_error: plugin
+                .auth
+                .get()
+                .await
+                .store_available()
+                .await
+                .err()
+                .map(|e| e.into_response().body)
+                .map(|b| String::from_utf8_lossy(&b).to_string()),
         };
         basic_info.features.push("default".to_string());
 
@@ -758,18 +930,6 @@ async fn handle_request_admin(
         } else {
             HttpResponse::no_content()
         }
-    } else if path == "/aes" {
-        let buf = get_request_body(session).await?;
-        let params: AesParams = serde_json::from_slice(buf.as_ref())
-            .map_err(|e| pingap_core::new_internal_error(400, e))?;
-        let value = if params.category == "encrypt" {
-            pingap_util::aes_encrypt(&params.key, &params.data)
-        } else {
-            pingap_util::aes_decrypt(&params.key, &params.data)
-        }
-        .map_err(|e| pingap_core::new_internal_error(400, e))?;
-        HttpResponse::try_from_json(&AesResp { value })
-            .unwrap_or(HttpResponse::unknown_error("Json serde fail"))
     } else if path == "/certificates" {
         let mut infos = HashMap::new();
         for (name, cert) in new_certificate_provider().list().iter() {
@@ -784,6 +944,40 @@ async fn handle_request_admin(
         }
         HttpResponse::try_from_json(&infos)
             .unwrap_or(HttpResponse::unknown_error("Json serde fail"))
+    } else if is_api_request {
+        // Everything else under `/api` belongs to the route table. Placed after the
+        // retained raw-config routes so those keep their behaviour unchanged — they are
+        // documented drift sources, not part of this surface — and before the static-asset
+        // fallback, so an unknown API path answers a JSON 404 rather than "no such asset".
+        match plugin.api().await {
+            Ok(state) => {
+                let query = session
+                    .req_header()
+                    .uri
+                    .query()
+                    .unwrap_or_default()
+                    .to_string();
+                let body = get_request_body(session).await?.freeze();
+                let request = ApiRequest {
+                    method,
+                    path,
+                    query,
+                    body,
+                    caller: principal.as_ref().map(caller_of),
+                };
+                http_response_of(
+                    pingap_admin_api::dispatch(state, &request).await,
+                )
+            },
+            Err(reason) => {
+                error!(target: LOG_TARGET, reason, "admin api is unavailable");
+                HttpResponse::try_from_json_status(
+                    &ErrorResponse { message: reason },
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                .unwrap_or(HttpResponse::unknown_error("Json serde fail"))
+            },
+        }
     } else {
         let mut file = path.substring(1, path.len());
         if file.is_empty() {
@@ -836,75 +1030,154 @@ mod tests {
         AdminAsset, AdminServe, EmbeddedStaticFile, handle_request_admin,
     };
     use crate::config_manager::try_init_config_manager;
-    use hex::ToHex;
     use pingap_config::PluginConf;
     use pingap_core::{Ctx, HttpResponse};
     use pingora::proxy::Session;
     use pretty_assertions::assert_eq;
-    use sha2::{Digest, Sha256};
     use std::time::Duration;
     use tokio_test::io::Builder;
 
-    /// Builds the `Authorization` value `auth_validate` expects,
-    /// `hex(sha256("user:pass:ts")):ts`, against a current timestamp so it falls
-    /// inside `max_age`. Needed by any test that has to get past authentication
-    /// to reach the behaviour it is actually about.
-    fn valid_admin_token(user: &str, pass: &str) -> String {
-        let ts = pingap_core::now_sec();
-        let mut hasher = Sha256::new();
-        hasher.update(format!("{user}:{pass}:{ts}").as_bytes());
-        format!("{}:{ts}", hasher.finalize().encode_hex::<String>())
+    /// An admin plugin over a fresh store in `dir`, bootstrapped with
+    /// `admin:123123` (the base64 the tests below share).
+    fn admin_over(dir: &tempfile::TempDir) -> AdminServe {
+        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
+        try_init_config_manager(&file.path().to_string_lossy()).unwrap();
+        let store = dir.path().join("cp.db");
+        // spellchecker:off
+        AdminServe::try_from_private(
+            &toml::from_str::<PluginConf>(&format!(
+                r#"
+    category = "admin"
+    bootstrap = "YWRtaW46MTIzMTIz"
+    store = "{}"
+    "#,
+                store.to_string_lossy()
+            ))
+            .unwrap(),
+        )
+        .unwrap()
+        // spellchecker:on
+    }
+
+    /// Drive one raw HTTP/1.1 request through the plugin.
+    async fn send(admin: &AdminServe, raw: &str) -> HttpResponse {
+        let mock_io = Builder::new().read(raw.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        handle_request_admin(admin, &mut session, &mut Ctx::default())
+            .await
+            .unwrap()
+            .expect("the admin plugin always answers")
+    }
+
+    /// Log in and return the bearer token.
+    async fn login(admin: &AdminServe, user: &str, pass: &str) -> String {
+        let body = format!(r#"{{"username":"{user}","password":"{pass}"}}"#);
+        let resp = send(
+            admin,
+            &format!(
+                "POST /api/auth/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert_eq!(200, resp.status.as_u16(), "login refused");
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp.body).unwrap();
+        json["token"].as_str().unwrap().to_string()
     }
 
     #[test]
     fn test_admin_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let params = admin_over(&dir);
+        assert_eq!("request", params.plugin_step.to_string());
+        assert_eq!("", params.path);
+
+        // The bootstrap credential must be a decodable `user:pass`.
         let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
         try_init_config_manager(&file.path().to_string_lossy()).unwrap();
-        // spellchecker:off
-        let params = AdminServe::try_from(
-            &toml::from_str::<PluginConf>(
-                r#"
-    category = "admin"
-    path = "/"
-    authorizations = [
-        "YWRtaW46MTIzMTIz",
-        "cGluZ2FwOjEyMzEyMw=="
-    ]
-    "#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        // spellchecker:on
-        assert_eq!(
-            "admin:123123,pingap:123123",
-            params
-                .authorizations
-                .iter()
-                .map(|item| format!("{}:{}", item.0, item.1))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        assert_eq!("request", params.plugin_step.to_string());
-        assert_eq!("/", params.path);
-
         let result = AdminServe::try_from(
             &toml::from_str::<PluginConf>(
                 r#"
     category = "admin"
     path = "/"
-    authorizations = [
-        "123",
-    ]
+    bootstrap = "123"
+    store = "/tmp/x.db"
     "#,
             )
             .unwrap(),
         );
-
         assert_eq!(
-            "Plugin basic_auth, base64 decode error Invalid padding",
+            "Plugin admin, base64 decode error Invalid padding",
             result.err().unwrap().to_string()
         );
+    }
+
+    /// The legacy shared-credential key is refused with the replacement
+    /// named. Refused rather than ignored: silently dropping it would leave an
+    /// operator who configured it believing admin auth is in place.
+    #[test]
+    fn test_legacy_authorizations_key_is_rejected_on_the_admin_plugin() {
+        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
+        try_init_config_manager(&file.path().to_string_lossy()).unwrap();
+        // spellchecker:off
+        let err = AdminServe::try_from(
+            &toml::from_str::<PluginConf>(
+                r#"
+    category = "admin"
+    authorizations = ["YWRtaW46MTIzMTIz"]
+    store = "/tmp/x.db"
+    "#,
+            )
+            .unwrap(),
+        )
+        .err()
+        .expect("the legacy key must not be accepted");
+        // spellchecker:on
+        let msg = err.to_string();
+        assert!(msg.contains("`authorizations`"), "{msg}");
+        assert!(msg.contains("--admin user:password@addr"), "{msg}");
+        // An empty list is the same key and the same refusal — the hole
+        // Phase 01 closed must not reopen by way of "the list was empty".
+        let err = AdminServe::try_from(
+            &toml::from_str::<PluginConf>(
+                r#"
+    category = "admin"
+    authorizations = []
+    store = "/tmp/x.db"
+    "#,
+            )
+            .unwrap(),
+        )
+        .err()
+        .expect("an empty legacy list is still the legacy key");
+        assert!(err.to_string().contains("`authorizations`"));
+    }
+
+    /// The same key is required by `basic_auth` and `combined_auth`, and the
+    /// rejection above must not reach them. Asserted through the factory,
+    /// which is the path `pingap -t` takes.
+    #[test]
+    fn test_basic_auth_and_combined_auth_still_accept_authorizations() {
+        let factory = pingap_plugin::get_plugin_factory();
+        // spellchecker:off
+        for conf in [
+            r#"
+    category = "basic_auth"
+    authorizations = ["YWRtaW46MTIzMTIz"]
+    "#,
+            r#"
+    category = "combined_auth"
+    authorizations = [{ app_id = "a", secret = "s", deviation = 60 }]
+    "#,
+        ] {
+            let conf = toml::from_str::<PluginConf>(conf).unwrap();
+            factory
+                .create(&conf)
+                .unwrap_or_else(|e| panic!("{conf:?} refused: {e}"));
+        }
+        // spellchecker:on
     }
 
     #[test]
@@ -926,84 +1199,247 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_validate_skips_only_static_assets() {
-        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
-        try_init_config_manager(&file.path().to_string_lossy()).unwrap();
-        // spellchecker:off
-        let admin = AdminServe::try_from(
-            &toml::from_str::<PluginConf>(
-                r#"
-    category = "admin"
-    path = "/"
-    authorizations = ["YWRtaW46MTIzMTIz"]
-    "#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        // spellchecker:on
-
-        // `auth_validate` runs on the path AFTER the admin prefix is stripped.
-        let auth_skipped = |path: &str| {
-            let req = pingora::http::RequestHeader::build(
-                http::Method::GET,
-                path.as_bytes(),
-                None,
-            )
-            .unwrap();
-            admin.auth_validate(&req)
-        };
-
+    fn test_auth_skipped_only_for_static_assets() {
         // Genuine static assets of the login UI load without auth.
-        assert_eq!(true, auth_skipped("/"));
-        assert_eq!(true, auth_skipped("/assets/index.js"));
-        assert_eq!(true, auth_skipped("/assets/index.css"));
-        assert_eq!(true, auth_skipped("/pingap.png"));
+        assert_eq!(true, AdminServe::auth_skipped("/"));
+        assert_eq!(true, AdminServe::auth_skipped("/assets/index.js"));
+        assert_eq!(true, AdminServe::auth_skipped("/assets/index.css"));
+        assert_eq!(true, AdminServe::auth_skipped("/pingap.png"));
 
         // Regression: API routes must never be auth-skipped, even when suffixed
         // with a static-looking extension.
-        assert_eq!(false, auth_skipped("/api/configs/anything.js"));
-        assert_eq!(false, auth_skipped("/api/configs/upstream/evil.css"));
-        assert_eq!(false, auth_skipped("/api/certificates.png"));
-        assert_eq!(false, auth_skipped("/api/basic"));
+        assert_eq!(false, AdminServe::auth_skipped("/api/configs/anything.js"));
+        assert_eq!(
+            false,
+            AdminServe::auth_skipped("/api/configs/upstream/evil.css")
+        );
+        assert_eq!(false, AdminServe::auth_skipped("/api/certificates.png"));
+        assert_eq!(false, AdminServe::auth_skipped("/api/basic"));
+        assert_eq!(false, AdminServe::auth_skipped("/api/auth/me"));
+
+        // The one API path a load balancer reaches without a session, matched exactly so a
+        // longer path that merely starts the same way is not also opened.
+        assert_eq!(true, AdminServe::auth_skipped("/api/health"));
+        assert_eq!(false, AdminServe::auth_skipped("/api/health-detail"));
+        assert_eq!(false, AdminServe::auth_skipped("/api/health/nodes"));
+    }
+
+    /// The acceptance criterion asserted by request rather than by reading
+    /// config: no `Authorization` header sent, a config write must come back
+    /// 401.
+    #[tokio::test]
+    async fn test_unauthenticated_config_write_returns_401() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        let resp = send(
+            &admin,
+            "POST /api/configs/upstream/evil HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+        assert_eq!(401, resp.status.as_u16());
+    }
+
+    /// The route table is reachable through the mount, and the role gate is the router's.
+    ///
+    /// Asserted by request because mounting is the half the router's own enumeration test
+    /// cannot see: that test drives `dispatch` directly, so a table that was never wired to
+    /// the admin listener would pass every assertion in it.
+    #[tokio::test]
+    async fn test_the_mounted_route_table_answers_under_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        let token = login(&admin, "admin", "123123").await;
+
+        let users = send(
+            &admin,
+            &format!(
+                "GET /api/users HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(
+            200,
+            users.status.as_u16(),
+            "the route table is not mounted: {}",
+            String::from_utf8_lossy(&users.body)
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&users.body).unwrap();
+        assert_eq!("admin", json[0]["username"]);
+        // The password hash is not a field of the view, and this is the assertion that
+        // keeps it that way through a serialisation change.
+        assert_eq!(
+            false,
+            String::from_utf8_lossy(&users.body).contains("argon2"),
+            "a user listing carried the stored password hash"
+        );
+
+        // A path the table does not have answers the router's JSON 404 rather than falling
+        // through to the static-asset handler.
+        let missing = send(
+            &admin,
+            &format!(
+                "GET /api/nothing-here HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(404, missing.status.as_u16());
+        assert_eq!(
+            true,
+            String::from_utf8_lossy(&missing.body).contains("route"),
+            "an unknown API path was answered by something other than the router"
+        );
+    }
+
+    /// `/api/health` is the one API route with no session, and a non-API path never reaches
+    /// the router at all.
+    #[tokio::test]
+    async fn test_health_is_the_only_unauthenticated_api_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+
+        let health = send(&admin, "GET /api/health HTTP/1.1\r\n\r\n").await;
+        assert_eq!(200, health.status.as_u16());
+        let body = String::from_utf8_lossy(&health.body).to_string();
+        // Two fields, and nothing an unauthenticated scanner can use: no version, no build,
+        // no store path, no error text.
+        assert_eq!(
+            true,
+            body.contains("\"status\":\"ok\""),
+            "unexpected health body: {body}"
+        );
+        for leak in ["version", "git", "path", "pid", "rustc"] {
+            assert_eq!(
+                false,
+                body.contains(leak),
+                "the unauthenticated health route leaked `{leak}`: {body}"
+            );
+        }
+
+        // Every other route still needs a session, health included once it is not the
+        // exact path.
+        for path in ["/api/users", "/api/activity", "/api/health/nodes"] {
+            let resp =
+                send(&admin, &format!("GET {path} HTTP/1.1\r\n\r\n")).await;
+            assert_eq!(
+                401,
+                resp.status.as_u16(),
+                "{path} was reachable without a session"
+            );
+        }
+
+        // And a path outside `/api` is a static asset, not a route: it must not be answered
+        // by the router, or it would inherit the static-asset auth skip.
+        let asset = send(&admin, "GET /users HTTP/1.1\r\n\r\n").await;
+        assert_eq!(
+            false,
+            String::from_utf8_lossy(&asset.body).contains("\"error\""),
+            "a non-API path was answered by the router"
+        );
+    }
+
+    /// End to end: the bootstrap credential logs in, the token opens the API,
+    /// logout closes it on the very next request.
+    #[tokio::test]
+    async fn test_login_then_logout_revokes_on_the_next_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        let token = login(&admin, "admin", "123123").await;
+
+        let me = send(
+            &admin,
+            &format!(
+                "GET /api/auth/me HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(200, me.status.as_u16());
+        let json: serde_json::Value = serde_json::from_slice(&me.body).unwrap();
+        assert_eq!("admin", json["username"]);
+        assert_eq!("admin", json["role"]);
+
+        let out = send(
+            &admin,
+            &format!(
+                "POST /api/auth/logout HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(204, out.status.as_u16());
+
+        let after = send(
+            &admin,
+            &format!(
+                "GET /api/auth/me HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(401, after.status.as_u16(), "a revoked token still worked");
+    }
+
+    /// A wrong password is a 401 and counts against the IP limiter, so
+    /// password guessing hits the same wall that token guessing does.
+    #[tokio::test]
+    async fn test_a_failed_login_counts_against_the_ip_limiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        // Bootstrap first so there is an account to guess at.
+        login(&admin, "admin", "123123").await;
+        let body = r#"{"username":"admin","password":"wrong"}"#;
+        let raw = format!(
+            "POST /api/auth/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut last = 0;
+        // The default limit is 10 failures per five minutes.
+        for _ in 0..12 {
+            last = send(&admin, &raw).await.status.as_u16();
+        }
+        assert_eq!(403, last, "the limiter never engaged");
+    }
+
+    /// `/aes` encrypted and decrypted caller-supplied data with a
+    /// caller-supplied key: an oracle behind admin auth with no further gate,
+    /// and nothing in the gateway needs it. Authenticated, so the request gets
+    /// past auth and the assertion is about the route, not the guard.
+    #[tokio::test]
+    async fn test_aes_endpoint_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        let token = login(&admin, "admin", "123123").await;
+        let body = r#"{"category":"encrypt","key":"k","data":"d"}"#;
+        let resp = send(
+            &admin,
+            &format!(
+                "POST /api/aes HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert_eq!(
+            404,
+            resp.status.as_u16(),
+            "the encryption oracle is reachable again"
+        );
     }
 
     /// Regression: `/config-history/{category}` without the trailing name used
     /// to index past the end of the split url and panic the request task.
     #[tokio::test]
     async fn test_config_history_without_name() {
-        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
-        try_init_config_manager(&file.path().to_string_lossy()).unwrap();
-        // Credentials and a valid token are part of the setup, not the subject:
-        // this test is about the url shape. It previously passed with neither,
-        // because `auth_validate` returned true on an empty credential list —
-        // the fail-open this fork closes. Reaching the router now requires
-        // authenticating, as any real caller would.
-        // spellchecker:off
-        let admin = AdminServe::try_from(
-            &toml::from_str::<PluginConf>(
-                r#"
-    category = "admin"
-    authorizations = ["YWRtaW46MTIzMTIz"]
-    "#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let token = valid_admin_token("admin", "123123");
-        // spellchecker:on
-
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        let token = login(&admin, "admin", "123123").await;
         let mock_io = Builder::new()
             .read(
                 format!(
-                    "GET /api/config-history/upstream HTTP/1.1\r\nAuthorization: {token}\r\n\r\n"
+                    "GET /api/config-history/upstream HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
                 )
                 .as_bytes(),
             )
             .build();
         let mut session = Session::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();
-
         let err =
             handle_request_admin(&admin, &mut session, &mut Ctx::default())
                 .await
@@ -1016,154 +1452,50 @@ mod tests {
         );
     }
 
-    /// An admin plugin with no resolved credentials must not be constructible.
-    /// `try_from` still accepts one, because it is pure config-shape parsing and
-    /// credentials can arrive later from the environment; `new` is the boundary
-    /// the plugin factory goes through, so it is where the policy is enforced.
-    #[test]
-    fn test_admin_new_rejects_empty_credentials() {
+    /// The load-bearing boundary, at the request layer: with the store on a
+    /// path that cannot exist, the plugin still constructs, static assets
+    /// still serve, and the API says 503 rather than 401 or 500.
+    #[tokio::test]
+    async fn test_store_unavailable_is_503_and_the_ui_still_loads() {
         let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
         try_init_config_manager(&file.path().to_string_lossy()).unwrap();
-
-        // No `authorizations` key at all.
-        let err = AdminServe::new(
+        // spellchecker:off
+        let admin = AdminServe::try_from_private(
             &toml::from_str::<PluginConf>(
                 r#"
     category = "admin"
-    path = "/"
+    bootstrap = "YWRtaW46MTIzMTIz"
+    store = "/nonexistent-directory-for-a-test/cp.db"
     "#,
             )
             .unwrap(),
         )
-        .err()
-        .expect("an admin plugin with no credentials must fail to construct");
-        assert_eq!(
-            true,
-            err.to_string().contains("authorizations"),
-            "error must name the missing key, got: {err}"
+        .unwrap();
+        // spellchecker:on
+
+        let index = send(&admin, "GET / HTTP/1.1\r\n\r\n").await;
+        assert_eq!(200, index.status.as_u16(), "the login page must load");
+
+        let body = r#"{"username":"admin","password":"123123"}"#;
+        let login = send(
+            &admin,
+            &format!(
+                "POST /api/auth/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert_eq!(503, login.status.as_u16());
+        assert!(
+            String::from_utf8_lossy(&login.body).contains("unavailable"),
+            "the body should say why"
         );
 
-        // Present but empty, and present but all-empty-strings: both resolve to
-        // zero usable credentials and must be rejected the same way.
-        for conf in [
-            r#"
-    category = "admin"
-    authorizations = []
-    "#,
-            r#"
-    category = "admin"
-    authorizations = [""]
-    "#,
-        ] {
-            let err =
-                AdminServe::new(&toml::from_str::<PluginConf>(conf).unwrap())
-                    .err()
-                    .expect("empty credential list must fail to construct");
-            assert_eq!(
-                true,
-                err.to_string().contains("authorizations"),
-                "error must name the missing key, got: {err}"
-            );
-        }
-    }
-
-    /// Regression guard for the check above: a correctly configured admin plugin
-    /// must still construct.
-    #[test]
-    fn test_admin_new_accepts_credentials() {
-        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
-        try_init_config_manager(&file.path().to_string_lossy()).unwrap();
-        // spellchecker:off
-        let admin = AdminServe::new(
-            &toml::from_str::<PluginConf>(
-                r#"
-    category = "admin"
-    path = "/pingap"
-    authorizations = ["YWRtaW46MTIzMTIz"]
-    "#,
-            )
-            .unwrap(),
+        let api = send(
+            &admin,
+            "GET /api/basic HTTP/1.1\r\nAuthorization: Bearer whatever\r\n\r\n",
         )
-        .expect("a configured admin plugin must construct");
-        // spellchecker:on
-        assert_eq!(1, admin.authorizations.len());
-        assert_eq!("/pingap", admin.path);
-    }
-
-    /// Defence in depth for the runtime path. Upstream returned `true` from
-    /// `auth_validate` when the credential list was empty, so an admin listener
-    /// without credentials served an unauthenticated config-write API instead of
-    /// denying. `new` now refuses to build such an instance, but the request
-    /// path must not depend on that being the only way one can exist.
-    #[test]
-    fn test_auth_validate_denies_api_when_no_credentials() {
-        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
-        try_init_config_manager(&file.path().to_string_lossy()).unwrap();
-        // spellchecker:off
-        let mut admin = AdminServe::try_from(
-            &toml::from_str::<PluginConf>(
-                r#"
-    category = "admin"
-    path = "/"
-    authorizations = ["YWRtaW46MTIzMTIz"]
-    "#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        // spellchecker:on
-        admin.authorizations.clear();
-
-        let denied = |path: &str| {
-            let req = pingora::http::RequestHeader::build(
-                http::Method::GET,
-                path.as_bytes(),
-                None,
-            )
-            .unwrap();
-            !admin.auth_validate(&req)
-        };
-
-        assert_eq!(true, denied("/api/configs/upstream/test"));
-        assert_eq!(true, denied("/api/basic"));
-        assert_eq!(true, denied("/api/aes"));
-    }
-
-    /// The acceptance criterion asserted by request rather than by reading
-    /// config: credentials configured, no `Authorization` header sent, a config
-    /// write must come back 401.
-    #[tokio::test]
-    async fn test_unauthenticated_config_write_returns_401() {
-        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
-        try_init_config_manager(&file.path().to_string_lossy()).unwrap();
-        // spellchecker:off
-        let admin = AdminServe::try_from(
-            &toml::from_str::<PluginConf>(
-                r#"
-    category = "admin"
-    authorizations = ["YWRtaW46MTIzMTIz"]
-    "#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        // spellchecker:on
-
-        let mock_io = Builder::new()
-            .read(
-                b"POST /api/configs/upstream/evil HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
-            )
-            .build();
-        let mut session = Session::new_h1(Box::new(mock_io));
-        session.read_request().await.unwrap();
-
-        let resp =
-            handle_request_admin(&admin, &mut session, &mut Ctx::default())
-                .await
-                .unwrap()
-                .expect(
-                    "auth failure must produce a response, not fall through",
-                );
-        assert_eq!(401, resp.status.as_u16());
+        .await;
+        assert_eq!(503, api.status.as_u16());
     }
 }

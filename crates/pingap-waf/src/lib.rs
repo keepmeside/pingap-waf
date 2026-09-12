@@ -22,6 +22,10 @@ pub mod categories;
 pub mod config;
 pub mod detectors;
 pub mod engine;
+pub mod inspect;
+pub mod ip_filter;
+#[cfg(feature = "plugin")]
+pub mod plugin;
 pub mod rule;
 
 pub use budget::{Budget, Exhausted, ExhaustedPolicy};

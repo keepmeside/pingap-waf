@@ -1,11 +1,20 @@
-import { sha256 } from "@/helpers/util";
-
 const PINGAP_LOGIN_TOKEN = "pingap:loginToken";
 
-export async function saveLoginToken(account: string, password: string) {
-  const now = Math.floor(Date.now() / 1000);
-  const token = await sha256(`${account}:${password}:${now}`);
-  window.localStorage.setItem(PINGAP_LOGIN_TOKEN, `${token}:${now}`);
+// What /api/auth/login answers. `auth_level` is "password_only" while a
+// second factor is still outstanding; the server refuses every non-GET until
+// it is completed.
+export interface LoginResult {
+  token: string;
+  auth_level: "password_only" | "two_factor";
+  role: "admin" | "operator" | "viewer";
+  username: string;
+}
+
+// The bearer token the server issued. The password never touches storage:
+// the server hashes it, and what the browser holds is something the server
+// can revoke.
+export function saveLoginToken(token: string) {
+  window.localStorage.setItem(PINGAP_LOGIN_TOKEN, token);
 }
 
 export function getLoginToken() {

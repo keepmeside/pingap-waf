@@ -39,6 +39,13 @@ fn engine_at(paranoia: u8) -> RuleEngine {
             .collect(),
         anomaly_threshold: 1,
         paranoia: Paranoia::new(paranoia).expect("1..=4"),
+        // Generous on purpose. The engine checks its time budget *between* rules and
+        // stops when it runs out, and rules are evaluated in category order — so a
+        // budget that expires mid-ruleset silently starves whichever categories sit
+        // last. In a debug build under parallel tests
+        // the 10 ms default is reachable, and a test that failed for that reason would
+        // look like a missing detection.
+        budget_ms: 10_000,
         ..Default::default()
     };
     RuleEngine::build(
@@ -246,59 +253,52 @@ fn narrowing_those_patterns_did_not_cost_their_true_positives() {
 }
 
 #[test]
-fn a_scanner_user_agent_is_attributed_to_the_generic_category() {
+fn no_category_carries_a_client_fingerprint_rule() {
+    // Bot verdicts moved to `pingap-bot` in Phase 06, and this is what keeps them from
+    // drifting back. While both subsystems matched User-Agents, a scraper could be
+    // refused by the WAF with an anomaly score attached — a score is a thing an
+    // injection payload has and a scraper does not, so the two answers were not even
+    // comparable. One bot-policy surface, and the WAF is not it.
     let engine = engine();
-    // Tools with no legitimate reason to be pointed at someone else's origin fire at
-    // the default level.
-    for ua in ["sqlmap/1.7-dev", "Nikto/2.5.0", "gobuster/3.6"] {
-        let hits = hit_as_user_agent(&engine, ua);
-        assert!(
-            hits.contains(&Category::Generic),
-            "`{ua}` must be flagged at the default paranoia; got {hits:?}"
-        );
+    let clients = [
+        "sqlmap/1.7-dev",
+        "Nikto/2.5.0",
+        "gobuster/3.6",
+        "python-requests/2.31.0",
+        "curl/8.5.0",
+        "Go-http-client/2.0",
+        "Scrapy/2.11",
+        "SemrushBot/7~bl",
+    ];
+    for level in 1..=4 {
+        let engine = engine_at(level);
+        for ua in clients {
+            let hits = hit_as_user_agent(&engine, ua);
+            assert!(
+                hits.is_empty(),
+                "`{ua}` produced WAF hits {hits:?} at paranoia {level}; a \
+                 self-declared client name is the bot plugin's decision"
+            );
+        }
     }
-    // A generic HTTP library is what most API integrations send, so flagging it is
-    // an explicit choice at paranoia 3 rather than the default.
-    for ua in ["python-requests/2.31.0", "curl/8.5.0", "Go-http-client/2.0"] {
-        assert!(
-            hit_as_user_agent(&engine, ua).is_empty(),
-            "`{ua}` must not be flagged by the default profile — it is what \
-             ordinary API clients send"
-        );
-        let hits = hit_as_user_agent(&engine_at(3), ua);
-        assert!(
-            hits.contains(&Category::Generic),
-            "`{ua}` must be available at paranoia 3; got {hits:?}"
-        );
-    }
-    // A real browser must not be, at any level. A bot list that flags Firefox is
-    // unusable.
+
+    // A browser must also be clean, at every level — the same assertion the moved
+    // detector carried, kept because it is the one an unusable bot list fails.
     let firefox =
         "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/128.0";
     for level in 1..=4 {
-        let hits = hit_as_user_agent(&engine_at(level), firefox);
-        assert!(
-            hits.is_empty(),
-            "a browser UA tripped {hits:?} at paranoia {level}"
-        );
+        assert!(hit_as_user_agent(&engine_at(level), firefox).is_empty());
     }
-}
 
-#[test]
-fn a_scanner_fingerprint_only_inspects_the_user_agent() {
-    // `sqlmap` in a request body is someone discussing tools; in a User-Agent it
-    // identifies the client. Scanning every field with client-fingerprint patterns
-    // manufactures false positives that no pattern tuning can remove.
-    let engine = engine();
-    let hits = hit_as_query(&engine, "we tested it with sqlmap and nikto");
+    // And the header is still inspected for real payloads, so removing the fingerprint
+    // rules did not also close the blindspot Phase 04 opened up.
     assert!(
-        !hits.contains(&Category::Generic),
-        "a scanner name in a query value must not be a fingerprint hit: {hits:?}"
-    );
-    assert!(
-        hit_as_user_agent(&engine, "sqlmap/1.7-dev")
-            .contains(&Category::Generic),
-        "the same name in a User-Agent must still be caught"
+        hit_as_user_agent(
+            &engine,
+            "Mozilla/5.0 ' UNION SELECT pw FROM users --"
+        )
+        .contains(&Category::SqlInjection),
+        "a SQL injection carried in a User-Agent must still be caught"
     );
 }
 

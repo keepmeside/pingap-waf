@@ -45,9 +45,21 @@ humantime-serde = { workspace = true }
 nanoid = { workspace = true }
 nix = { version = "0.31.3", features = ["signal"] }
 pingap-acme = { workspace = true }
+# Fork crate. The admin API's route table and its one access decision. Mounted into the
+# existing admin plugin rather than served separately, so there is still one process.
+pingap-admin-api = { workspace = true }
+# Fork crate. The `plugin` feature is what registers `category = "acl"` with the
+# plugin factory; without it this would be the rule table as a library and nothing
+# would be wired into the request path.
+pingap-acl = { workspace = true, features = ["plugin"] }
+# Fork crate. The `plugin` feature registers `category = "bot"`.
+pingap-bot = { workspace = true, features = ["plugin"] }
 pingap-cache = { workspace = true }
 pingap-certificate = { workspace = true }
 pingap-config = { workspace = true }
+# Fork crate. Users, sessions and the audit trail behind the admin plugin's
+# per-user auth; the gateway boots and serves without it.
+pingap-controlplane = { workspace = true }
 pingap-core = { workspace = true }
 pingap-imageoptim = { workspace = true, optional = true }
 pingap-location = { workspace = true }
@@ -60,6 +72,10 @@ pingap-pyroscope = { workspace = true, optional = true }
 pingap-sentry = { workspace = true, optional = true }
 pingap-upstream = { workspace = true }
 pingap-util = { workspace = true }
+# Fork crate. The `plugin` feature is what registers `category = "waf"` with the
+# plugin factory; without it this would be the engine as a library and nothing would
+# be wired into the request path.
+pingap-waf = { workspace = true, features = ["plugin"] }
 pingap-webhook = { workspace = true }
 pingora = { workspace = true }
 regex = { workspace = true }
@@ -92,7 +108,10 @@ mimalloc = "0.1.47"
 [features]
 pyro = ["pingap-pyroscope"]
 imageoptim = ["pingap-imageoptim"]
-geo = ["pingap-plugin/geo"]
+# Both crates that consult the embedded GeoIP database are enabled together. Enabling
+# only one would give an operator `geo_restriction` but silently refuse every ACL
+# `geo_country` rule, or the reverse.
+geo = ["pingap-plugin/geo", "pingap-acl/geo"]
 tracing = [
     "pingora/sentry",
     "pingap-cache/tracing",
@@ -112,6 +131,8 @@ criterion = { version = "0.7.0", features = ["html_reports"] }
 pretty_assertions = "1.4.1"
 tokio-test = "0.4.4"
 tempfile = { workspace = true }
+# `test-support` exposes the code generator the 2FA login test needs.
+pingap-controlplane = { workspace = true, features = ["test-support"] }
 
 
 [profile.release]

@@ -1,8 +1,29 @@
-//! Control-plane store, RBAC, and notification delivery.
+//! Control-plane store and RBAC.
 //!
-//! Storage sits behind a repository trait so the driver stays swappable: Turso
-//! is the choice, `rusqlite` on the same file format is the fallback the phase
-//! 02 probe keeps open. Phase 12's email and Telegram notifiers land here as
-//! `impl Notification` types rather than as edits to `pingap-webhook`.
+//! Users, second factors, sessions and the audit trail — the state pingap's config
+//! cannot hold, because config is a document and this is an append-heavy log queried by
+//! range and filtered by role.
 //!
-//! Filled in by phase 07, extended by phases 12 and 13.
+//! The boundary is the load-bearing decision: **the gateway must start and serve with
+//! this store unavailable.** Config (file or etcd) owns domains, upstreams, certificates
+//! and policy, and already has validation, history, an etcd watch and `pingap -t`. This
+//! store owns identity and history. Nothing here is on the request path.
+
+pub mod auth;
+pub mod projection;
+pub mod rbac;
+pub mod repository;
+pub mod schema;
+pub mod store;
+
+pub use auth::{
+    AuthError, TotpGuard, decrypt_totp_secret, encrypt_totp_secret, enrol_totp,
+    hash_password, hash_token, new_token, tokens_match, verify_password,
+};
+pub use rbac::{AuthLevel, Capability, Denial, Role, authorize};
+pub use repository::{
+    Activity, ConfigStatus, ConfigVersion, ControlPlaneStore, NewActivity,
+    NewConfigVersion, NewSession, NewUser, Session, StoreError, TimeRange,
+    User,
+};
+pub use store::TursoStore;

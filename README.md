@@ -91,6 +91,13 @@ docker-compose up -d
 
 Your Pingap instance is now running! You can access the web admin interface at http://localhost/pingap with the credentials you set.
 
+The first login with those credentials creates the initial `admin` account in
+the control-plane store (`control-plane.db`, beside the config; it lives in the
+mounted volume above). After that the account is what logs in, not the
+environment variables, and they can be dropped. See
+[control-plane store](./docs/control-plane-store.md) for sessions, 2FA, the
+`store=` / `totp_key=` options, and what happens when the store is missing.
+
 ### Install the binary via curl
 
 For Linux and macOS, you can install the latest pre-built binary to `/usr/local/bin/pingap` with one command:

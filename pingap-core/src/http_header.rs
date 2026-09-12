@@ -334,6 +334,17 @@ pub fn set_trusted_proxies(proxies: &Option<Vec<String>>) {
     }
 }
 
+/// Whether a trusted-proxy list is configured.
+///
+/// When this is false, forwarded headers are trusted unconditionally, which means
+/// any client can set its own apparent IP. That is backwards-compatible and fine for
+/// logging, and unsafe as the basis of an access-control decision. A component that
+/// enforces on client IP should refuse to start rather than enforce on a value the
+/// client chose, and this is how it can tell.
+pub fn trusted_proxies_enabled() -> bool {
+    TRUSTED_PROXIES_ENABLED.load(Ordering::Relaxed)
+}
+
 /// Returns true if the direct peer address is a configured trusted proxy.
 fn is_trusted_proxy(peer: &str) -> bool {
     TRUSTED_PROXIES

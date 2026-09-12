@@ -13,6 +13,26 @@ name = "pingap_admin_api"
 path = "src/lib.rs"
 
 [dependencies]
+# The router speaks `http` types and raw bytes, not pingora ones. That is what lets the
+# enumeration test drive every route without a listener, a socket or a live gateway.
+http = { workspace = true }
+bytes = { workspace = true }
+# Roles, capabilities and the one authorisation decision. The router never re-implements
+# the matrix; it names a capability per route and asks.
+pingap-controlplane = { workspace = true }
+# Config-shaped resources are stored as intent and projected, never written directly.
+pingap-config = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
+tracing = { workspace = true }
+urlencoding = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+pretty_assertions = "1.4.1"
 
 [lints]
 workspace = true

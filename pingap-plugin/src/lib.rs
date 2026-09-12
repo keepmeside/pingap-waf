@@ -147,8 +147,12 @@ pub fn get_step_conf_in(
 /// Parsed rather than compared literally: `type` used to be tested against the
 /// string `deny`, so every other spelling — including `Deny` — silently selected
 /// allow mode and inverted the policy.
+///
+/// `pub` so this fork's `pingap-acl` can share it. An ACL rule table that invented
+/// its own allow/deny semantics would be a second place for the inversion bug above
+/// to reappear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum RestrictionCategory {
+pub enum RestrictionCategory {
     #[default]
     Allow,
     Deny,
@@ -158,7 +162,7 @@ impl RestrictionCategory {
     /// Given whether the request matched the configured list, returns whether
     /// it is allowed through.
     #[inline]
-    pub(crate) fn allows(&self, found: bool) -> bool {
+    pub fn allows(&self, found: bool) -> bool {
         match self {
             Self::Allow => found,
             Self::Deny => !found,
@@ -168,7 +172,7 @@ impl RestrictionCategory {
 
 /// Parses the `type` of a restriction plugin. Absent means `allow`, which is
 /// the documented default; anything that is not `allow` or `deny` is rejected.
-pub(crate) fn get_restriction_category_conf(
+pub fn get_restriction_category_conf(
     value: &PluginConf,
     category: &str,
 ) -> Result<RestrictionCategory, Error> {
@@ -180,6 +184,20 @@ pub(crate) fn get_restriction_category_conf(
             message: format!("Invalid type({other}), expect allow or deny"),
         }),
     }
+}
+
+/// The host part of a `Referer` header, or empty if it is not a parsable URL.
+///
+/// One implementation, shared by the `referer_restriction` plugin and this fork's
+/// `pingap-acl`. Two would be worse than it sounds: whether a bare host, a
+/// scheme-relative URL or a `Referer` with credentials yields the same string is
+/// exactly the kind of edge case that diverges silently, and the two would then
+/// disagree about which requests a referer rule covers.
+pub fn referer_host(referer: &str) -> String {
+    url::Url::parse(referer)
+        .ok()
+        .and_then(|info| info.host_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// Returns true if `accept_encoding` lists `coding` as an acceptable encoding.
@@ -273,6 +291,16 @@ mod ua_restriction;
 mod plugin;
 
 pub use plugin::get_plugin_factory;
+
+/// Country code for an address, from the single embedded GeoIP database this
+/// process loads.
+///
+/// Re-exported so `pingap-acl` can evaluate geo rules against the same database the
+/// `geo_restriction` plugin uses. `tor-geoip`'s embedded database is ~11 MB of
+/// compiled-in data, so a second `GeoipDb::new_embedded()` in another crate would
+/// pay for it twice — and the two could drift apart across a version bump.
+#[cfg(feature = "geo")]
+pub use geo_restriction::lookup_country_code;
 
 #[cfg(test)]
 mod tests {

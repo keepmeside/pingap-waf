@@ -12,7 +12,48 @@ publish = false
 name = "pingap_bot"
 path = "src/lib.rs"
 
+[features]
+# Same split as `pingap-waf` and `pingap-acl`: fingerprint computation and rule
+# evaluation are pure Rust with no knowledge that Pingora exists, so they are
+# unit-testable against published vectors without a proxy. Only the plugin needs
+# pingora and its OpenSSL `*-sys` chain.
+default = []
+plugin = [
+    "dep:async-trait",
+    "dep:bytes",
+    "dep:ctor",
+    "dep:http",
+    "dep:pingap-config",
+    "dep:pingap-core",
+    "dep:pingap-plugin",
+    "dep:pingora",
+    "dep:toml",
+    "dep:tracing",
+]
+
 [dependencies]
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# JA4H's b, c and d components are SHA-256 truncated to 12 hex characters.
+sha2 = { workspace = true }
+snafu = { workspace = true }
+
+# --- `plugin` feature only -------------------------------------------------------
+async-trait = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+ctor = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+pingap-config = { workspace = true, optional = true }
+pingap-core = { workspace = true, optional = true }
+pingap-plugin = { workspace = true, optional = true }
+pingora = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-test = "0.4.4"
+toml = { workspace = true }
 
 [lints]
 workspace = true

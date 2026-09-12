@@ -13,7 +13,7 @@ request.interceptors.request.use(
   (config) => {
     const token = getLoginToken();
     if (token) {
-      config.headers["Authorization"] = token;
+      config.headers["Authorization"] = `Bearer ${token}`;
     }
     // 对请求的query部分清空值
     if (config.params) {

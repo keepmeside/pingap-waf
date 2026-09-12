@@ -201,6 +201,19 @@ impl ValidatedCustomRule {
 /// keyed by name — a single profile shared across domains shares its state.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct WafConfig {
+    /// Label for this profile, recorded on every verdict it produces.
+    ///
+    /// Two domains that need independently-counted policy already get independence
+    /// from having two config entries — instances are keyed by entry name, so
+    /// `waf:strict` and `waf:audit-only` are separate objects without any support
+    /// from this crate. What is *not* free is telling them apart afterwards: a block
+    /// recorded with no profile attribution leaves an operator with two candidate
+    /// policies and no way to know which one fired. Defaults to `default` rather
+    /// than to the entry name, because the plugin is constructed from its config
+    /// table and never learns the name it was filed under.
+    #[serde(default = "default_profile")]
+    pub profile: String,
+
     /// Per-category enforcement mode, as written in config.
     #[serde(default)]
     pub categories: BTreeMap<String, RawMode>,
@@ -236,6 +249,9 @@ pub struct WafConfig {
     pub custom_rules: BTreeMap<String, CustomRule>,
 }
 
+fn default_profile() -> String {
+    "default".to_string()
+}
 const fn default_threshold() -> u32 {
     5
 }
@@ -252,6 +268,7 @@ const fn default_response_prefix() -> usize {
 impl Default for WafConfig {
     fn default() -> Self {
         Self {
+            profile: default_profile(),
             categories: BTreeMap::new(),
             paranoia: Paranoia::default(),
             anomaly_threshold: default_threshold(),
@@ -270,6 +287,8 @@ impl Default for WafConfig {
 pub struct ValidatedConfig {
     request_modes: BTreeMap<Category, RequestMode>,
     response_modes: BTreeMap<Category, ResponseMode>,
+    /// Operator-chosen label for this profile, carried onto every verdict.
+    pub profile: String,
     pub paranoia: Paranoia,
     pub anomaly_threshold: u32,
     pub budget: Duration,
@@ -411,6 +430,7 @@ impl WafConfig {
         Ok(ValidatedConfig {
             request_modes,
             response_modes,
+            profile: self.profile,
             paranoia: self.paranoia,
             anomaly_threshold: self.anomaly_threshold,
             budget: Duration::from_millis(self.budget_ms),
@@ -753,6 +773,39 @@ mod tests {
             msg.contains("backtrack"),
             "explains why it is dangerous: {msg}"
         );
+    }
+
+    /// The workaround the rejection message points operators at has to actually work,
+    /// and the one that looks obvious has to actually fail.
+    ///
+    /// A negated class does not bound anything: the `*` in `[^&]*` sits outside the
+    /// class, so it still rescans to end of input. Documenting `(?=[^&]*etc)` as the
+    /// fix would send operators to a pattern the loader rejects. A counted repetition
+    /// does bound it.
+    #[test]
+    fn only_a_counted_repetition_rescues_a_lookaround() {
+        let rule = |pattern: &str| CustomRule {
+            category: Category::SqlInjection,
+            pattern: pattern.to_string(),
+            severity: crate::rule::Severity::Warning,
+            paranoia: Paranoia::default(),
+            action: None,
+        };
+        for rejected in ["(?=.*etc)", "(?=[^&]*etc)", "(?=.{2,}etc)"] {
+            let mut cfg = WafConfig::default();
+            cfg.custom_rules.insert("look".into(), rule(rejected));
+            assert!(
+                matches!(
+                    cfg.validate(),
+                    Err(ConfigError::CostlyCustomPattern { .. })
+                ),
+                "`{rejected}` should have been refused"
+            );
+        }
+        let mut cfg = WafConfig::default();
+        cfg.custom_rules
+            .insert("look".into(), rule("(?=.{0,64}etc)"));
+        cfg.validate().expect("a counted lookaround is accepted");
     }
 
     #[test]

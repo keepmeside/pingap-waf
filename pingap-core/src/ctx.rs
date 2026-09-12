@@ -275,6 +275,15 @@ pub struct RequestState {
     pub location_processing_count: i32,
     /// The total number of requests accepted for this location.
     pub location_accepted_count: u64,
+    /// Whether a plugin already answered the request at `PluginStep::EarlyRequest`.
+    ///
+    /// `ProxyHttp::early_request_filter` returns `Result<()>`, so it has no way to
+    /// tell pingora that the response is already on the wire — pingora reads its
+    /// `Ok(())` as "carry on and proxy". `request_filter` returns `Result<bool>`
+    /// and does, so the decision has to travel between the two on the context.
+    /// Without it, a denying plugin at that step answers the client *and* the
+    /// request still reaches the upstream.
+    pub early_request_handled: bool,
 }
 
 /// All cache-related configuration and statistics for a request.
@@ -385,6 +394,21 @@ pub struct Ctx {
     pub features: Option<Features>,
     /// Plugins for the current location
     pub plugins: Option<Vec<NamedPlugin>>,
+    /// Typed per-request state belonging to a plugin, keyed by its own type.
+    ///
+    /// The other fields on `Ctx` are concrete because `pingap-core` knows what they
+    /// mean. A WAF verdict, a client fingerprint, and a bot decision are structured
+    /// data that `pingap-core` must *not* know about — the crates that own them
+    /// depend on this one, so a concrete field would invert the dependency.
+    ///
+    /// The alternative is `add_variable`, which is `String` → `String`. Serialising a
+    /// verdict into a string for a later stage to re-parse is the log-round-trip
+    /// pattern this fork exists to remove; it would also lose the rule IDs and scores
+    /// that make a block explainable.
+    ///
+    /// `http::Extensions` costs one null pointer until something is inserted, so
+    /// requests that touch no such plugin pay nothing.
+    pub extensions: http::Extensions,
 }
 
 /// Helper struct to store connection timing and TLS details

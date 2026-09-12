@@ -1,6 +1,4 @@
 import { z } from "zod";
-import sha256hash from "crypto-js/sha256";
-import hex from "crypto-js/enc-hex";
 import { isString } from "radash";
 
 import HTTPError from "./http-error";
@@ -108,9 +106,4 @@ export function formatUptime(startTime?: number | null) {
 /** Whole days from now until `at` (unix seconds); negative once it has passed. */
 export function daysUntil(at: number) {
   return Math.floor((at - Date.now() / 1000) / 86400);
-}
-
-export async function sha256(message: string) {
-  const hashDigest = sha256hash(message);
-  return hex.stringify(hashDigest);
 }

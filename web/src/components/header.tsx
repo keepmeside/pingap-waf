@@ -5,12 +5,12 @@ import {
   Sun,
   Moon,
   SunMoon,
-  LoaderCircle,
   Cog,
   FileCode2,
   AudioWaveform,
   ClipboardCopy,
   PowerOff,
+  LogOut,
 } from "lucide-react";
 import { goToConfig } from "@/routers";
 import { useTheme } from "@/components/theme-provider";
@@ -25,7 +25,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { formatError } from "@/helpers/util";
 import i18n from "@/i18n";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,8 +34,8 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import request from "@/helpers/request";
+import { removeLoginToken } from "@/states/token";
 import { formatUptime } from "@/helpers/util";
 import {
   AlertDialog,
@@ -60,13 +59,6 @@ export function MainHeader({
   const iconClassName = "mr-2 h-4 w-4";
   const { setTheme, theme } = useTheme();
   const lang = i18n.language;
-  const [aesType, setAesType] = React.useState("encrypt");
-  const [aesProcessing, setAesProcessing] = React.useState(false);
-  const [aesData, setAesData] = React.useState({
-    key: "",
-    data: "",
-  });
-  const [aesResult, setAesResult] = React.useState("");
 
   const [base64Type, setBase64Type] = React.useState("encode");
   const [base64Data, setBase64Data] = React.useState("");
@@ -84,41 +76,21 @@ export function MainHeader({
     return () => clearInterval(timer);
   }, []);
 
-  const handleAes = async () => {
-    const secret = aesData.key;
-    const value = aesData.data;
-    if (!secret || !value) {
-      setAesResult("");
-      return;
-    }
-    const key = `${secret}-${value}`;
-    setAesProcessing(true);
-    try {
-      const { data } = await request.post<{
-        value: string;
-      }>("/aes", {
-        category: aesType,
-        key: secret,
-        data: value,
-      });
-      if (key == `${secret}-${value}`) {
-        setAesResult(data.value);
-        await navigator.clipboard.writeText(data.value);
-      }
-    } catch (err) {
-      toast(t("aesFail"), {
-        description: formatError(err),
-      });
-    } finally {
-      if (key == `${secret}-${value}`) {
-        setAesProcessing(false);
-      }
-    }
-  };
-
   const confirmRestart = async () => {
     await restart();
     toast(t("restartSuccess"));
+  };
+
+  // Server first, then forget the token: a revoked session is dead on the
+  // next request regardless of what the browser still holds, while a token
+  // forgotten before the server heard about it stays valid for two days.
+  const handleLogout = async () => {
+    try {
+      await request.post("/auth/logout");
+    } finally {
+      removeLoginToken();
+      window.location.hash = "#/login";
+    }
   };
 
   const zhLang = "zh";
@@ -265,91 +237,20 @@ export function MainHeader({
             </AlertDialogContent>
           </AlertDialog>
         </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem className="cursor-pointer" onClick={handleLogout}>
+          <LogOut className={iconClassName} />
+          <span>{t("logout")}</span>
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
 
-  const aesTab = (
-    <TabsContent value="aes" className="mt-2">
-      <div className="grid gap-4">
-        <div className="space-y-2">
-          <h4 className="font-medium leading-none">{t("aesGcm")}</h4>
-          <p className="text-sm text-muted-foreground">{t("aesTips")}</p>
-        </div>
-        <div className="grid gap-2">
-          <RadioGroup
-            className="flex flex-wrap items-start"
-            onValueChange={(option) => {
-              setAesType(option);
-            }}
-            defaultValue={aesType}
-          >
-            <RadioGroupItem value="encrypt" id="encrypt" />
-            <Label className="pl-2 cursor-pointer" htmlFor="encrypt">
-              {t("encrypt")}
-            </Label>
-            <RadioGroupItem value="decrypt" id="decrypt" />
-            <Label className="pl-2 cursor-pointer" htmlFor="decrypt">
-              {t("decrypt")}
-            </Label>
-          </RadioGroup>
-          <div className="flex">
-            <Label htmlFor="secret" className="flex-none leading-9 mr-4">
-              {t("secret")}
-            </Label>
-            <Input
-              id="secret"
-              className="grow"
-              onChange={(e) => {
-                const key = e.target.value.trim();
-                setAesData((prev) => ({ ...prev, key }));
-              }}
-            />
-          </div>
-          <div className="flex">
-            <Label htmlFor="value" className="flex-none leading-9 mr-4">
-              {t("value")}
-            </Label>
-            <Input
-              id="value"
-              className="grow"
-              onChange={(e) => {
-                const data = e.target.value.trim();
-                setAesData((prev) => ({ ...prev, data }));
-              }}
-            />
-          </div>
-          <div className="flex">
-            <Label htmlFor="value" className="flex-none leading-9 mr-4">
-              {t("result")}
-            </Label>
-            <p className="grow text-sm text-muted-foreground leading-9 relative">
-              <Button
-                className="absolute right-0"
-                variant="ghost"
-                size="icon"
-                onClick={async (e) => {
-                  e.preventDefault();
-                  handleAes();
-                }}
-              >
-                <ClipboardCopy />
-              </Button>
-              {!aesProcessing && (
-                <Input id="value" className="grow" value={aesResult} readOnly />
-              )}
-              {aesProcessing && (
-                <LoaderCircle className="ml-2 h-4 w-4 inline animate-spin" />
-              )}
-            </p>
-          </div>
-        </div>
-      </div>
-    </TabsContent>
-  );
-
-  const base64Tab = (
-    <TabsContent value="base64" className="mt-2">
+  // The only tool left in the popover. The AES sibling that used to sit beside it
+  // called an encryption oracle on the server, which is gone; a one-entry tab
+  // strip is not worth rendering, so this is the popover's content directly.
+  const base64Tool = (
+    <div className="mt-2">
       <div className="grid gap-4">
         <div className="space-y-2">
           <h4 className="font-medium leading-none">{t("base64")}</h4>
@@ -416,7 +317,7 @@ export function MainHeader({
           </div>
         </div>
       </div>
-    </TabsContent>
+    </div>
   );
 
   return (
@@ -444,14 +345,7 @@ export function MainHeader({
             </Button>
           </PopoverTrigger>
           <PopoverContent className="w-[400px]" align="end">
-            <Tabs defaultValue="base64" className="w-full">
-              <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="base64">Base64</TabsTrigger>
-                <TabsTrigger value="aes">AES</TabsTrigger>
-              </TabsList>
-              {base64Tab}
-              {aesTab}
-            </Tabs>
+            {base64Tool}
           </PopoverContent>
         </Popover>
         <Button

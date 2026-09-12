@@ -19,6 +19,7 @@ use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use strum::EnumString;
 
 #[derive(
@@ -29,6 +30,15 @@ pub enum PluginStep {
     EarlyRequest,
     #[default]
     Request,
+    /// The request body, delivered chunk by chunk on the way to the upstream.
+    ///
+    /// Names the lifecycle position that [`Plugin::handle_request_body`] occupies.
+    /// Unlike the request steps, this one does not gate dispatch: the body hook is
+    /// offered to every plugin on the location, exactly as the two response-body
+    /// hooks already are, because a plugin that inspects a body almost always also
+    /// needs the headers and so declares `request` as its step. Declaring
+    /// `request_body` is for a plugin that wants *only* the body.
+    RequestBody,
     ProxyUpstream,
     UpstreamResponse,
     Response,
@@ -133,6 +143,42 @@ pub trait Plugin: Sync + Send {
         Ok(RequestPluginResult::Skipped)
     }
 
+    /// Processes a chunk of the request body as it streams to the upstream.
+    ///
+    /// # Why this is a hook rather than a drain in `handle_request`
+    /// Reading the body inside a `PluginStep::Request` plugin destroys it. Pingora
+    /// mirrors request bytes into a replayable buffer only if that buffer already
+    /// exists at read time (`read_body_bytes` copies under
+    /// `if let Some(buffer) = self.retry_buffer.as_mut()`), and
+    /// `enable_retry_buffering()` runs inside `proxy_to_upstream`, strictly after
+    /// `request_filter` has returned. So bytes a request-filter plugin reads are
+    /// handed over and dropped, and the upstream receives the original
+    /// `Content-Length` with no body. There is no un-read or push-back API on the
+    /// downstream session.
+    ///
+    /// This hook is called per chunk on the real proxy path, so the body is
+    /// inspected as it streams and is never consumed out from under the upstream.
+    ///
+    /// # Parameters
+    /// * `_body` - The chunk, mutable so a plugin may rewrite it
+    /// * `_end_of_stream` - `true` on the final chunk
+    ///
+    /// # Returns
+    /// * `Ok(())` - Continue proxying
+    /// * `Err` - Reject the request. Return `new_internal_error(status, message)`
+    ///   so the existing `fail_to_proxy` path renders the response, exactly as the
+    ///   413 body-size guard does.
+    #[inline]
+    fn handle_request_body(
+        &self,
+        _session: &mut Session,
+        _ctx: &mut Ctx,
+        _body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+    ) -> pingora::Result<()> {
+        Ok(())
+    }
+
     /// Processes an HTTP response at a specified lifecycle step.
     ///
     /// # Parameters
@@ -232,6 +278,61 @@ pub trait Plugin: Sync + Send {
     }
 }
 
+/// Why a plugin name did not resolve to an instance.
+///
+/// The distinction is the whole point. `get` returning `None` conflates "no entry with
+/// that name is configured" with "an entry exists and failed to construct", and those want
+/// opposite handling: the first is a config typo the operator will see as a route that
+/// does nothing, the second is a *security control that is not running* while the config
+/// says it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginMiss {
+    /// Nothing is configured under that name.
+    Unknown,
+    /// An entry exists, and building it failed.
+    Failed {
+        /// The `category` from its config, so the caller can decide by category rather
+        /// than by parsing a name.
+        category: String,
+        reason: String,
+    },
+}
+
+/// Plugin categories whose absence must not be served around.
+///
+/// A broken `compression` or `cors` should not take a site down; a broken `waf` serving
+/// unfiltered traffic while the control plane reports healthy is the failure this whole
+/// product exists to prevent. The list lives here, beside the trait that reports the
+/// miss, so there is one place that answers "is this plugin load-bearing for security".
+pub const SECURITY_ENFORCING_CATEGORIES: &[&str] =
+    &["waf", "acl", "bot", "access_list"];
+
+/// Whether a failed plugin of this category must fail the request rather than be skipped.
+pub fn is_security_enforcing(category: &str) -> bool {
+    SECURITY_ENFORCING_CATEGORIES.contains(&category)
+}
+
+/// What to do when a Location lists a security-enforcing plugin that is not running.
+///
+/// `false` — the default — means the request is refused. An operator who would rather
+/// serve unprotected traffic than serve none can say so, and the choice is visible in
+/// config and logged at startup rather than being an inherited default nobody chose.
+static POLICY_FAILS_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Set from `basic.on_policy_unavailable`. Safe to call on every reload.
+///
+/// Anything other than the two known values is treated as `fail_closed`, and the caller
+/// logs it: a typo must not silently pick the permissive branch.
+pub fn set_policy_unavailable_mode(mode: &Option<String>) {
+    let open = matches!(mode.as_deref(), Some("fail_open"));
+    POLICY_FAILS_OPEN.store(open, Ordering::Relaxed);
+}
+
+/// Whether an unavailable security policy serves the request anyway.
+pub fn policy_fails_open() -> bool {
+    POLICY_FAILS_OPEN.load(Ordering::Relaxed)
+}
+
 /// Plugin provider trait
 pub trait PluginProvider: Send + Sync {
     /// Get a plugin by name
@@ -242,6 +343,15 @@ pub trait PluginProvider: Send + Sync {
     /// # Returns
     /// * `Option<Arc<dyn Plugin>>` - The plugin if found, None otherwise
     fn get(&self, name: &str) -> Option<Arc<dyn Plugin>>;
+
+    /// Why `name` did not resolve.
+    ///
+    /// Only meaningful after [`Self::get`] has returned `None`. Defaults to
+    /// [`PluginMiss::Unknown`] so a provider that does not track construction failures —
+    /// a test double, say — keeps compiling and keeps today's behaviour.
+    fn miss(&self, _name: &str) -> PluginMiss {
+        PluginMiss::Unknown
+    }
 }
 
 pub type Plugins = AHashMap<String, Arc<dyn Plugin>>;
@@ -260,6 +370,10 @@ mod tests {
         let step = "request".parse::<PluginStep>().unwrap();
         assert_eq!(step, PluginStep::Request);
         assert_eq!(step.to_string(), "request");
+
+        let step = "request_body".parse::<PluginStep>().unwrap();
+        assert_eq!(step, PluginStep::RequestBody);
+        assert_eq!(step.to_string(), "request_body");
 
         let step = "proxy_upstream".parse::<PluginStep>().unwrap();
         assert_eq!(step, PluginStep::ProxyUpstream);

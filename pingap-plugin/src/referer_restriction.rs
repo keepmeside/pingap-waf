@@ -183,11 +183,10 @@ impl Plugin for RefererRestriction {
         let mut found = false;
         if let Some(value) = session.get_header(http::header::REFERER) {
             let referer = value.to_str().unwrap_or_default().to_string();
-            let host = if let Ok(info) = url::Url::parse(&referer) {
-                info.host_str().unwrap_or_default().to_string()
-            } else {
-                "".to_string()
-            };
+            // Shared with `pingap-acl` via the crate root, so a referer rule there
+            // and a referer restriction here cannot disagree about which host a
+            // given `Referer` names.
+            let host = crate::referer_host(&referer);
             if self.referer_list.contains(&host) {
                 found = true;
             } else {

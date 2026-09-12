@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::process::get_admin_addr;
+use crate::process::{get_admin_addr, get_config_path};
 use ahash::AHashMap;
 use arc_swap::ArcSwap;
 use pingap_config::PluginConf;
-use pingap_core::{Plugin, PluginProvider, PluginStep, Plugins};
+use pingap_core::{Plugin, PluginMiss, PluginProvider, PluginStep, Plugins};
 use pingap_plugin::get_plugin_factory;
 // Reuse the canonical plugin-config helpers instead of keeping a second copy.
 // `get_hash_key` in particular MUST stay byte-identical to the one plugins use
 // to compute their config key, otherwise hot-reload change detection breaks.
 pub(crate) use pingap_plugin::{
-    get_hash_key, get_int_conf, get_step_conf, get_str_conf, get_str_slice_conf,
+    get_hash_key, get_int_conf, get_step_conf, get_str_conf,
 };
 use pingap_proxy::ServerConf;
 use pingap_util::base64_encode;
@@ -35,6 +35,9 @@ use std::sync::LazyLock;
 use tracing::{error, info};
 
 mod admin;
+// Fork-owned. Per-user auth for the admin plugin, kept out of the vendored
+// `admin.rs` so that file gains one field and one call rather than a login flow.
+mod admin_auth;
 mod stats;
 
 /// UUID for the admin server plugin, generated at runtime
@@ -42,9 +45,41 @@ pub static ADMIN_SERVER_PLUGIN: &str = "pingap:admin";
 
 static LOG_TARGET: &str = "main::plugin";
 
+/// Query parameters on the `--admin` address, e.g.
+/// `user:pass@127.0.0.1:3018/?store=/var/lib/pingap/control-plane.db`.
 #[derive(Debug, PartialEq, Deserialize, Serialize, Default)]
 struct AdminPluginParams {
-    max_age: Option<String>,
+    /// Path of the control-plane database. Defaults to
+    /// `control-plane.db` beside the config file.
+    store: Option<String>,
+    /// Key that encrypts TOTP secrets at rest. Without it, 2FA enrolment is
+    /// refused rather than stored readable.
+    totp_key: Option<String>,
+}
+
+/// Where the control-plane store lives when `--admin` does not say.
+///
+/// Beside the config file: the one directory an operator already knows is
+/// pingap's, already backs up, and already restricts. An etcd URL has no
+/// directory, and neither does a missing `-c`, so those land in the working
+/// directory — `store=` on the admin address is how to say otherwise.
+fn default_store_path() -> String {
+    let conf = get_config_path()
+        .map(|c| pingap_util::resolve_path(&c))
+        .filter(|c| !c.starts_with("etcd://"))
+        .unwrap_or_default();
+    let p = std::path::Path::new(&conf);
+    let dir = if conf.is_empty() {
+        std::path::PathBuf::from(".")
+    } else if p.is_dir() {
+        p.to_path_buf()
+    } else {
+        p.parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    };
+    dir.join("control-plane.db").to_string_lossy().to_string()
 }
 
 /// Parses admin plugin configuration from an address string.
@@ -82,27 +117,21 @@ pub fn parse_admin_plugin(
             authorization = base64_encode(format!("{authorization}:{pass}"));
         }
     }
-    // Fail closed before the listener is ever attached. This is the only
-    // chokepoint that actually aborts startup: both `try_init_plugins` call
-    // sites in main.rs log their error and go on serving, while this function is
-    // reached through `?` from `run_admin_node` and from the main server path.
+    // The credential on `--admin` has one job now: it bootstraps the first
+    // admin account into an empty store, after which it is never consulted.
+    // It is therefore optional — an operator whose store already has users
+    // does not need to keep a password on the command line — and its absence
+    // is not the open door it used to be. With no users and no bootstrap,
+    // nobody can log in, which is deny by construction rather than allow.
     //
-    // Credentials also arrive by environment variable, which main.rs folds into
-    // this address before calling us, so by this point an empty value means no
-    // credentials were resolved by any route — not merely that none were given
-    // inline. Checking at config-parse time instead would misread an env var
-    // that failed to resolve as a deliberate choice to run without auth.
+    // Credentials also arrive by environment variable, which main.rs folds
+    // into this address before calling us.
     if authorization.is_empty() {
-        return Err(Error::Invalid {
-            category: "admin".to_string(),
-            message: format!(
-                "admin address {:?} resolved no credentials, so `authorizations` \
-                 would be empty and the admin API would accept config writes \
-                 from anyone. Use `user:password@{}`, or set PINGAP_ADMIN_USER \
-                 and PINGAP_ADMIN_PASSWORD.",
-                addr, addr
-            ),
-        });
+        info!(
+            target: LOG_TARGET,
+            addr,
+            "admin address carries no credential; the first admin must already exist in the store"
+        );
     }
 
     let mut path = info.path().to_string();
@@ -112,16 +141,16 @@ pub fn parse_admin_plugin(
     let params: AdminPluginParams =
         serde_qs::from_str(info.query().unwrap_or_default())
             .unwrap_or_default();
-    let max_age = params.max_age.unwrap_or("2d".to_string());
+    let store = params.store.unwrap_or_else(default_store_path);
+    let totp_key = params.totp_key.unwrap_or_default();
 
     let data = format!(
         r#"
     category = "admin"
     path = "{path}"
-    authorizations = [
-        "{authorization}"
-    ]
-    max_age = "{max_age}"
+    bootstrap = "{authorization}"
+    store = "{store}"
+    totp_key = "{totp_key}"
     remark = "Admin serve"
     "#,
     );
@@ -135,6 +164,22 @@ pub fn parse_admin_plugin(
         ADMIN_SERVER_PLUGIN.to_string(),
         toml::from_str::<PluginConf>(&data).unwrap_or_default(),
     ))
+}
+
+/// The control-plane store this process uses, or `None` when there is no admin listener.
+///
+/// Resolved through `parse_admin_plugin` rather than re-deriving the path, because the
+/// store is a single-writer database (`TursoStore::shared` refuses a second path) and two
+/// subsystems computing it two ways is how a process ends up with two of them — one holding
+/// the users, the other the config versions. There is no store without `--admin`: the
+/// gateway proxies from config alone.
+pub fn admin_store_path() -> Option<String> {
+    let addr = get_admin_addr()?;
+    let (_, _, conf) = parse_admin_plugin(&addr).ok()?;
+    conf.get("store")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Error types for plugin operations
@@ -230,25 +275,43 @@ remark = "Adjust the accept encoding order and choose one encoding"
     ]
 }
 
+/// Names that were configured and failed to build, and why.
+///
+/// Held beside the provider map rather than folded into it, because a plugin that failed
+/// has no instance to hold. Swapped together with the map so a request never sees a
+/// failure set from one reload and a plugin map from another.
+pub type Failures = AHashMap<String, PluginMiss>;
+
 struct Provider {
     plugins: ArcSwap<Plugins>,
+    failures: ArcSwap<Failures>,
 }
 
 impl Provider {
-    fn store(&self, data: Plugins) {
+    fn store(&self, data: Plugins, failures: Failures) {
         self.plugins.store(Arc::new(data));
+        self.failures.store(Arc::new(failures));
     }
 }
 
 static PLUGIN_PROVIDER: LazyLock<Arc<Provider>> = LazyLock::new(|| {
     Arc::new(Provider {
         plugins: ArcSwap::from_pointee(AHashMap::new()),
+        failures: ArcSwap::from_pointee(AHashMap::new()),
     })
 });
 
 impl PluginProvider for Provider {
     fn get(&self, name: &str) -> Option<Arc<dyn Plugin>> {
         self.plugins.load().get(name).cloned()
+    }
+
+    fn miss(&self, name: &str) -> PluginMiss {
+        self.failures
+            .load()
+            .get(name)
+            .cloned()
+            .unwrap_or(PluginMiss::Unknown)
     }
 }
 
@@ -268,8 +331,9 @@ pub fn new_plugin_provider() -> Arc<dyn PluginProvider> {
 /// Returns Error if plugin initialization fails
 pub fn parse_plugins(
     configs: Vec<(String, PluginConf)>,
-) -> (Plugins, Vec<Error>) {
+) -> (Plugins, Failures, Vec<Error>) {
     let mut plugins: Plugins = AHashMap::new();
+    let mut failures: Failures = AHashMap::new();
     let mut errors: Vec<Error> = vec![];
     for (name, conf) in configs.iter() {
         let name = name.to_string();
@@ -283,6 +347,16 @@ pub fn parse_plugins(
                 category: "".to_string(),
                 message: format!("category of {name} can not be empty"),
             });
+            // Recorded with an empty category, so it cannot be security-enforcing and
+            // falls through to today's skip-and-continue. A plugin with no category was
+            // never going to build, and guessing one from the entry name would be worse.
+            failures.insert(
+                name.clone(),
+                PluginMiss::Failed {
+                    category: String::new(),
+                    reason: "no category".to_string(),
+                },
+            );
             continue;
         }
 
@@ -291,6 +365,16 @@ pub fn parse_plugins(
                 plugins.insert(name.clone(), plugin.clone());
             },
             Err(e) => {
+                // Kept, not just logged. `get_context_plugins` needs to tell a name
+                // nobody configured from a security control that failed to build, and
+                // only this loop knows which happened.
+                failures.insert(
+                    name.clone(),
+                    PluginMiss::Failed {
+                        category: category.clone(),
+                        reason: e.to_string(),
+                    },
+                );
                 errors.push(Error::Invalid {
                     category,
                     message: format!("create plugin {name} failed, {e}"),
@@ -309,7 +393,7 @@ pub fn parse_plugins(
     // plugins.insert(name.clone(), plugin.clone());
     // }
 
-    (plugins, errors)
+    (plugins, failures, errors)
 }
 
 /// Initializes or updates plugins based on configuration.
@@ -375,10 +459,13 @@ pub fn try_init_plugins(
             true
         })
         .collect();
-    let (new_plugins, new_errors) = parse_plugins(plugin_configs);
+    let (new_plugins, failures, new_errors) = parse_plugins(plugin_configs);
     plugins.extend(new_plugins);
     errors.extend(new_errors);
-    PLUGIN_PROVIDER.store(plugins);
+    // Stored even when construction failed, which is upstream behaviour and stays that
+    // way — but now the failures are stored with it, so a Location listing one can be
+    // refused instead of silently proxying unfiltered.
+    PLUGIN_PROVIDER.store(plugins, failures);
     let error = if !errors.is_empty() {
         let error = errors
             .iter()
@@ -439,31 +526,35 @@ mod tests {
     use super::parse_admin_plugin;
     use pretty_assertions::assert_eq;
 
-    /// `--admin 127.0.0.1:3018` with no credentials must not start an
-    /// unauthenticated config-write API. This is the only chokepoint whose error
-    /// actually aborts startup: both `try_init_plugins` call sites in main.rs log
-    /// their error and keep serving, whereas `parse_admin_plugin` is reached
-    /// through `?`. It runs after main.rs resolves PINGAP_ADMIN_USER /
-    /// PINGAP_ADMIN_PASSWORD into the address, so an empty list here means no
-    /// credentials were resolved by any route, not merely that none were inline.
+    /// `--admin` without a credential is no longer refused: the credential's
+    /// only job is to bootstrap the first account into an empty store, and a
+    /// store that already has users does not need a password on the command
+    /// line. What guards the open-door case now is construction — with no
+    /// users and no bootstrap, nobody can log in — not a parse-time check.
     #[test]
-    fn test_parse_admin_plugin_requires_credentials() {
+    fn test_parse_admin_plugin_without_credentials_yields_no_bootstrap() {
         for addr in ["127.0.0.1:3018", "127.0.0.1:3018/pingap", "0.0.0.0:3018"]
         {
-            let err = parse_admin_plugin(addr).err().unwrap_or_else(|| {
-                panic!("admin addr {addr} without credentials must be rejected")
-            });
+            let (_, _, plugin_conf) =
+                parse_admin_plugin(addr).unwrap_or_else(|e| {
+                    panic!("admin addr {addr} must parse, got: {e}")
+                });
             assert_eq!(
-                true,
-                err.to_string().contains("authorizations"),
-                "error must name the missing key, got: {err}"
+                Some(""),
+                plugin_conf.get("bootstrap").and_then(|v| v.as_str()),
+                "no credential means an empty bootstrap, never a default one"
+            );
+            assert_eq!(
+                false,
+                plugin_conf.contains_key("authorizations"),
+                "the legacy key must not be generated"
             );
         }
     }
 
     /// Regression guard: both credential spellings the CLI accepts must still
-    /// parse. `user:pass@host` is what an operator types; the pre-encoded
-    /// `base64@host` form is what main.rs builds from the env vars.
+    /// parse, and land in `bootstrap` — the key the admin plugin reads — not
+    /// in `authorizations`, which it now refuses.
     #[test]
     fn test_parse_admin_plugin_accepts_credentials() {
         // spellchecker:off
@@ -479,11 +570,39 @@ mod tests {
             assert_eq!("127.0.0.1:3018", server_conf.addr);
             assert_eq!(true, server_conf.admin);
             assert_eq!(super::ADMIN_SERVER_PLUGIN, name);
+            // spellchecker:off
+            assert_eq!(
+                Some("cGluZ2FwOjEyMzEyMw=="),
+                plugin_conf.get("bootstrap").and_then(|v| v.as_str()),
+                "parsed config must carry the bootstrap credential"
+            );
+            // spellchecker:on
+            assert_eq!(false, plugin_conf.contains_key("authorizations"));
             assert_eq!(
                 true,
-                plugin_conf.contains_key("authorizations"),
-                "parsed config must carry the credentials"
+                plugin_conf
+                    .get("store")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s.ends_with("control-plane.db")),
+                "a store path must always be generated: {plugin_conf:?}"
             );
         }
+    }
+
+    /// `store=` and `totp_key=` on the admin address reach the plugin config.
+    #[test]
+    fn test_parse_admin_plugin_query_params() {
+        let (_, _, plugin_conf) = parse_admin_plugin(
+            "127.0.0.1:3018/?store=/var/lib/pingap/cp.db&totp_key=abc",
+        )
+        .unwrap();
+        assert_eq!(
+            Some("/var/lib/pingap/cp.db"),
+            plugin_conf.get("store").and_then(|v| v.as_str())
+        );
+        assert_eq!(
+            Some("abc"),
+            plugin_conf.get("totp_key").and_then(|v| v.as_str())
+        );
     }
 }

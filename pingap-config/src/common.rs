@@ -948,6 +948,19 @@ pub struct BasicConf {
     /// of these addresses; otherwise the direct peer address is used as the
     /// client IP. Leave unset to trust forwarded headers unconditionally.
     pub trusted_proxies: Option<Vec<String>>,
+    /// What to do when a Location lists a security-enforcing plugin (`waf`, `acl`,
+    /// `bot`, `access_list`) that is configured but failed to build.
+    ///
+    /// `fail_closed` (the default) refuses the request with 503; `fail_open` serves it
+    /// and logs a warning. Anything else is treated as `fail_closed` and logged, because
+    /// a typo must not select the permissive branch.
+    ///
+    /// The default matters: a plugin that fails to construct is dropped from the provider
+    /// map with no error, a Location whose plugin list resolves to empty proxies straight
+    /// upstream, and the result is a gateway serving unfiltered traffic while reporting
+    /// healthy. 503 rather than 403 because the client was not denied by policy — the
+    /// policy could not be evaluated, and conflating the two would corrupt block metrics.
+    pub on_policy_unavailable: Option<String>,
     /// Webhook URL for notifications
     pub webhook: Option<String>,
     /// Type of webhook (e.g. "wecom", "dingtalk")

@@ -12,6 +12,27 @@ publish = false
 name = "pingap_waf"
 path = "src/lib.rs"
 
+[features]
+# The engine, the detectors and the inspection state machine are pure Rust with no
+# knowledge that Pingora exists, which is what lets them be fuzzed and unit-tested in
+# isolation. The plugin that wires them into pingap necessarily drags in pingora and
+# its OpenSSL `*-sys` chain, so it lives behind a feature: `cargo test -p pingap-waf`
+# and the fuzz targets stay fast, and `cargo tree -p pingap-waf` stays free of `*-sys`
+# for the default set.
+default = []
+plugin = [
+    "dep:async-trait",
+    "dep:bytes",
+    "dep:ctor",
+    "dep:http",
+    "dep:pingap-config",
+    "dep:pingap-core",
+    "dep:pingap-plugin",
+    "dep:pingora",
+    "dep:toml",
+    "dep:tracing",
+]
+
 [dependencies]
 # `fancy-regex` over `regex` because some CRS-derived patterns need
 # backreferences and lookaround that `regex` rejects outright. The cost is that
@@ -23,10 +44,28 @@ fancy-regex = { workspace = true }
 arc-swap = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 snafu = { workspace = true }
+# CIDR matching and the client-IP resolution the rest of the gateway already uses.
+# `pingap-util` is pure Rust, so it does not compromise the default feature set's
+# freedom from `*-sys` crates.
+pingap-util = { workspace = true }
 # Percent-decoding before matching. A payload is judged by its bytes, and `%27`
 # reaches the origin as `'`, so a detector that inspects only the raw field is
 # bypassed by the cheapest possible encoding trick.
 urlencoding = { workspace = true }
+
+# --- `plugin` feature only -------------------------------------------------------
+async-trait = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+ctor = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+pingap-config = { workspace = true, optional = true }
+pingap-core = { workspace = true, optional = true }
+pingap-plugin = { workspace = true, optional = true }
+pingora = { workspace = true, optional = true }
+# Also a dev-dependency, for config round-trip tests. Optional here because the
+# plugin reads its own config out of a `toml::Table`.
+toml = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Declared directly rather than through `workspace = true`: criterion is not in
@@ -39,12 +78,24 @@ criterion = { version = "0.7.0", features = ["html_reports"] }
 hex = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# Only reachable from the `plugin` feature's tests, which build a mock `Session`.
+# Dev-dependencies cannot be optional, so these are unconditional here; they do not
+# reach the library's own dependency graph.
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-test = "0.4.4"
 toml = { workspace = true }
 
 # `harness = false` because criterion supplies its own. Records the cost baseline
 # the detector port has to beat once ~200 inherited patterns land in the engine.
 [[bench]]
 name = "bench"
+harness = false
+
+# Also `harness = false`, but with no framework at all: this one times single calls and
+# reads percentiles off the sorted samples, because criterion reports the mean of a
+# batch and a p99 derived from batch means is not a p99 of calls.
+[[bench]]
+name = "latency"
 harness = false
 
 [lints]

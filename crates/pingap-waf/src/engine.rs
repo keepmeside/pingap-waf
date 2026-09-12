@@ -235,26 +235,48 @@ fn clamp(body: Option<&[u8]>, limit: usize) -> (Option<&[u8]>, bool) {
     }
 }
 
-/// Run `find` against a field value in both the form it arrived in and its
-/// percent-decoded form.
+/// Run `find` against a field value in every form it could reach the origin as.
 ///
-/// Both, not just one. Decoding only would miss a pattern written against an
-/// encoded sequence (`%2e%2e%2f`); raw only would miss `%27` standing in for `'`,
-/// which is the cheapest bypass there is. The second scan costs nothing on the
-/// common path: `urlencoding::decode` borrows when there is nothing to decode, so
-/// a field with no `%` is scanned once.
+/// Three forms, not one. The raw bytes; the percent-decoded bytes, because `%27`
+/// reaches the origin as `'`; and the form-urlencoded reading where `+` is a space,
+/// because that is what a query string and a form body are. Matching only the raw
+/// form is bypassed by the cheapest possible trick, and matching only the decoded form
+/// would miss a pattern written against an encoded sequence such as `%2e%2e%2f`.
+///
+/// The extra scans cost nothing on the common path: `urlencoding::decode` borrows when
+/// there is nothing to decode, and the `+` variant is skipped unless the value
+/// contains one.
+///
+/// The returned range is only meaningful when the match was on the raw form; a
+/// decoded match reports the range within the decoded string, which does not map back
+/// to the original bytes. That is why response bodies — the only place a range is
+/// used to rewrite bytes — are matched raw, by [`find_in_response`].
 fn find_both_forms(
     value: &str,
-    find: &dyn Fn(&str) -> Option<usize>,
-) -> Option<usize> {
+    find: &dyn Fn(&str) -> Option<std::ops::Range<usize>>,
+) -> Option<std::ops::Range<usize>> {
     if let Some(at) = find(value) {
         return Some(at);
     }
-    match urlencoding::decode(value) {
-        // Borrowed means nothing was decoded, so the scan above already covered it.
-        Ok(std::borrow::Cow::Borrowed(_)) | Err(_) => None,
-        Ok(std::borrow::Cow::Owned(decoded)) => find(&decoded),
+    if let Ok(std::borrow::Cow::Owned(decoded)) = urlencoding::decode(value)
+        && let Some(at) = find(&decoded)
+    {
+        return Some(at);
     }
+    // `+` is a space in `application/x-www-form-urlencoded`, which is what a query
+    // string and a form body are. Percent-decoding alone leaves it literal, so
+    // `?q=UNION+SELECT+pw` reads as one long token and every pattern that requires
+    // whitespace between keywords misses it — while the origin sees the spaces. This
+    // is the cheapest bypass after percent-encoding, and it costs a third scan only
+    // for values that actually contain a `+`.
+    if value.contains('+') {
+        let spaced = value.replace('+', " ");
+        let decoded = urlencoding::decode(&spaced)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or(spaced);
+        return find(&decoded);
+    }
+    None
 }
 
 /// Walk every field of a request a rule may inspect, in evaluation order, and
@@ -272,7 +294,7 @@ fn find_both_forms(
 pub fn find_in_request(
     input: &RequestInput<'_>,
     inspect_header: &dyn Fn(&str) -> bool,
-    find: &dyn Fn(&str) -> Option<usize>,
+    find: &dyn Fn(&str) -> Option<std::ops::Range<usize>>,
 ) -> Option<MatchedField> {
     if find_both_forms(input.method, find).is_some() {
         return Some(MatchedField::Method);
@@ -297,28 +319,40 @@ pub fn find_in_request(
             });
         }
     }
-    let offset = find_both_forms(text_prefix(input.body?), find)?;
-    Some(MatchedField::Body { offset })
+    let at = find_both_forms(text_prefix(input.body?), find)?;
+    Some(MatchedField::Body {
+        offset: at.start,
+        len: at.len(),
+    })
 }
 
-/// The response-side counterpart. Status, headers, then the bounded body prefix.
+/// The response-side counterpart. Headers, then the bounded body prefix.
+///
+/// **No percent-decoding here.** A response body is HTML or JSON, not a
+/// percent-encoded field, so decoding buys nothing — and it would break redaction: a
+/// match found in a decoded copy reports offsets into that copy, and masking the
+/// original at those offsets would overwrite the wrong bytes. Matching raw keeps every
+/// reported range valid against the bytes that will actually be rewritten.
 pub fn find_in_response(
     input: &ResponseInput<'_>,
     inspect_header: &dyn Fn(&str) -> bool,
-    find: &dyn Fn(&str) -> Option<usize>,
+    find: &dyn Fn(&str) -> Option<std::ops::Range<usize>>,
 ) -> Option<MatchedField> {
     for (name, value) in input.headers {
         if !inspect_header(name) {
             continue;
         }
-        if find_both_forms(value, find).is_some() {
+        if find(value).is_some() {
             return Some(MatchedField::ResponseHeader {
                 name: (*name).to_string(),
             });
         }
     }
-    let offset = find_both_forms(text_prefix(input.body_chunk?), find)?;
-    Some(MatchedField::ResponseBody { offset })
+    let at = find(text_prefix(input.body_chunk?))?;
+    Some(MatchedField::ResponseBody {
+        offset: at.start,
+        len: at.len(),
+    })
 }
 
 /// Header policy for operator-authored custom rules: inspect everything.
@@ -363,15 +397,15 @@ impl Rule for CompiledCustomRule {
 }
 
 impl CompiledCustomRule {
-    /// Match position within `text`, or `None`.
+    /// Match range within `text`, or `None`.
     ///
     /// A `fancy-regex` error — a hit backtrack limit, most plausibly — is treated
     /// as **no match**, not as a match and not as a panic. That is a deliberate
     /// fail-open at the single-rule level: the alternative is blocking traffic
     /// because a pattern was too expensive, which turns an operator's bad regex
     /// into an outage. The budget is what makes the cost visible.
-    fn find_at(&self, text: &str) -> Option<usize> {
-        self.pattern.find(text).ok().flatten().map(|m| m.start())
+    fn find_at(&self, text: &str) -> Option<std::ops::Range<usize>> {
+        self.pattern.find(text).ok().flatten().map(|m| m.range())
     }
 
     fn hit(&self, field: MatchedField) -> Hit {

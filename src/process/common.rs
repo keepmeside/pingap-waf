@@ -48,6 +48,19 @@ pub fn get_admin_addr() -> Option<String> {
     ADMIN_ADDR.get().cloned()
 }
 
+static CONFIG_PATH: OnceLock<String> = OnceLock::new();
+
+/// Records the `-c/--conf` value, once, for code that wants to put a file
+/// beside the configuration — the control-plane store defaults there.
+pub fn set_config_path(path: &str) {
+    CONFIG_PATH.get_or_init(|| path.to_string());
+}
+
+/// The `-c/--conf` value, if one was given.
+pub fn get_config_path() -> Option<String> {
+    CONFIG_PATH.get().cloned()
+}
+
 /// Returns the process start time in seconds since startup.
 ///
 /// Returns:

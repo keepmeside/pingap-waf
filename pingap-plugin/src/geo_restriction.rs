@@ -33,6 +33,15 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 static GEO_DB: LazyLock<Arc<GeoipDb>> = LazyLock::new(GeoipDb::new_embedded);
 
+/// Country code for an address, or `None` when the database has no entry.
+///
+/// The one reader of `GEO_DB` outside this module's own request path, so
+/// `pingap-acl` can evaluate geo rules without loading a second copy of the
+/// embedded database. Re-exported from the crate root.
+pub fn lookup_country_code(ip: IpAddr) -> Option<String> {
+    GEO_DB.lookup_country_code(ip).map(|code| code.to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestrictionCategory {
     Deny,
