@@ -40,16 +40,16 @@ pub(crate) async fn base_intent(state: &AppState) -> Result<Intent> {
     // or the process died inside one. Either way there is no safe base: the newest applied
     // intent would silently drop that edit, and the pending one would build on a config
     // nothing has confirmed. The scheduled sweep settles it within the minute.
-    if let Some(newest) = state.store.latest_config_version().await? {
-        if newest.status == ConfigStatus::Pending {
-            return Err(ApiError::Conflict {
-                reason: format!(
-                    "config version `{}` has not been confirmed enforcing yet; \
-                     retry once it settles",
-                    newest.id
-                ),
-            });
-        }
+    if let Some(newest) = state.store.latest_config_version().await?
+        && newest.status == ConfigStatus::Pending
+    {
+        return Err(ApiError::Conflict {
+            reason: format!(
+                "config version `{}` has not been confirmed enforcing yet; \
+                 retry once it settles",
+                newest.id
+            ),
+        });
     }
     match state.store.latest_applied_config_version().await? {
         Some(version) => {

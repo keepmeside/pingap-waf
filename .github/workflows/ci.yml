@@ -42,6 +42,20 @@ jobs:
           # commit. Full history keeps the version stamp real.
           fetch-depth: 0
 
+      # etcd-client 0.19 — an unconditional dependency of pingap-config, for
+      # the `etcd://` config backend — compiles etcd's .proto files with
+      # prost-build from its build script, so protoc must exist before any cargo
+      # step. The ubuntu-22.04 image does not ship it while a developer's
+      # machine usually does, which is why this only ever fails here. apt rather
+      # than a third-party setup-protoc action: this repo treats its CI steps as
+      # supply-chain surface, and Ubuntu's own archive is already trusted by the
+      # runner. 3.12.4 is what the archive provides and what builds locally.
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          protoc --version
+
       # The toolchain is read from rust-toolchain.toml, so the pin lives in one
       # place and CI cannot drift from a local build.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -87,6 +101,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Same requirement as lint-and-test: etcd-client's build script shells out
+      # to protoc, so this has to precede `cargo build --release`.
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          protoc --version
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - uses: actions/setup-node@v4
@@ -119,13 +141,20 @@ jobs:
       - name: Verify one ProxyHttp implementation
         run: |
           set -euo pipefail
-          # Scope matters here. A bare `grep -rn . ` also descends into
-          # `.xia-src/` (the read-only upstream clones, gitignored so absent in
-          # CI but present in every working tree) and into `target/`, which this
-          # same job just populated with `cargo build --release`. Counting those
-          # makes the gate pass in CI for the wrong reason and fail locally for
-          # anyone who kept the clones, so it must exclude both explicitly.
+          # The subject of this gate is the product build graph, so it has to
+          # scan exactly the trees that graph is built from and exclude the rest:
+          #   - `spikes/` is `exclude`d from the workspace in Cargo.toml so
+          #     throwaway spike dependencies can never reach a product build.
+          #     spikes/body-forwarding carries its own `impl ProxyHttp` and is
+          #     tracked, so counting it would fail the gate on code that ships
+          #     nowhere. This is the same boundary the manifest already draws.
+          #   - `.xia-src/` holds read-only upstream clones. Gitignored, so
+          #     absent in CI but present in every working tree; counting them
+          #     makes the gate pass here for the wrong reason and fail locally
+          #     for anyone who kept the clones.
+          #   - `target/` is populated by the `cargo build --release` step above.
           count=$(grep -rn "impl ProxyHttp" --include=*.rs \
-            --exclude-dir=.xia-src --exclude-dir=target . | wc -l)
+            --exclude-dir=.xia-src --exclude-dir=target --exclude-dir=spikes . \
+            | wc -l)
           echo "impl ProxyHttp count: ${count}"
           test "${count}" -eq 1
