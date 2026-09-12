@@ -117,5 +117,10 @@ Reference clones
 
   The three clones inspected to produce the evidence above live under
   `.xia-src/` and are excluded from version control; each carries its own `.git`,
-  so tracking them would create gitlinks nobody else can resolve. The retained
-  analysis artifacts are `.xia-src/EVIDENCE-PACKET.md` and `.xia-src/candidates/`.
+  so tracking them would create gitlinks nobody else can resolve. The entire tree
+  is developer-local, including the analysis artifacts
+  `.xia-src/EVIDENCE-PACKET.md` and `.xia-src/candidates/`; none of it is
+  distributed with this repository. What this repository does retain is the
+  provenance recorded above — each project's licence and the exact commit
+  inspected. Source-file comments that cite a `.xia-src/` path cite it as the
+  origin of the code they describe, not as a file a reader can open here.
