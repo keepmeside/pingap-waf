@@ -20,5 +20,7 @@
 //! the reason the queue can promise never to block: it has no idea a store exists.
 
 pub mod queue;
+pub mod writer;
 
 pub use queue::{Admission, EventQueue, Verdict, WafEvent};
+pub use writer::{DEFAULT_BATCH, EventWriter};

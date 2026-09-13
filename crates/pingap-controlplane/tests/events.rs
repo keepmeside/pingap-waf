@@ -242,3 +242,204 @@ fn the_counters_account_for_everything_offered() {
     assert_eq!(queue.counted_enforced(), 1);
     assert_eq!(queue.dropped_enforced(), 0);
 }
+
+// ---- the write path -------------------------------------------------------------
+//
+// Above this line the queue is tested alone, with no store, because its policy is a decision
+// about ordering and capacity and needs nothing else. Below it the batch writer is tested
+// against a real store, because what it adds is the part that can only go wrong against one:
+// thirteen positional parameters in and thirteen positional reads out.
+
+use pingap_controlplane::ControlPlaneStore;
+use pingap_controlplane::events::EventWriter;
+use pingap_controlplane::repository::{StoreError, TimeRange};
+use pingap_controlplane::store::TursoStore;
+use std::sync::Arc;
+
+async fn migrated() -> (Arc<dyn ControlPlaneStore>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store =
+        TursoStore::open(dir.path().join("cp.db").to_str().expect("utf-8"))
+            .await
+            .expect("the store opens");
+    store.migrate().await.expect("migrations apply");
+    (Arc::new(store) as Arc<dyn ControlPlaneStore>, dir)
+}
+
+/// Every column lands in its own field.
+///
+/// The write is thirteen positional parameters and the read is thirteen positional decodes,
+/// so a transposition is a value in the wrong field rather than an error — a severity where
+/// the rule ID goes still parses, if the types happen to line up. Asserting the round trip
+/// field by field, including the nulls, is the only thing that catches it.
+#[tokio::test]
+async fn a_batch_round_trips_with_every_column_in_its_place() {
+    let (store, _dir) = migrated().await;
+    let full = WafEvent {
+        node: "node-a".to_string(),
+        domain: "site.test".to_string(),
+        profile: "waf:strict".to_string(),
+        rule_id: Some(942100),
+        category: Some("sql_injection".to_string()),
+        severity: Some("critical".to_string()),
+        score: 15,
+        verdict: Verdict::Block,
+        client_ip: Some("203.0.113.7".to_string()),
+        method: Some("POST".to_string()),
+        uri: Some("/login".to_string()),
+        created_at: 1_700_000_000,
+    };
+    // The sparse shape: a finding with no single rule behind it, from an aggregate score.
+    let sparse = WafEvent {
+        node: "node-b".to_string(),
+        domain: "other.test".to_string(),
+        profile: "waf:audit".to_string(),
+        rule_id: None,
+        category: None,
+        severity: None,
+        score: 3,
+        verdict: Verdict::Detect,
+        client_ip: None,
+        method: None,
+        uri: None,
+        created_at: 1_700_000_100,
+    };
+    store
+        .record_waf_events(&[full.clone(), sparse.clone()])
+        .await
+        .expect("the batch writes");
+
+    let rows = store
+        .read_waf_events(TimeRange::default())
+        .await
+        .expect("readable");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+
+    let blocked = rows
+        .iter()
+        .find(|row| row.blocked)
+        .expect("the block is stored as blocked");
+    assert!(!blocked.id.is_empty(), "the store assigns a primary key");
+    assert_eq!(blocked.node, "node-a");
+    assert_eq!(blocked.domain, "site.test");
+    assert_eq!(blocked.profile, "waf:strict");
+    assert_eq!(blocked.rule_id, Some(942100));
+    assert_eq!(blocked.category.as_deref(), Some("sql_injection"));
+    assert_eq!(blocked.severity.as_deref(), Some("critical"));
+    assert_eq!(blocked.score, 15);
+    assert_eq!(blocked.client_ip.as_deref(), Some("203.0.113.7"));
+    assert_eq!(blocked.method.as_deref(), Some("POST"));
+    assert_eq!(blocked.uri.as_deref(), Some("/login"));
+    assert_eq!(blocked.created_at, 1_700_000_000);
+
+    let detected = rows
+        .iter()
+        .find(|row| !row.blocked)
+        .expect("the detect finding is stored");
+    assert_eq!(detected.node, "node-b");
+    assert_eq!(
+        detected.rule_id, None,
+        "an absent rule ID became a placeholder"
+    );
+    assert_eq!(detected.category, None);
+    assert_eq!(detected.severity, None);
+    assert_eq!(detected.score, 3);
+    assert_eq!(detected.client_ip, None);
+
+    // Newest first, so a caller paging backwards through an incident reads it in the order
+    // it happened.
+    assert_eq!(rows[0].created_at, 1_700_000_100);
+}
+
+#[tokio::test]
+async fn an_empty_batch_is_a_no_op() {
+    let (store, _dir) = migrated().await;
+    store
+        .record_waf_events(&[])
+        .await
+        .expect("nothing to write is not an error");
+    assert!(
+        store
+            .read_waf_events(TimeRange::default())
+            .await
+            .expect("readable")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_range_excludes_what_falls_outside_it() {
+    let (store, _dir) = migrated().await;
+    let mut events = Vec::new();
+    for at in [1_000, 2_000, 3_000] {
+        events.push(event(Verdict::Detect, at));
+    }
+    store.record_waf_events(&events).await.expect("writes");
+
+    let window = TimeRange {
+        since: Some(1_500),
+        until: Some(2_500),
+        limit: None,
+    };
+    let rows = store.read_waf_events(window).await.expect("readable");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].created_at, 2_000);
+}
+
+/// A failed write puts the batch back rather than losing it.
+///
+/// The findings are already out of the queue by the time the store is asked, so this is the
+/// only place the loss can happen — and a silent loss of security records is the failure the
+/// queue's whole priority policy exists to prevent. An unmigrated store stands in for a store
+/// that will not accept the write; what matters is that the batch is back in the queue and is
+/// the same batch.
+#[tokio::test]
+async fn a_failed_write_puts_the_batch_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = TursoStore::open(
+        dir.path().join("unmigrated.db").to_str().expect("utf-8"),
+    )
+    .await
+    .expect("the store opens");
+    let queue = Arc::new(EventQueue::new(8).expect("valid"));
+    assert_eq!(queue.offer(event(Verdict::Block, 1)), Admission::Queued);
+    assert_eq!(queue.offer(event(Verdict::Detect, 2)), Admission::Queued);
+
+    let writer = EventWriter::new(Arc::clone(&queue), Arc::new(store));
+    let error = writer
+        .flush()
+        .await
+        .expect_err("a store with no waf_events table cannot take the batch");
+    assert!(matches!(error, StoreError::Backend { .. }), "{error:?}");
+
+    assert_eq!(queue.len(), 2, "the batch was lost rather than put back");
+    let drained = queue.drain(10);
+    assert_eq!(drained[0].created_at, 1);
+    assert_eq!(drained[0].verdict, Verdict::Block);
+    assert_eq!(drained[1].created_at, 2);
+}
+
+#[tokio::test]
+async fn flush_writes_one_batch_and_leaves_the_rest() {
+    let (store, _dir) = migrated().await;
+    let queue = Arc::new(EventQueue::new(16).expect("valid"));
+    for index in 0..5 {
+        queue.offer(event(Verdict::Detect, index));
+    }
+
+    let writer = EventWriter::new(Arc::clone(&queue), Arc::clone(&store))
+        .with_batch(2)
+        .expect("a batch of two is valid");
+    assert_eq!(writer.flush().await.expect("writes"), 2);
+    assert_eq!(queue.len(), 3, "one round drains one batch, not the queue");
+    assert_eq!(writer.flush().await.expect("writes"), 2);
+    assert_eq!(writer.flush().await.expect("writes"), 1);
+    assert_eq!(writer.flush().await.expect("writes"), 0);
+
+    assert!(
+        EventWriter::new(Arc::clone(&queue), Arc::clone(&store))
+            .with_batch(0)
+            .is_none(),
+        "a zero batch would drain nothing forever and look idle"
+    );
+}

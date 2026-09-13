@@ -604,6 +604,20 @@ impl ControlPlaneStore for UnavailableStore {
     ) -> pingap_controlplane::repository::Result<()> {
         self.refuse()
     }
+    async fn record_waf_events(
+        &self,
+        _: &[pingap_controlplane::events::WafEvent],
+    ) -> pingap_controlplane::repository::Result<()> {
+        self.refuse()
+    }
+    async fn read_waf_events(
+        &self,
+        _: pingap_controlplane::TimeRange,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::repository::WafEventRecord>,
+    > {
+        self.refuse()
+    }
     async fn set_totp_secret(
         &self,
         _: &str,

@@ -134,6 +134,31 @@ pub struct NewSession<'a> {
     pub expires_at: i64,
 }
 
+/// One stored WAF finding.
+///
+/// The queue's `WafEvent` plus the `id` the store assigned. A separate type rather than an
+/// added field on that one because a producer must not be able to choose a primary key: two
+/// nodes writing to a shared store would collide, and a caller that could set `id` could also
+/// overwrite a row it did not write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WafEventRecord {
+    pub id: String,
+    pub node: String,
+    pub domain: String,
+    pub profile: String,
+    pub rule_id: Option<u32>,
+    pub category: Option<String>,
+    pub severity: Option<String>,
+    pub score: u32,
+    /// The `blocked` column. A redaction is stored as not-blocked, which loses the
+    /// distinction the queue's drop policy cares about; see `events::Verdict`.
+    pub blocked: bool,
+    pub client_ip: Option<String>,
+    pub method: Option<String>,
+    pub uri: Option<String>,
+    pub created_at: i64,
+}
+
 /// A window over the audit log. Ranges rather than offsets, because the log only grows and
 /// an offset shifts under a concurrent insert.
 #[derive(Debug, Clone, Copy, Default)]
@@ -308,6 +333,36 @@ pub trait ControlPlaneStore: Send + Sync {
         now: i64,
     ) -> Result<Activity>;
     async fn read_activity(&self, range: TimeRange) -> Result<Vec<Activity>>;
+
+    // ---- WAF findings ------------------------------------------------------------------
+    /// Appends WAF findings, in one transaction for the whole slice.
+    ///
+    /// A slice and not one call per finding, and that is the load-bearing part of the
+    /// signature: measured against this store, 330 rows/s inserted serially against 71,330
+    /// inside one transaction. Per-request findings at serial speed cannot be absorbed at any
+    /// real traffic level, so batching is what makes the table viable rather than an
+    /// optimisation of it. One transaction also means a batch either lands or does not — a
+    /// half-written batch is a gap in the middle of an incident, which is worse than none
+    /// because it looks complete.
+    ///
+    /// Each event carries its own `created_at`, taken when the finding happened rather than
+    /// when it was written, so a queue that fell behind dates events correctly instead of
+    /// bunching them at the moment the writer caught up.
+    async fn record_waf_events(
+        &self,
+        events: &[crate::events::WafEvent],
+    ) -> Result<()>;
+
+    /// Reads findings back, newest first.
+    ///
+    /// Ranges rather than offsets, for the reason the audit log uses them: this table only
+    /// grows, and an offset shifts under a concurrent insert, so a paginating caller would
+    /// see one finding twice and miss another. Filtering by domain, rule and verdict is a
+    /// later concern and belongs beside the query that needs it.
+    async fn read_waf_events(
+        &self,
+        range: TimeRange,
+    ) -> Result<Vec<WafEventRecord>>;
 
     // ---- config versions -----------------------------------------------------------
     //

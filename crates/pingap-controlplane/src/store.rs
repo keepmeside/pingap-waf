@@ -453,6 +453,49 @@ fn nullable(value: Option<String>) -> Value {
     value.map_or(Value::Null, Value::Text)
 }
 
+const WAF_EVENT_COLUMNS: &str = "id, node, domain, profile, rule_id, category, \
+     severity, score, blocked, client_ip, method, uri, created_at";
+
+/// One row of `waf_events`, by position.
+///
+/// Positional and therefore fragile against a column reorder, which is exactly what the
+/// write path's parameter list is too. Both are pinned by the round-trip test: a transposed
+/// pair shows up as a value in the wrong field rather than as an error, and only reading the
+/// row back catches it.
+fn decode_waf_event(row: &Row) -> Result<crate::repository::WafEventRecord> {
+    // The two narrow columns are `u32` in Rust and `INTEGER` — 64-bit — in SQLite, so a value
+    // that does not fit is a corrupt row. Refused rather than clamped: clamping would invent a
+    // rule ID or a score that was never written, and an audit record that quietly means
+    // something else is worse than a read that fails and says so.
+    let rule_id = match opt_int(row, 4)? {
+        None => None,
+        Some(id) => Some(narrow_u32("waf_events.rule_id", id)?),
+    };
+    let score = narrow_u32("waf_events.score", int(row, 7)?)?;
+    Ok(crate::repository::WafEventRecord {
+        id: text(row, 0)?,
+        node: text(row, 1)?,
+        domain: text(row, 2)?,
+        profile: text(row, 3)?,
+        rule_id,
+        category: opt_text(row, 5)?,
+        severity: opt_text(row, 6)?,
+        score,
+        blocked: flag(row, 8)?,
+        client_ip: opt_text(row, 9)?,
+        method: opt_text(row, 10)?,
+        uri: opt_text(row, 11)?,
+        created_at: int(row, 12)?,
+    })
+}
+
+/// A stored integer that Rust holds narrower than SQLite does.
+fn narrow_u32(column: &str, value: i64) -> Result<u32> {
+    u32::try_from(value).map_err(|_| StoreError::Backend {
+        message: format!("{column} holds {value}, which is outside u32"),
+    })
+}
+
 const CONFIG_VERSION_COLUMNS: &str = "id, hash, status, actor_id, \
      actor_username, intent_json, error, created_at, settled_at";
 
@@ -964,6 +1007,78 @@ impl ControlPlaneStore for TursoStore {
             created_at: now,
             settled_at,
         })
+    }
+
+    async fn record_waf_events(
+        &self,
+        events: &[crate::events::WafEvent],
+    ) -> Result<()> {
+        if events.is_empty() {
+            // Not an error and not a transaction: an empty `BEGIN`/`COMMIT` pair is a
+            // round trip to the writer lock for nothing, and the writer is the one
+            // resource every other in-process writer is waiting on.
+            return Ok(());
+        }
+        const INSERT: &str = "INSERT INTO waf_events (id, node, domain, profile, \
+             rule_id, category, severity, score, blocked, client_ip, method, uri, \
+             created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+        let statements = events
+            .iter()
+            .map(|event| {
+                (
+                    INSERT,
+                    vec![
+                        Value::Text(new_id()),
+                        Value::Text(event.node.clone()),
+                        Value::Text(event.domain.clone()),
+                        Value::Text(event.profile.clone()),
+                        event.rule_id.map_or(Value::Null, |id| {
+                            Value::Integer(i64::from(id))
+                        }),
+                        nullable(event.category.clone()),
+                        nullable(event.severity.clone()),
+                        Value::Integer(i64::from(event.score)),
+                        Value::Integer(i64::from(event.blocked_flag())),
+                        nullable(event.client_ip.clone()),
+                        nullable(event.method.clone()),
+                        nullable(event.uri.clone()),
+                        Value::Integer(event.created_at),
+                    ],
+                )
+            })
+            .collect();
+        self.writer()
+            .transaction(statements, || StoreError::Conflict {
+                kind: "waf_event".to_string(),
+                // Ids are generated, so a collision is a bug rather than a value an
+                // operator can change. Reported as a conflict because that is what the
+                // helper maps a `UNIQUE` violation to, and the kind says which table.
+                value: String::new(),
+            })
+            .await
+    }
+
+    async fn read_waf_events(
+        &self,
+        range: TimeRange,
+    ) -> Result<Vec<crate::repository::WafEventRecord>> {
+        let sql = format!(
+            "SELECT {WAF_EVENT_COLUMNS} FROM waf_events \
+             WHERE created_at >= ?1 AND created_at <= ?2 \
+             ORDER BY created_at DESC, id DESC LIMIT ?3"
+        );
+        self.rows(
+            &sql,
+            vec![
+                Value::Integer(range.since.unwrap_or(i64::MIN)),
+                Value::Integer(range.until.unwrap_or(i64::MAX)),
+                Value::Integer(i64::from(
+                    range.limit.unwrap_or(DEFAULT_READ_LIMIT),
+                )),
+            ],
+            decode_waf_event,
+        )
+        .await
     }
 
     async fn set_config_version_status(
