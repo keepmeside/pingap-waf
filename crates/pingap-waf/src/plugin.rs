@@ -31,6 +31,7 @@ use pingap_plugin::{
 use pingora::proxy::Session;
 use serde::Deserialize;
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -267,6 +268,84 @@ impl Waf {
     }
 }
 
+/// Publish the verdict on `Ctx` so an access-log format can render it.
+///
+/// `add_variable` is the only channel from `Ctx` to a rendered log line: a `{:name}` tag
+/// resolves through `Ctx::append_log_value`, which falls through to the variables map. The
+/// structured verdict stays on `ctx.extensions` as [`WafState`] for in-process consumers — this
+/// is the string view for logs and not a replacement for it, and nothing downstream re-parses
+/// what is written here.
+///
+/// The names are a contract the moment they ship: an operator writes `{:waf_rules}` into an
+/// `access_log` format, and renaming the variable silently empties their field with nothing
+/// anywhere to fail. The test asserts on those literals rather than on a shared constant,
+/// because a rename that moved a constant and the test together would still pass.
+///
+/// Cheap when there is nothing to say. `waf_action` is always written, so a log format can
+/// distinguish "the WAF ran and found nothing" from "there is no WAF here"; the rest is written
+/// only on a finding or a caveat. Detection costs hundreds of microseconds to milliseconds, so
+/// a few short allocations beside it are noise — the same pair once per body chunk would not
+/// be, which is why the body stages publish only at end of stream.
+///
+/// Called at every path out of an inspection stage rather than once at the end, because the
+/// path that most needs publishing is the early `return` a block takes.
+fn emit_verdict(ctx: &mut Ctx) {
+    // Built inside a block so the immutable borrow of `ctx.extensions` ends before
+    // `add_variable` takes `&mut ctx`.
+    let fields: Vec<(&'static str, String)> = {
+        let Some(state) = ctx.extensions.get::<WafState>() else {
+            return;
+        };
+        let action = if state.blocked {
+            "block"
+        } else if state.redacted {
+            "redact"
+        } else if state.hits.is_empty() {
+            "pass"
+        } else {
+            "detect"
+        };
+        let mut fields = vec![("waf_action", action.to_string())];
+        if !state.hits.is_empty() {
+            let mut rules = String::new();
+            let mut categories = String::new();
+            let mut worst = None;
+            for (index, hit) in state.hits.iter().enumerate() {
+                if index > 0 {
+                    rules.push(',');
+                    categories.push(',');
+                }
+                // `fmt::Write` into a `String` cannot fail; the result is discarded rather
+                // than unwrapped because this workspace denies `unwrap` outside tests.
+                let _ = write!(rules, "{}", hit.rule_id);
+                let _ = write!(categories, "{}", hit.category);
+                worst = worst.max(Some(hit.severity));
+            }
+            fields.push(("waf_profile", state.profile.clone()));
+            fields.push(("waf_score", state.score.to_string()));
+            fields.push(("waf_hits", state.hits.len().to_string()));
+            fields.push(("waf_rules", rules));
+            fields.push(("waf_categories", categories));
+            if let Some(severity) = worst {
+                fields.push(("waf_severity", severity.to_string()));
+            }
+        }
+        // The two caveats an operator needs even on a request that was allowed, because both
+        // mean the verdict covers less than it looks like: bytes the engine never saw, and an
+        // evaluation that stopped early.
+        if state.truncated {
+            fields.push(("waf_truncated", "true".to_string()));
+        }
+        if state.budget_exhausted {
+            fields.push(("waf_budget_exhausted", "true".to_string()));
+        }
+        fields
+    };
+    for (key, value) in fields {
+        ctx.add_variable(key, &value);
+    }
+}
+
 #[async_trait]
 impl Plugin for Waf {
     fn config_key(&self) -> Cow<'_, str> {
@@ -301,6 +380,7 @@ impl Plugin for Waf {
                 debug!(target: "waf", "client ip refused by list");
                 let state = self.state(ctx);
                 state.blocked = true;
+                emit_verdict(ctx);
                 return Ok(RequestPluginResult::Respond(
                     self.forbidden.clone(),
                 ));
@@ -338,8 +418,10 @@ impl Plugin for Waf {
         state.blocked |= blocking;
 
         if blocking {
+            emit_verdict(ctx);
             return Ok(RequestPluginResult::Respond(self.forbidden.clone()));
         }
+        emit_verdict(ctx);
         Ok(RequestPluginResult::Continue)
     }
 
@@ -387,6 +469,7 @@ impl Plugin for Waf {
                 *body = None;
                 let state = self.state(ctx);
                 state.blocked = true;
+                emit_verdict(ctx);
                 return Err(new_internal_error(
                     413,
                     format!(
@@ -425,12 +508,18 @@ impl Plugin for Waf {
             state.blocked = true;
             // Nothing is released, so the upstream sees none of it.
             *body = None;
+            emit_verdict(ctx);
             return Err(new_internal_error(
                 403,
                 "waf: request body rejected".to_string(),
             ));
         }
         *body = Some(Bytes::from(release));
+        // Once, at end of stream: this stage runs per chunk, and publishing on each one
+        // would allocate a handful of strings per chunk to overwrite the same values.
+        if end_of_stream {
+            emit_verdict(ctx);
+        }
         Ok(())
     }
 
@@ -448,7 +537,12 @@ impl Plugin for Waf {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> pingora::Result<ResponseBodyPluginResult> {
-        self.scan_response::<UpstreamBody>(ctx, body, end_of_stream)
+        let result =
+            self.scan_response::<UpstreamBody>(ctx, body, end_of_stream);
+        if end_of_stream {
+            emit_verdict(ctx);
+        }
+        result
     }
 
     /// Inspect what leaves for the client.
@@ -465,7 +559,12 @@ impl Plugin for Waf {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> pingora::Result<ResponseBodyPluginResult> {
-        self.scan_response::<DownstreamBody>(ctx, body, end_of_stream)
+        let result =
+            self.scan_response::<DownstreamBody>(ctx, body, end_of_stream);
+        if end_of_stream {
+            emit_verdict(ctx);
+        }
+        result
     }
 }
 
@@ -591,6 +690,7 @@ fn init() {
 mod tests {
     use super::*;
     use pingap_core::PluginStep;
+    use pingap_logger::Parser;
     use tokio_test::io::Builder;
 
     /// A profile in blocking mode with a threshold of one, so a single hit is a 403.
@@ -715,5 +815,146 @@ categories = { sql_injection = "block", xss = "block", data_leakage = "redact", 
             err.to_string().contains("reject every request"),
             "the error must say what would happen: {err}"
         );
+    }
+
+    /// A blocked request publishes its verdict as access-log variables.
+    ///
+    /// The names are asserted as literals rather than read from a shared constant, because the
+    /// literal is what an operator types into an `access_log` format: a rename that moved a
+    /// constant and this test together would still pass while their field went empty.
+    #[tokio::test]
+    async fn a_blocked_request_publishes_its_verdict_for_the_access_log() {
+        let waf = plugin(BLOCKING);
+        let mut session = session_for(
+            "GET /?id=1%27%20OR%201=1-- HTTP/1.1\r\nhost: example.test\r\n\r\n",
+        )
+        .await;
+        let mut ctx = Ctx::default();
+        let result = waf
+            .handle_request(PluginStep::Request, &mut session, &mut ctx)
+            .await
+            .expect("the plugin runs");
+        assert!(
+            matches!(result, RequestPluginResult::Respond(_)),
+            "the probe was not blocked, so there is no verdict to publish"
+        );
+
+        let variables = ctx
+            .features
+            .as_ref()
+            .and_then(|features| features.variables.as_ref())
+            .expect("a blocked request published no log variables");
+        assert_eq!(
+            variables.get("waf_action").map(String::as_str),
+            Some("block")
+        );
+        let rules = variables
+            .get("waf_rules")
+            .expect("the rule IDs are not published");
+        assert!(!rules.is_empty(), "a block with no rule ID is untriageable");
+        assert!(
+            rules.split(',').all(|id| !id.is_empty()),
+            "a rule ID rendered empty: {rules}"
+        );
+        assert!(
+            variables
+                .get("waf_severity")
+                .is_some_and(|value| !value.is_empty()),
+            "the severity is not published: {variables:?}"
+        );
+        assert!(
+            variables.contains_key("waf_score"),
+            "the anomaly score is not published: {variables:?}"
+        );
+    }
+
+    /// A clean request publishes the action and nothing else.
+    ///
+    /// `waf_action` alone is what lets a log format distinguish "the WAF ran and found
+    /// nothing" from "there is no WAF here", which is the coverage question an operator asks.
+    /// The detail fields are absent rather than empty, so a format built around them renders
+    /// the same field it always did for a request that never triggered a rule.
+    #[tokio::test]
+    async fn a_clean_request_publishes_only_the_action() {
+        let waf = plugin(BLOCKING);
+        let mut session =
+            session_for("GET / HTTP/1.1\r\nhost: example.test\r\n\r\n").await;
+        let mut ctx = Ctx::default();
+        waf.handle_request(PluginStep::Request, &mut session, &mut ctx)
+            .await
+            .expect("the plugin runs");
+
+        let variables = ctx
+            .features
+            .as_ref()
+            .and_then(|features| features.variables.as_ref())
+            .expect("a request the WAF saw published nothing at all");
+        assert_eq!(
+            variables.get("waf_action").map(String::as_str),
+            Some("pass")
+        );
+        for absent in ["waf_rules", "waf_severity", "waf_score", "waf_hits"] {
+            assert!(
+                !variables.contains_key(absent),
+                "a clean request published {absent}: {variables:?}"
+            );
+        }
+    }
+
+    /// The criterion end to end: a blocked request's rule ID, severity and score appear in a
+    /// rendered access-log line.
+    ///
+    /// Asserted on the bytes the formatter produces and not on the variables map, because the
+    /// map is not what a log line reads — `{:name}` resolves through `Ctx::append_log_value`.
+    /// That distinction is the whole reason this test exists: until that function fell through
+    /// to the variables map, an assertion against the map passed while every field rendered
+    /// empty, and the tag parser separately refused any name containing a digit.
+    #[tokio::test]
+    async fn a_blocked_verdict_renders_into_an_access_log_line() {
+        let waf = plugin(BLOCKING);
+        let mut session = session_for(
+            "GET /?id=1%27%20OR%201=1-- HTTP/1.1\r\nhost: example.test\r\n\r\n",
+        )
+        .await;
+        let mut ctx = Ctx::default();
+        waf.handle_request(PluginStep::Request, &mut session, &mut ctx)
+            .await
+            .expect("the plugin runs");
+
+        let parser: Parser =
+            "{:waf_action}|{:waf_rules}|{:waf_severity}|{:waf_score}".into();
+        let rendered = parser.format(&session, &ctx);
+        let line = String::from_utf8_lossy(&rendered).to_string();
+        let fields: Vec<&str> = line.split('|').collect();
+        assert_eq!(
+            fields.len(),
+            4,
+            "the format did not render four fields: {line}"
+        );
+        assert_eq!(fields[0], "block", "{line}");
+        assert!(
+            !fields[1].is_empty()
+                && fields[1]
+                    .split(',')
+                    .all(|id| id.chars().all(|c| c.is_ascii_digit())),
+            "the rule IDs did not render as IDs: {line}"
+        );
+        assert!(!fields[2].is_empty(), "the severity rendered empty: {line}");
+        assert!(
+            !fields[3].is_empty()
+                && fields[3].chars().all(|c| c.is_ascii_digit()),
+            "the anomaly score did not render: {line}"
+        );
+
+        // A clean request renders `pass` and empty detail fields, which is what a log format
+        // built around these tags has to tolerate.
+        let mut session =
+            session_for("GET / HTTP/1.1\r\nhost: example.test\r\n\r\n").await;
+        let mut ctx = Ctx::default();
+        waf.handle_request(PluginStep::Request, &mut session, &mut ctx)
+            .await
+            .expect("the plugin runs");
+        let rendered = parser.format(&session, &ctx);
+        assert_eq!("pass|||", String::from_utf8_lossy(&rendered));
     }
 }

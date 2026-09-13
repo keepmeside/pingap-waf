@@ -69,6 +69,10 @@ toml = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The access-log formatter, so a test can assert that a verdict this plugin publishes actually
+# renders — on the bytes, not on the variables map. Dev-only, and `pingap-logger` does not
+# depend on this crate, so there is no cycle.
+pingap-logger = { workspace = true }
 # Declared directly rather than through `workspace = true`: criterion is not in
 # `[workspace.dependencies]`, and every vendored crate that benchmarks pins it the
 # same way. Adding it to the workspace table would be a root-manifest diff for no

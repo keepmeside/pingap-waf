@@ -123,3 +123,47 @@ for reducing it are in [waf-benchmark.md](./waf-benchmark.md).
 Verdicts carry the rule ID, category, severity and anomaly score as structured data on
 the request context — not a log line to be re-parsed. Raw bodies are never logged; a hit
 records the rule and the matched field name.
+
+The same verdict is also published as access-log variables, so an `access_log` format can
+carry it with `{:name}` tags:
+
+| Tag | Present when | Example |
+| --- | --- | --- |
+| `{:waf_action}` | always, once the plugin has run | `block`, `redact`, `detect`, `pass` |
+| `{:waf_profile}` | there is at least one hit | `strict` |
+| `{:waf_score}` | there is at least one hit | `15` |
+| `{:waf_hits}` | there is at least one hit | `2` |
+| `{:waf_rules}` | there is at least one hit | `942100,941110` |
+| `{:waf_categories}` | there is at least one hit | `sql_injection,xss` |
+| `{:waf_severity}` | there is at least one hit | `critical` — the most severe of them |
+| `{:waf_truncated}` | inspected body had bytes past the limit | `true` |
+| `{:waf_budget_exhausted}` | evaluation ran out of budget | `true` |
+
+```toml
+[servers.https]
+access_log = "{remote} {method} {path} {status} {:waf_action} {:waf_rules} {:waf_score}"
+```
+
+Three things worth knowing before you build a format around these:
+
+**`waf_action` is the only one always present.** It is what distinguishes "the WAF ran and
+found nothing" (`pass`) from "there is no WAF on this location" (the field renders empty).
+The detail fields are absent rather than empty on a clean request, so a format containing
+them renders an empty column — which is what you want, but it does mean a dashboard counting
+non-empty `waf_rules` is counting findings and not requests.
+
+**`waf_truncated` and `waf_budget_exhausted` matter most when the action is `pass`.** Either
+one means the verdict covers less than it looks like: bytes the engine never saw, or an
+evaluation that stopped early. A `pass` with one of them set is not the same assurance as a
+plain `pass`.
+
+**The names are a contract.** They appear in operators' log formats, in whatever parses those
+logs, and in any dashboard built on top — and renaming one silently empties the field rather
+than failing anything. They are asserted as literals in the plugin's tests for that reason:
+a rename that updated a shared constant and its test together would still pass.
+
+The `{...}` tag mechanism reads `Ctx` variables, and two defects meant it did not: the
+resolver never consulted the variables map, and the tag parser's character class excluded
+digits, so a name like `ja4h` did not even parse. Both are fixed, and the test for this
+plugin's variables asserts on the rendered log line rather than on the map — an assertion
+against the map is the one that passes while every field renders empty.
