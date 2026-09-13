@@ -3,6 +3,7 @@ name = "pingap-controlplane"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
+authors = ["keepmeside"]
 keywords = ["pingap", "rbac", "controlplane"]
 description = "Control-plane store, RBAC, and notifications for pingap"
 # Not published: this crate exists only inside this workspace.

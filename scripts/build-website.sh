@@ -142,7 +142,7 @@ build_en() {
     cp "$src" "$dst"
     rewrite_links "$dst" crate
     append_source_footer "$dst" "pingap-${c}/README.md" \
-      "https://github.com/vicanso/pingap/blob/main/pingap-${c}/README.md"
+      "https://github.com/keepmeside/pingap-waf/blob/main/pingap-${c}/README.md"
   done
 
   cp "${ROOT}/pingap-plugin/README.md" "${EN}/plugins/index.md"
@@ -156,7 +156,7 @@ build_en() {
   rm -f "${EN}/plugins/index.md.bak"
   strip_md_links "${EN}/plugins/index.md"
   append_source_footer "${EN}/plugins/index.md" "pingap-plugin/README.md" \
-    "https://github.com/vicanso/pingap/blob/main/pingap-plugin/README.md"
+    "https://github.com/keepmeside/pingap-waf/blob/main/pingap-plugin/README.md"
 
   for src in "${ROOT}"/pingap-plugin/docs/*.md; do
     local base
@@ -165,18 +165,18 @@ build_en() {
     cp "$src" "$dst"
     rewrite_links "$dst" plugin
     append_source_footer "$dst" "pingap-plugin/docs/${base}.md" \
-      "https://github.com/vicanso/pingap/blob/main/pingap-plugin/docs/${base}.md"
+      "https://github.com/keepmeside/pingap-waf/blob/main/pingap-plugin/docs/${base}.md"
   done
 
   cp "${ROOT}/docs/modules.md" "${EN}/guide/modules.md"
   rewrite_links "${EN}/guide/modules.md" guide
   append_source_footer "${EN}/guide/modules.md" "docs/modules.md" \
-    "https://github.com/vicanso/pingap/blob/main/docs/modules.md"
+    "https://github.com/keepmeside/pingap-waf/blob/main/docs/modules.md"
 
   cp "${ROOT}/docs/acme_chart.md" "${EN}/guide/acme-flow.md"
   rewrite_links "${EN}/guide/acme-flow.md" guide
   append_source_footer "${EN}/guide/acme-flow.md" "docs/acme_chart.md" \
-    "https://github.com/vicanso/pingap/blob/main/docs/acme_chart.md"
+    "https://github.com/keepmeside/pingap-waf/blob/main/docs/acme_chart.md"
 
   # Fork-owned documentation: the WAF, ACL, bot and control-plane behaviour that
   # upstream does not have, and therefore the pages pingap.io cannot carry. An
@@ -216,13 +216,13 @@ build_en() {
   cp "${ROOT}/examples/README.md" "${EN}/guide/examples.md"
   rewrite_links "${EN}/guide/examples.md" guide
   sed -E -i.bak \
-    -e 's|\(\./([a-z0-9-]+)/README\.md\)|(https://github.com/vicanso/pingap/tree/main/examples/\1)|g' \
-    -e 's|\(\./([a-z0-9-]+)/([a-z0-9.-]+)\)|(https://github.com/vicanso/pingap/tree/main/examples/\1/\2)|g' \
+    -e 's|\(\./([a-z0-9-]+)/README\.md\)|(https://github.com/keepmeside/pingap-waf/tree/main/examples/\1)|g' \
+    -e 's|\(\./([a-z0-9-]+)/([a-z0-9.-]+)\)|(https://github.com/keepmeside/pingap-waf/tree/main/examples/\1/\2)|g' \
     "${EN}/guide/examples.md"
   rm -f "${EN}/guide/examples.md.bak"
   strip_md_links "${EN}/guide/examples.md"
   append_source_footer "${EN}/guide/examples.md" "examples/README.md" \
-    "https://github.com/vicanso/pingap/blob/main/examples/README.md"
+    "https://github.com/keepmeside/pingap-waf/blob/main/examples/README.md"
 
   cat >"${EN}/crates/index.md" <<'EOF'
 # Crates / modules
@@ -261,12 +261,12 @@ EOF
 ---
 layout: home
 hero:
-  name: Pingap
-  text: High-performance reverse proxy
-  tagline: Powered by Cloudflare Pingora — hot reload, web admin, and 20+ plugins for auth, traffic control, caching and observability.
+  name: pingap-waf
+  text: A native-WAF reverse proxy based on pingap
+  tagline: Built on pingap and Cloudflare Pingora — a native Rust WAF with CRS-category parity, per-domain ACL, JA4H bot management and a control plane, on top of upstream's hot reload, web admin and 20+ plugins.
   image:
     src: /logo.png
-    alt: Pingap
+    alt: pingap-waf
   actions:
     - theme: brand
       text: Get Started

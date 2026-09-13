@@ -3,6 +3,7 @@ name = "pingap-admin-api"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
+authors = ["keepmeside"]
 keywords = ["pingap", "admin", "api"]
 description = "Admin API routes for pingap"
 # Not published: this crate exists only inside this workspace.

@@ -98,6 +98,27 @@ pingap  --  vendored, and the host program of this fork
      invalidate issued tokens and stored caches, and break every existing
      deployment, without changing what the binary is called.
 
+  7. Repository identity points here rather than upstream. Every `homepage` and
+     `repository` in the root manifest and the 19 vendored crate manifests, the
+     source footers `scripts/build-website.sh` appends to generated site pages,
+     `cliff.toml`'s remote URL, and the VitePress site title, hero and nav all
+     name this repository. The site and the manifests present the project as
+     based on pingap, not as pingap.
+
+     Authorship is treated differently from URLs, because Apache-2.0 §4(c)
+     requires attribution notices to survive in the Source form of a derivative
+     work. `authors` in the root manifest and in all 19 vendored crates keeps
+     `Tree Xie <tree.xie@outlook.com>`, with `keepmeside` appended to the root
+     for this fork's own contributions. The five crates under `crates/` are this
+     fork's original code and carry no upstream notice, so they name `keepmeside`
+     alone. The deb `maintainer` is `keepmeside` — maintaining a package is not
+     authoring it — while its `copyright` keeps the upstream line and adds the
+     fork's. No email address is published for `keepmeside` anywhere.
+
+     `install.sh` and `.github/workflows/upload_asset.sh` keep
+     `REPO="vicanso/pingap"`, because both fetch upstream's release assets and
+     this fork publishes none.
+
 ================================================================================
 pingora  --  upstream dependency, not vendored
 ================================================================================

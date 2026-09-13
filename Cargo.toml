@@ -22,11 +22,17 @@
 # changing them would invalidate issued tokens and stored caches.
 name = "pingap"
 version.workspace = true
-authors = ["Tree Xie <tree.xie@outlook.com>"]
+# Tree Xie stays first and is not replaced: the vendored pingap workspace is the
+# bulk of this package, and Apache-2.0 §4(c) requires the upstream attribution
+# notice to survive in the Source form of a derivative work. `keepmeside` is
+# appended for the fork's own contributions. No email is published for it —
+# adding one puts a personal address into a public repository, which is the
+# maintainer's call rather than a default.
+authors = ["Tree Xie <tree.xie@outlook.com>", "keepmeside"]
 edition = "2024"
 categories = ["network-programming", "web-programming::http-server"]
 keywords = ["proxy", "http", "gateway", "waf", "security"]
-description = "A Pingora reverse proxy with a native WAF, domain ACL, JA4H bot management and a control plane"
+description = "A native-WAF reverse proxy based on pingap and Cloudflare Pingora"
 license = "Apache-2.0"
 homepage = "https://github.com/keepmeside/pingap-waf"
 repository = "https://github.com/keepmeside/pingap-waf"
@@ -196,8 +202,15 @@ ignored = ["humantime-serde", "hcl-rs", "kdl"]
 # is not vendored — but the metadata should still describe the artifact it would
 # produce.
 name = "pingap-waf"
-maintainer = "Tree Xie <tree.xie@outlook.com>"
-copyright = "2024-2026, Tree Xie <tree.xie@outlook.com>"
+# The fork maintains this package, so it is the maintainer. Debian policy wants
+# `Name <email>` and the email is deliberately absent — publishing a personal
+# address in a public repository is the maintainer's call, not a default. Add it
+# here before ever running cargo-deb for real.
+maintainer = "keepmeside"
+# Not replaced. Copyright in the vendored pingap workspace belongs to its author
+# and cannot be reassigned by editing a metadata field; the fork's own
+# contributions are the second entry, matching the NOTICE header.
+copyright = "2024-2026 Tree Xie <tree.xie@outlook.com>; 2026 the pingap-waf authors"
 license-file = ["LICENSE", "0"]
 extended-description = """\
 pingap-waf is a fork of Pingap, the reverse proxy built on Cloudflare Pingora. \

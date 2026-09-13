@@ -3,6 +3,7 @@ name = "pingap-waf"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
+authors = ["keepmeside"]
 keywords = ["pingap", "waf"]
 description = "WAF rule engine and detectors for pingap"
 # Not published: this crate exists only inside this workspace.

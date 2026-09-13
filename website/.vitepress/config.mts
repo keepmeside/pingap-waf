@@ -181,9 +181,9 @@ function guideSidebar(prefix: string, labels: {
 export default withMermaid(
   defineConfig({
     base,
-    title: "Pingap",
+    title: "pingap-waf",
     description:
-      "High-performance reverse proxy powered by Cloudflare Pingora",
+      "A native-WAF reverse proxy based on pingap and Cloudflare Pingora",
     cleanUrls: true,
     lastUpdated: false,
     ignoreDeadLinks: true,
@@ -214,9 +214,9 @@ export default withMermaid(
       root: {
         label: "English",
         lang: "en",
-        title: "Pingap",
+        title: "pingap-waf",
         description:
-          "High-performance reverse proxy powered by Cloudflare Pingora",
+          "A native-WAF reverse proxy based on pingap and Cloudflare Pingora",
         themeConfig: {
           nav: [
             { text: "Guide", link: "/guide/modules" },

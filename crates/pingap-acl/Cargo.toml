@@ -3,6 +3,7 @@ name = "pingap-acl"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
+authors = ["keepmeside"]
 keywords = ["pingap", "acl"]
 description = "ACL and access lists for pingap"
 # Not published: this crate exists only inside this workspace.
