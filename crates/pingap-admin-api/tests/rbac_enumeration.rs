@@ -241,13 +241,14 @@ async fn a_route_that_is_not_public_is_401_without_a_session() {
 /// named.
 ///
 /// The exceptions are the mutations that act only on the caller's own account: cutting off a
-/// lost laptop, and enrolling or removing one's own second factor. The alternative to a viewer
-/// holding those is an administrator doing them on the viewer's behalf, and for the second
-/// factor that is how 2FA does not get turned on. So the criterion this asserts is "a viewer
-/// can change nothing except their own account", and that is only true for as long as the list
-/// below is exactly those routes. Pinned by name and in full, the way the public-route list
-/// is: a third exception is a failure here rather than a quiet widening of what a viewer may
-/// do.
+/// lost laptop, rotating one's own password, and enrolling or removing one's own second
+/// factor. The alternative to a viewer holding those is an administrator doing them on the
+/// viewer's behalf — and for the second factor that is how 2FA does not get turned on, and
+/// for the password it is how a bootstrap credential never gets rotated. So the criterion
+/// this asserts is "a viewer can change nothing except their own account", and that is only
+/// true for as long as the list below is exactly those routes. Pinned by name and in full,
+/// the way the public-route list is: another entry is a failure here rather than a quiet
+/// widening of what a viewer may do.
 #[tokio::test]
 async fn a_viewer_is_403_on_every_mutating_route() {
     let f = fixture().await;
@@ -257,6 +258,7 @@ async fn a_viewer_is_403_on_every_mutating_route() {
             Access::Needs(
                 Capability::RevokeOwnSession
                     | Capability::ManageOwnSecondFactor
+                    | Capability::ChangeOwnPassword
             )
         )
     };
@@ -274,6 +276,7 @@ async fn a_viewer_is_403_on_every_mutating_route() {
         "POST /account/2fa/disable".to_string(),
         "POST /account/2fa/enable".to_string(),
         "POST /account/2fa/setup".to_string(),
+        "POST /account/password".to_string(),
     ];
     expected.sort();
     assert_eq!(

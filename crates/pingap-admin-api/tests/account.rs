@@ -873,3 +873,212 @@ async fn a_code_spent_by_the_login_path_cannot_remove_the_second_factor() {
         "the guard is not keying by identifier, so the refusal above proved nothing"
     );
 }
+
+/// A user whose stored credential is a real hash, and two usable sessions for them.
+///
+/// The other fixtures store a hash-shaped string that `verify_password` refuses to parse,
+/// which is the right thing for a route that never checks a password and the wrong thing for
+/// one that does: a password test over an unparseable hash would be testing the corrupt-hash
+/// path and passing for the wrong reason.
+async fn user_with_two_sessions(
+    api: &Api,
+    password: &str,
+) -> (Caller, String, String) {
+    let user = api
+        .store
+        .create_user(
+            NewUser {
+                username: "rotator".to_string(),
+                email: "rotator@example.test".to_string(),
+                password_hash: pingap_controlplane::hash_password(password)
+                    .expect("the password hashes"),
+                role: Role::Admin,
+            },
+            *NOW,
+        )
+        .await
+        .expect("the user is created");
+    let first = api
+        .store
+        .create_session(NewSession {
+            user_id: &user.id,
+            token_hash: "rotator-1",
+            auth_level: AuthLevel::TwoFactor,
+            ip: Some("203.0.113.11"),
+            user_agent: Some("the device in hand"),
+            now: *NOW,
+            expires_at: *NOW + 3600,
+        })
+        .await
+        .expect("the first session is created");
+    let second = api
+        .store
+        .create_session(NewSession {
+            user_id: &user.id,
+            token_hash: "rotator-2",
+            auth_level: AuthLevel::TwoFactor,
+            ip: Some("203.0.113.12"),
+            user_agent: Some("the laptop that may be stolen"),
+            now: *NOW,
+            expires_at: *NOW + 3600,
+        })
+        .await
+        .expect("the second session is created");
+    let caller = Caller {
+        session_id: first.id.clone(),
+        user_id: user.id.clone(),
+        username: user.username,
+        role: Role::Admin,
+        auth_level: AuthLevel::TwoFactor,
+    };
+    (caller, first.id, second.id)
+}
+
+#[tokio::test]
+async fn changing_the_password_cuts_off_every_other_session() {
+    let api = api().await;
+    let (caller, own, other) =
+        user_with_two_sessions(&api, "old-password").await;
+
+    let response = send_json(
+        &api,
+        &caller,
+        Method::POST,
+        "/account/password",
+        r#"{"current_password":"old-password","new_password":"new-password"}"#,
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(
+        body["sessions_revoked"], 1,
+        "the response should say how many"
+    );
+
+    let stored = api
+        .store
+        .password_hash_for(&caller.user_id)
+        .await
+        .expect("readable")
+        .expect("present");
+    assert!(
+        pingap_controlplane::verify_password("new-password", &stored)
+            .expect("a real hash verifies"),
+        "the new password was not the one stored"
+    );
+    assert!(
+        !pingap_controlplane::verify_password("old-password", &stored)
+            .expect("a real hash verifies"),
+        "the old password still verifies"
+    );
+
+    let now = *NOW;
+    let sessions = api
+        .store
+        .list_sessions(&caller.user_id)
+        .await
+        .expect("listable");
+    assert!(
+        sessions.iter().any(|s| s.id == other && !s.is_usable(now)),
+        "the other device was left signed in: {sessions:?}"
+    );
+    assert!(
+        sessions.iter().any(|s| s.id == own && s.is_usable(now)),
+        "the session that proved the old password was logged out too"
+    );
+
+    let log = api
+        .store
+        .read_activity(TimeRange::default())
+        .await
+        .expect("readable");
+    assert_eq!(
+        log.iter()
+            .filter(|row| row.action == "account.password")
+            .count(),
+        1,
+        "{log:?}"
+    );
+}
+
+/// The current password is checked, and a failure changes nothing at all.
+///
+/// Worth asserting the *absence* of effects and not just the status: a handler that stored the
+/// new hash and then checked the old one would answer 401 and still have rotated the
+/// credential.
+#[tokio::test]
+async fn a_wrong_current_password_changes_nothing() {
+    let api = api().await;
+    let (caller, own, other) =
+        user_with_two_sessions(&api, "old-password").await;
+    let before = api
+        .store
+        .password_hash_for(&caller.user_id)
+        .await
+        .expect("readable")
+        .expect("present");
+
+    let response = send_json(
+        &api,
+        &caller,
+        Method::POST,
+        "/account/password",
+        r#"{"current_password":"not-the-password","new_password":"new-password"}"#,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+
+    let after = api
+        .store
+        .password_hash_for(&caller.user_id)
+        .await
+        .expect("readable")
+        .expect("present");
+    assert_eq!(before, after, "a refused change still wrote a hash");
+
+    let now = *NOW;
+    let sessions = api
+        .store
+        .list_sessions(&caller.user_id)
+        .await
+        .expect("listable");
+    assert!(
+        sessions.iter().all(|s| s.is_usable(now)),
+        "a refused change revoked sessions: {sessions:?}"
+    );
+    assert!(
+        api.store
+            .read_activity(TimeRange::default())
+            .await
+            .expect("readable")
+            .is_empty(),
+        "a refused change was recorded as though it happened"
+    );
+    let _ = (own, other);
+}
+
+#[tokio::test]
+async fn an_empty_new_password_is_refused_before_the_old_one_is_checked() {
+    let api = api().await;
+    let (caller, _, _) = user_with_two_sessions(&api, "old-password").await;
+    let response = send_json(
+        &api,
+        &caller,
+        Method::POST,
+        "/account/password",
+        r#"{"current_password":"old-password","new_password":""}"#,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("empty"),
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+}

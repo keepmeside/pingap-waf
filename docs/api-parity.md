@@ -67,7 +67,7 @@ What the reference does per-category and this does not offer:
 | Reference | Ours | Missing |
 | --- | --- | --- |
 | `/auth` — `login`, `verify-2fa`, `logout`, `refresh`, `first-login/change-password` | `POST /api/auth/login`, `POST /api/auth/totp`, `POST /api/auth/logout`, `GET /api/auth/me` | `refresh` is waived, below. A forced password change on first login is not implemented |
-| `/account` — `profile` GET/PUT, `password`, `2fa` GET/setup/enable/disable, `activity`, `sessions` GET, `sessions/:id` DELETE | `GET /api/account`, `GET/DELETE /api/account/sessions[/:id]`, `GET /api/account/2fa`, `POST /api/account/2fa/{setup,enable,disable}`, `GET /api/activity` | Profile edit and password change |
+| `/account` — `profile` GET/PUT, `password`, `2fa` GET/setup/enable/disable, `activity`, `sessions` GET, `sessions/:id` DELETE | `GET /api/account`, `POST /api/account/password`, `GET/DELETE /api/account/sessions[/:id]`, `GET /api/account/2fa`, `POST /api/account/2fa/{setup,enable,disable}`, `GET /api/activity` | Profile edit |
 
 Sessions are opaque bearer tokens held in the store, hashed. There is no refresh token and
 no JWT to renew, so `/auth/refresh` has nothing to act on: a session that has expired is
@@ -106,12 +106,25 @@ Enrolment with no encryption key configured is a `409` naming the missing settin
 `500`, and sealing with a default key is not the alternative: a literal default is
 indistinguishable from no encryption once the row is written.
 
-### The two remaining `/account` gaps are the same kind of missing
+### A password change cuts off every other session
 
-- **Profile edit and password change** need store methods that do not exist.
-  `ControlPlaneStore` exposes `password_hash_for` and `set_user_active` and nothing that
-  writes `email` or a password hash. Adding them is a repository and driver change, not a
-  route.
+`POST /api/account/password` revokes the caller's other sessions and keeps the one making the
+change. The reason is what a password change usually means: if the password is being changed
+because it may have been compromised, leaving the other devices signed in defeats the change,
+and the whole point of rotating a credential is to stop whoever else has it. Keeping the
+caller's own session is so the request that made the change is not the one left holding a
+revoked token.
+
+The response reports how many were revoked, because a number the caller did not expect is
+itself the interesting fact — it says how many other devices were signed in.
+
+A wrong current password is a `401` and changes nothing, including the sessions.
+
+### The one remaining `/account` gap
+
+**Profile edit** needs a store method that does not exist. `ControlPlaneStore` writes
+`is_active`, the password hash and the second-factor secret, and nothing that writes `email`.
+Adding it is a repository and driver change, not a route.
 
 ## Deferred to the phase that owns the data
 

@@ -588,6 +588,14 @@ impl ControlPlaneStore for UnavailableStore {
     ) -> pingap_controlplane::repository::Result<()> {
         self.refuse()
     }
+    async fn set_password_hash(
+        &self,
+        _: &str,
+        _: &str,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<()> {
+        self.refuse()
+    }
     async fn set_totp_secret(
         &self,
         _: &str,

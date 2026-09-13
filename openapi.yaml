@@ -164,6 +164,54 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /account/password:
+    post:
+      tags: [account]
+      operationId: changeOwnPassword
+      summary: Change the caller's password and cut off their other sessions
+      description: |
+        Requires the current password, and a failure to produce it changes nothing at all —
+        not the hash, not the sessions, not the audit log.
+
+        Every other session the caller holds is revoked. A password change is usually a
+        response to suspecting the old one leaked, and leaving a possibly-stolen device
+        signed in would defeat it; the session that proved the change is kept, so the caller
+        is not logged out mid-request. The response reports how many were cut off.
+      x-required-capability: change_own_password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [current_password, new_password]
+              properties:
+                current_password: {type: string, format: password}
+                new_password:
+                  type: string
+                  format: password
+                  minLength: 1
+      responses:
+        '200':
+          description: Changed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [sessions_revoked]
+                properties:
+                  sessions_revoked:
+                    type: integer
+                    description: Other sessions cut off by this change.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: The current password was wrong.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /account/2fa:
     get:
       tags: [account]

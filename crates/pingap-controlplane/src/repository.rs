@@ -249,6 +249,16 @@ pub trait ControlPlaneStore: Send + Sync {
         active: bool,
         now: i64,
     ) -> Result<()>;
+    /// Replaces the stored hash. Takes a hash and not a password, so the repository never
+    /// sees a credential in the clear — the caller derives it with [`crate::hash_password`],
+    /// whose output carries its own parameters, so a later parameter change does not
+    /// invalidate the hashes already stored.
+    async fn set_password_hash(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        now: i64,
+    ) -> Result<()>;
 
     // ---- second factor -------------------------------------------------------------
     /// Stores the *encrypted* secret. The repository never sees a readable one.

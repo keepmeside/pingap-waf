@@ -168,6 +168,14 @@ fn build() -> Vec<Route> {
         // The status read is `Authenticated` rather than a capability of its own: it reports
         // two booleans about the caller and every role may see their own. The three writes
         // carry a capability because the router refuses a non-`GET` route that names none.
+        // The credential itself. Beside the second factor rather than under `/users`, because
+        // it is the caller's own and every role holds it.
+        Route {
+            method: Method::POST,
+            path: "/account/password",
+            access: Access::Needs(Capability::ChangeOwnPassword),
+            handler: handler!(routes::account::change_password),
+        },
         Route {
             method: Method::GET,
             path: "/account/2fa",

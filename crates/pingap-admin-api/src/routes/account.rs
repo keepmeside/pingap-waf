@@ -356,3 +356,87 @@ async fn confirm_code(
     // the limiter exists to slow credential guessing from outside.
     Err(ApiError::Unauthenticated)
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangePassword {
+    current_password: String,
+    new_password: String,
+}
+
+/// Change the caller's password, and cut off every other session.
+///
+/// Revoking the other sessions is not a convenience. A password change is what someone does
+/// when they suspect the credential has leaked, and a change that left every other device
+/// signed in would have addressed nothing — the sessions were minted from the credential being
+/// replaced. The caller's own session survives, because logging out the request that just
+/// proved the old password would make the route unusable from a UI.
+///
+/// The current password is required even from a session that has completed its second factor.
+/// A second factor proves possession of a device, not knowledge of the credential, and the
+/// whole value of rotating a password is that the person doing it can demonstrate they hold
+/// the one being replaced.
+pub async fn change_password(
+    state: &AppState,
+    request: &ApiRequest,
+    _params: &[String],
+) -> Result<ApiResponse> {
+    let caller = caller(request)?;
+    let body: ChangePassword = request.json()?;
+    if body.new_password.is_empty() {
+        return Err(ApiError::BadRequest {
+            reason: "the new password is empty".to_string(),
+        });
+    }
+    let stored = state
+        .store
+        .password_hash_for(&caller.user_id)
+        .await?
+        // No hash means no account to change the password of. The router authenticated this
+        // session against the store a moment ago, so reaching here is a row that vanished
+        // under the request rather than a credential failure.
+        .ok_or(ApiError::Unauthenticated)?;
+    // A wrong password is `Ok(false)` and answers 401. A hash the store cannot parse is
+    // `Err` and answers 500, and the two stay distinct: the first is the caller's mistake and
+    // the second is our corruption, and collapsing them would tell an operator to retry a
+    // password against a row that can never verify.
+    let accepted =
+        pingap_controlplane::verify_password(&body.current_password, &stored)
+            .map_err(|e| ApiError::Internal {
+            reason: format!("the stored credential could not be checked: {e}"),
+        })?;
+    if !accepted {
+        return Err(ApiError::Unauthenticated);
+    }
+
+    let hashed = pingap_controlplane::hash_password(&body.new_password)
+        .map_err(|e| ApiError::Internal {
+            reason: format!("the new password could not be stored: {e}"),
+        })?;
+    let now = now_sec();
+    state
+        .store
+        .set_password_hash(&caller.user_id, &hashed, now)
+        .await?;
+
+    let others: Vec<String> = state
+        .store
+        .list_sessions(&caller.user_id)
+        .await?
+        .into_iter()
+        .filter(|session| {
+            session.id != caller.session_id && session.is_usable(now)
+        })
+        .map(|session| session.id)
+        .collect();
+    for id in &others {
+        state.store.revoke_session(id, now).await?;
+    }
+
+    audit(state, caller, "account.password", &caller.user_id, now).await?;
+    // The count travels back because "your other devices were signed out" is a fact the
+    // caller cannot derive, and a UI that cannot say it will be blamed for the logouts.
+    ApiResponse::json(&serde_json::json!({
+        "sessions_revoked": others.len(),
+    }))
+}

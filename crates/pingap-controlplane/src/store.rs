@@ -648,6 +648,31 @@ impl ControlPlaneStore for TursoStore {
         Ok(())
     }
 
+    async fn set_password_hash(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        now: i64,
+    ) -> Result<()> {
+        if !self.exists("users", user_id).await? {
+            return Err(StoreError::NotFound {
+                kind: "user".to_string(),
+                id: user_id.to_string(),
+            });
+        }
+        self.writer()
+            .execute(
+                "UPDATE users SET password_hash = ?2, updated_at = ?3 WHERE id = ?1",
+                vec![
+                    Value::Text(user_id.to_string()),
+                    Value::Text(password_hash.to_string()),
+                    Value::Integer(now),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn set_totp_secret(
         &self,
         user_id: &str,
