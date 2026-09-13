@@ -23,7 +23,7 @@
 use pingap_controlplane::ControlPlaneStore;
 use pingap_controlplane::events::{Verdict, WafEvent};
 use pingap_controlplane::metrics::{Retention, sweep};
-use pingap_controlplane::repository::TimeRange;
+use pingap_controlplane::repository::WafEventFilter;
 use pingap_controlplane::store::TursoStore;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -84,7 +84,7 @@ async fn a_sweep_removes_what_fell_out_of_the_window() {
     assert_eq!(pruned.waf_events, 1, "the wrong number of rows went");
 
     let left = store
-        .read_waf_events(TimeRange::default())
+        .read_waf_events(WafEventFilter::default())
         .await
         .expect("readable");
     assert_eq!(left.len(), 2);
@@ -132,7 +132,7 @@ async fn a_window_of_zero_keeps_nothing() {
     assert_eq!(pruned.waf_events, 2);
     assert!(
         store
-            .read_waf_events(TimeRange::default())
+            .read_waf_events(WafEventFilter::default())
             .await
             .expect("readable")
             .is_empty()

@@ -134,13 +134,29 @@ pub struct NewSession<'a> {
     pub expires_at: i64,
 }
 
+/// Which findings to read back.
+///
+/// Every field optional, and an absent one is not a filter rather than a filter that matches
+/// nothing. `blocked` is the one that carries a wart: the table has a single flag, so asking
+/// for "not blocked" returns detections *and* redactions, which the queue treats as different
+/// things. Widening the column is a migration; until then the ambiguity is named here rather
+/// than hidden behind a field called `verdict`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WafEventFilter {
+    pub range: TimeRange,
+    pub domain: Option<String>,
+    pub rule_id: Option<u32>,
+    pub category: Option<String>,
+    pub blocked: Option<bool>,
+}
+
 /// One stored WAF finding.
 ///
 /// The queue's `WafEvent` plus the `id` the store assigned. A separate type rather than an
 /// added field on that one because a producer must not be able to choose a primary key: two
 /// nodes writing to a shared store would collide, and a caller that could set `id` could also
 /// overwrite a row it did not write.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct WafEventRecord {
     pub id: String,
     pub node: String,
@@ -161,7 +177,7 @@ pub struct WafEventRecord {
 
 /// A window over the audit log. Ranges rather than offsets, because the log only grows and
 /// an offset shifts under a concurrent insert.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TimeRange {
     pub since: Option<i64>,
     pub until: Option<i64>,
@@ -353,15 +369,15 @@ pub trait ControlPlaneStore: Send + Sync {
         events: &[crate::events::WafEvent],
     ) -> Result<()>;
 
-    /// Reads findings back, newest first.
+    /// Reads findings back, newest first, narrowed by whatever the filter names.
     ///
     /// Ranges rather than offsets, for the reason the audit log uses them: this table only
     /// grows, and an offset shifts under a concurrent insert, so a paginating caller would
-    /// see one finding twice and miss another. Filtering by domain, rule and verdict is a
-    /// later concern and belongs beside the query that needs it.
+    /// see one finding twice and miss another. Paging is `until` set to the oldest
+    /// `created_at` already seen.
     async fn read_waf_events(
         &self,
-        range: TimeRange,
+        filter: WafEventFilter,
     ) -> Result<Vec<WafEventRecord>>;
 
     // ---- retention ---------------------------------------------------------------------

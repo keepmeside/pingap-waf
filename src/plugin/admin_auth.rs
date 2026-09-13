@@ -612,7 +612,7 @@ impl ControlPlaneStore for UnavailableStore {
     }
     async fn read_waf_events(
         &self,
-        _: pingap_controlplane::TimeRange,
+        _: pingap_controlplane::repository::WafEventFilter,
     ) -> pingap_controlplane::repository::Result<
         Vec<pingap_controlplane::repository::WafEventRecord>,
     > {

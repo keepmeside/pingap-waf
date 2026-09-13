@@ -23,6 +23,7 @@
 use bytes::Bytes;
 use http::{Method, StatusCode};
 use pingap_admin_api::{ApiRequest, ApiResponse, AppState, Caller, dispatch};
+use pingap_controlplane::events::{Verdict, WafEvent};
 use pingap_controlplane::projection::{
     Applier, ConfigSink, DataPlane, Intent, NoPluginCheck, Validator,
     plugin_config_key,
@@ -137,6 +138,25 @@ async fn api() -> Api {
         store,
         _dir: dir,
     }
+}
+
+async fn send_query(
+    api: &Api,
+    method: Method,
+    path: &str,
+    query: &str,
+) -> ApiResponse {
+    dispatch(
+        &api.state,
+        &ApiRequest {
+            method,
+            path: path.to_string(),
+            query: query.to_string(),
+            body: Bytes::new(),
+            caller: Some(api.admin.clone()),
+        },
+    )
+    .await
 }
 
 async fn send(
@@ -644,5 +664,100 @@ async fn a_certificate_with_no_key_material_and_no_issuer_is_refused() {
             .expect("listable")
             .is_empty(),
         "a refused certificate still recorded a version"
+    );
+}
+
+fn finding(domain: &str, verdict: Verdict, at: i64, rule: u32) -> WafEvent {
+    WafEvent {
+        node: "node-a".to_string(),
+        domain: domain.to_string(),
+        profile: "waf:strict".to_string(),
+        rule_id: Some(rule),
+        category: Some("sql_injection".to_string()),
+        severity: Some("critical".to_string()),
+        score: 5,
+        verdict,
+        client_ip: Some("203.0.113.7".to_string()),
+        method: Some("GET".to_string()),
+        uri: Some("/".to_string()),
+        created_at: at,
+    }
+}
+
+/// The findings route filters, pages by time, and treats a bad parameter as no parameter.
+///
+/// The last part is the behaviour worth pinning. These are filters, so an unparseable `since`
+/// is ignored rather than refused — answering a malformed bookmark with a 400 would break it
+/// the moment a parameter's shape changed. An *empty* one is ignored too, because a UI that
+/// clears a text input sends `?domain=` and treating that as a domain named "" would return
+/// nothing and look like the data had gone.
+#[tokio::test]
+async fn the_findings_route_filters_and_pages_by_time() {
+    let api = api().await;
+    api.store
+        .record_waf_events(&[
+            finding("api.test", Verdict::Block, 3_000, 942100),
+            finding("www.test", Verdict::Detect, 2_000, 941110),
+            finding("api.test", Verdict::Detect, 1_000, 942100),
+        ])
+        .await
+        .expect("the findings write");
+
+    async fn domains(api: &Api, query: &str) -> Vec<String> {
+        let response =
+            send_query(api, Method::GET, "/logs/waf-events", query).await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{query} answered {}: {}",
+            response.status,
+            String::from_utf8_lossy(&response.body)
+        );
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&response.body).expect("json");
+        rows.iter()
+            .map(|row| row["domain"].as_str().expect("a domain").to_string())
+            .collect()
+    }
+
+    // Newest first, and unfiltered means everything.
+    assert_eq!(
+        domains(&api, "").await,
+        vec!["api.test", "www.test", "api.test"]
+    );
+    assert_eq!(
+        domains(&api, "domain=api.test").await,
+        vec!["api.test", "api.test"]
+    );
+    assert_eq!(domains(&api, "blocked=true").await, vec!["api.test"]);
+    assert_eq!(domains(&api, "rule_id=941110").await, vec!["www.test"]);
+
+    // Paging is a time bound, not an offset: the second page starts below the oldest row of
+    // the first.
+    assert_eq!(
+        domains(&api, "until=2500").await,
+        vec!["www.test", "api.test"]
+    );
+    assert_eq!(
+        domains(&api, "since=1500&until=2500").await,
+        vec!["www.test"]
+    );
+    assert_eq!(domains(&api, "limit=1").await, vec!["api.test"]);
+
+    // Ignored rather than refused, and empty rather than absent means the same thing.
+    assert_eq!(
+        domains(&api, "since=not-a-number").await.len(),
+        3,
+        "an unparseable filter was refused or treated as a value"
+    );
+    assert_eq!(
+        domains(&api, "domain=").await.len(),
+        3,
+        "an emptied filter input matched nothing"
+    );
+    assert_eq!(
+        domains(&api, "blocked=perhaps").await.len(),
+        3,
+        "an unrecognised flag silently meant `false`"
     );
 }

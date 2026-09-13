@@ -1060,13 +1060,24 @@ impl ControlPlaneStore for TursoStore {
 
     async fn read_waf_events(
         &self,
-        range: TimeRange,
+        filter: crate::repository::WafEventFilter,
     ) -> Result<Vec<crate::repository::WafEventRecord>> {
+        // One statement shape, with `? IS NULL OR column = ?` for each optional filter
+        // rather than a `WHERE` built up per call. Two reasons, and the second is the one
+        // that matters: a caller cannot express a filter this code did not anticipate, and
+        // there is no string concatenation anywhere near a security record. The cost is that
+        // an unfiltered read still evaluates four predicates, which an index on
+        // `(domain, created_at)` already covers for the common case.
         let sql = format!(
             "SELECT {WAF_EVENT_COLUMNS} FROM waf_events \
              WHERE created_at >= ?1 AND created_at <= ?2 \
+             AND (?4 IS NULL OR domain = ?4) \
+             AND (?5 IS NULL OR rule_id = ?5) \
+             AND (?6 IS NULL OR blocked = ?6) \
+             AND (?7 IS NULL OR category = ?7) \
              ORDER BY created_at DESC, id DESC LIMIT ?3"
         );
+        let range = filter.range;
         self.rows(
             &sql,
             vec![
@@ -1075,6 +1086,14 @@ impl ControlPlaneStore for TursoStore {
                 Value::Integer(i64::from(
                     range.limit.unwrap_or(DEFAULT_READ_LIMIT),
                 )),
+                nullable(filter.domain),
+                filter
+                    .rule_id
+                    .map_or(Value::Null, |id| Value::Integer(i64::from(id))),
+                filter.blocked.map_or(Value::Null, |blocked| {
+                    Value::Integer(i64::from(blocked))
+                }),
+                nullable(filter.category),
             ],
             decode_waf_event,
         )

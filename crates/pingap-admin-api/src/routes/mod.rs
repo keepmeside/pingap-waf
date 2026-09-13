@@ -25,6 +25,7 @@ pub mod config_versions;
 pub mod domains;
 pub(crate) mod intent_resource;
 pub mod listeners;
+pub mod logs;
 pub mod policies;
 pub mod ssl;
 pub mod system;

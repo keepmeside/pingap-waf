@@ -252,7 +252,7 @@ fn the_counters_account_for_everything_offered() {
 
 use pingap_controlplane::ControlPlaneStore;
 use pingap_controlplane::events::EventWriter;
-use pingap_controlplane::repository::{StoreError, TimeRange};
+use pingap_controlplane::repository::{StoreError, TimeRange, WafEventFilter};
 use pingap_controlplane::store::TursoStore;
 use std::sync::Arc;
 
@@ -310,7 +310,7 @@ async fn a_batch_round_trips_with_every_column_in_its_place() {
         .expect("the batch writes");
 
     let rows = store
-        .read_waf_events(TimeRange::default())
+        .read_waf_events(WafEventFilter::default())
         .await
         .expect("readable");
     assert_eq!(rows.len(), 2, "{rows:?}");
@@ -360,7 +360,7 @@ async fn an_empty_batch_is_a_no_op() {
         .expect("nothing to write is not an error");
     assert!(
         store
-            .read_waf_events(TimeRange::default())
+            .read_waf_events(WafEventFilter::default())
             .await
             .expect("readable")
             .is_empty()
@@ -381,7 +381,13 @@ async fn a_range_excludes_what_falls_outside_it() {
         until: Some(2_500),
         limit: None,
     };
-    let rows = store.read_waf_events(window).await.expect("readable");
+    let rows = store
+        .read_waf_events(WafEventFilter {
+            range: window,
+            ..Default::default()
+        })
+        .await
+        .expect("readable");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].created_at, 2_000);
 }
@@ -441,5 +447,118 @@ async fn flush_writes_one_batch_and_leaves_the_rest() {
             .with_batch(0)
             .is_none(),
         "a zero batch would drain nothing forever and look idle"
+    );
+}
+
+/// Filtering narrows, and an absent filter is not a filter that matches nothing.
+///
+/// The query is one statement shape with `? IS NULL OR column = ?` per optional filter rather
+/// than a `WHERE` built up per call, so what is asserted here is that the sentinels behave: a
+/// field left `None` must widen and not narrow.
+#[tokio::test]
+async fn a_filter_narrows_by_the_fields_it_names() {
+    let (store, _dir) = migrated().await;
+    let mut sqli = event(Verdict::Block, 1_000);
+    sqli.domain = "api.test".to_string();
+    sqli.rule_id = Some(942100);
+    sqli.category = Some("sql_injection".to_string());
+    let mut xss = event(Verdict::Detect, 2_000);
+    xss.domain = "www.test".to_string();
+    xss.rule_id = Some(941110);
+    xss.category = Some("xss".to_string());
+    xss.verdict = Verdict::Detect;
+    store
+        .record_waf_events(&[sqli, xss])
+        .await
+        .expect("both write");
+
+    async fn read(
+        store: &Arc<dyn ControlPlaneStore>,
+        filter: WafEventFilter,
+    ) -> Vec<String> {
+        store
+            .read_waf_events(filter)
+            .await
+            .expect("readable")
+            .iter()
+            .map(|row| row.domain.clone())
+            .collect()
+    }
+
+    let all = read(&store, WafEventFilter::default()).await;
+    assert_eq!(all.len(), 2, "an empty filter narrowed: {all:?}");
+
+    assert_eq!(
+        read(
+            &store,
+            WafEventFilter {
+                domain: Some("api.test".to_string()),
+                ..Default::default()
+            }
+        )
+        .await,
+        vec!["api.test".to_string()]
+    );
+    assert_eq!(
+        read(
+            &store,
+            WafEventFilter {
+                rule_id: Some(941110),
+                ..Default::default()
+            }
+        )
+        .await,
+        vec!["www.test".to_string()]
+    );
+    assert_eq!(
+        read(
+            &store,
+            WafEventFilter {
+                category: Some("sql_injection".to_string()),
+                ..Default::default()
+            }
+        )
+        .await,
+        vec!["api.test".to_string()]
+    );
+    assert_eq!(
+        read(
+            &store,
+            WafEventFilter {
+                blocked: Some(true),
+                ..Default::default()
+            }
+        )
+        .await,
+        vec!["api.test".to_string()]
+    );
+
+    // Two filters at once, and the pair that matches nothing. A query that ANDed wrongly
+    // would return one of the two rows here instead of none.
+    assert_eq!(
+        read(
+            &store,
+            WafEventFilter {
+                domain: Some("api.test".to_string()),
+                rule_id: Some(941110),
+                ..Default::default()
+            }
+        )
+        .await
+        .len(),
+        0
+    );
+    assert_eq!(
+        read(
+            &store,
+            WafEventFilter {
+                domain: Some("api.test".to_string()),
+                blocked: Some(true),
+                ..Default::default()
+            }
+        )
+        .await
+        .len(),
+        1
     );
 }

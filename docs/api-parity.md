@@ -67,6 +67,7 @@ What the reference does per-category and this does not offer:
 | Reference | Ours | Missing |
 | --- | --- | --- |
 | `/auth` — `login`, `verify-2fa`, `logout`, `refresh`, `first-login/change-password` | `POST /api/auth/login`, `POST /api/auth/totp`, `POST /api/auth/logout`, `GET /api/auth/me` | `refresh` is waived, below. A forced password change on first login is not implemented |
+| `/logs` — list, `stats`, `domains`, `download` | `GET /api/logs/waf-events` | Aggregates and the export. The reference reads nginx's access-log *files*; this reads the findings the WAF wrote to the store, so there is no file to tail and no `download` of one |
 | `/account` — `profile` GET/PUT, `password`, `2fa` GET/setup/enable/disable, `activity`, `sessions` GET, `sessions/:id` DELETE | `GET/PATCH /api/account`, `POST /api/account/password`, `GET/DELETE /api/account/sessions[/:id]`, `GET /api/account/2fa`, `POST /api/account/2fa/{setup,enable,disable}`, `GET /api/activity` | Four of the reference's five profile fields, waived below |
 
 Sessions are opaque bearer tokens held in the store, hashed. There is no refresh token and
@@ -120,6 +121,20 @@ itself the interesting fact — it says how many other devices were signed in.
 
 A wrong current password is a `401` and changes nothing, including the sessions.
 
+### Findings are queried, not tailed
+
+`GET /api/logs/waf-events` reads the `waf_events` table, filtered by domain, rule ID, category,
+verdict and time, paged by a time bound rather than an offset. The reference's `/logs` reads
+nginx's access-log files and derives verdicts from them by regex, because it sits outside nginx;
+this gateway is inside the proxy, so the finding is structured data the moment it is decided and
+there is no file to tail, no format to couple to, and no parser to break. `download` has no
+counterpart for the same reason — there is no log file to hand over.
+
+An unparseable or empty filter parameter is ignored rather than refused. These are filters, and
+answering a malformed bookmark with `400` would break it the moment a parameter's shape changed;
+a request body is the opposite case, where an unknown field means the caller believes they set
+something they did not.
+
 ### The profile is one field, not five
 
 `PATCH /api/account` changes the email address and nothing else. The reference's `PUT /profile`
@@ -152,7 +167,7 @@ subsystem behind them exists.
 
 | Reference | Owned by | What it will supply |
 | --- | --- | --- |
-| `/logs`, `/performance`, `/dashboard` | Observability | WAF verdicts and JA4H fingerprints as structured `Ctx` data rather than log-file scraping, aggregated in Rust because the store's window functions lack `lag`/`lead` |
+| `/logs` (partly mapped, see Partial), `/performance`, `/dashboard` | Observability | WAF verdicts and JA4H fingerprints as structured `Ctx` data rather than log-file scraping, aggregated in Rust because the store's window functions lack `lag`/`lead` |
 | `/alerts` | Alerts | Rules (projected) and channels, plus delivery history (store-only) |
 | `/backup` | Backup & Restore | Schedules, export, restore |
 | `/slave` | Cluster via etcd Peers | Peer inventory, last-seen, version, config hash |

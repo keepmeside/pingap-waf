@@ -236,6 +236,16 @@ fn build() -> Vec<Route> {
             access: Access::Needs(Capability::ManageUsers),
             handler: handler!(routes::users::reset_second_factor),
         },
+        // ---- findings -------------------------------------------------------------------
+        //
+        // Read-only, and the one route here that is a window onto telemetry rather than onto
+        // intent: nothing about it is writable, so there is no projection and no version.
+        Route {
+            method: Method::GET,
+            path: "/logs/waf-events",
+            access: Access::Needs(Capability::ViewLogs),
+            handler: handler!(routes::logs::waf_events),
+        },
         // ---- config versions, drift, rollback ----------------------------------------
         Route {
             method: Method::GET,

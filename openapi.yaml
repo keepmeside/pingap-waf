@@ -931,6 +931,64 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /logs/waf-events:
+    get:
+      tags: [audit]
+      operationId: listWafEvents
+      summary: WAF findings, filtered and paged by time
+      description: |
+        Read-only telemetry, not intent: nothing here is writable, so there is no projection and
+        no version.
+
+        Paging is `until` set to the oldest `created_at` already on screen, not an offset. The
+        table only grows, so an offset shifts under a concurrent insert and the caller sees one
+        finding twice and misses another.
+
+        Every parameter is a filter, and an unparseable or empty one is ignored rather than
+        refused: these are filters, and answering a malformed bookmark with `400` would break it
+        the moment a parameter's shape changed. `?blocked=perhaps` widens to "either" rather
+        than silently meaning `false`.
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+        - $ref: '#/components/parameters/Limit'
+        - name: domain
+          in: query
+          required: false
+          schema: {type: string}
+        - name: rule_id
+          in: query
+          required: false
+          description: A native rule ID, or one at or above 1000000 for an operator's custom rule.
+          schema: {type: integer, format: int64}
+        - name: category
+          in: query
+          required: false
+          description: A category key from `GET /waf/categories`.
+          schema: {type: string}
+        - name: blocked
+          in: query
+          required: false
+          description: >
+            `true` for findings that stopped a request. The table has one flag, so `false`
+            returns detections *and* redactions, which the drop policy treats as different
+            things; see docs/observability.md.
+          schema: {type: boolean}
+      x-required-capability: view_logs
+      responses:
+        '200':
+          description: Findings, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WafEventRecord'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /config-versions:
     get:
       tags: [versions]
@@ -2241,6 +2299,46 @@ components:
             Trimmed, and refused empty before it reaches the store — the column is
             `NOT NULL UNIQUE`, so an empty address would be accepted and would collide with
             the next empty one.
+
+    WafEventRecord:
+      type: object
+      description: >
+        One stored finding. The `id` is the store's, so two nodes writing to a shared store
+        cannot collide and no caller can choose one.
+      required:
+        [id, node, domain, profile, rule_id, category, severity, score, blocked,
+         client_ip, method, uri, created_at]
+      properties:
+        id: {type: string}
+        node:
+          type: string
+          description: Which peer produced this. Peers share a store, so a finding with no node on it cannot be attributed later.
+        domain: {type: string}
+        profile:
+          type: string
+          description: The `category:profile` entry that decided, which is what makes a block attributable to a policy.
+        rule_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Null for a finding with no single rule behind it, such as an aggregate score.
+        category: {type: string, nullable: true}
+        severity: {type: string, nullable: true}
+        score: {type: integer, format: int64}
+        blocked:
+          type: boolean
+          description: >
+            Whether the request was refused. A redaction is stored as `false`, which loses the
+            distinction the queue's drop policy makes; widening the column is a migration.
+        client_ip: {type: string, nullable: true}
+        method: {type: string, nullable: true}
+        uri: {type: string, nullable: true}
+        created_at:
+          type: integer
+          format: int64
+          description: >
+            When the finding happened, not when it was written — a queue that fell behind dates
+            events correctly instead of bunching them at the moment the writer caught up.
 
     LoginRequest:
       type: object
