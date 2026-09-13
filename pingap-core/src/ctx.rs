@@ -790,8 +790,23 @@ impl Ctx {
                     human
                 )
             },
-            // Ignore unknown keys.
-            _ => {},
+            // A `Ctx` variable, which is what a `{:name}` tag means. Reached only after
+            // every built-in key, so a variable cannot shadow one — `{status}` is the
+            // response status and nothing a plugin does can make it something else.
+            //
+            // This arm is the only channel from `features.variables` to a rendered log
+            // line. Without it the map feeds `location.rewrite` and nothing else, so a
+            // variable a plugin added is present in `Ctx`, asserted on by tests that read
+            // the map, and absent from every access log — which is how `{:ja4h}` shipped
+            // logging nothing.
+            _ => {
+                if let Some(features) = &self.features
+                    && let Some(variables) = &features.variables
+                    && let Some(value) = variables.get(key)
+                {
+                    buf.extend_from_slice(value.as_bytes());
+                }
+            },
         }
     }
 

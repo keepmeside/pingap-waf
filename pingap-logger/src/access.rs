@@ -132,7 +132,12 @@ impl From<&str> for Parser {
             "tiny" => TINY,
             _ => value,
         };
-        let Ok(reg) = Regex::new(r"(\{[a-zA-Z_<>\-~:$]+*\})") else {
+        // Digits are in the class because a tag name is a `Ctx` variable name, and those are
+        // not all alphabetic: `ja4h` is the FoxIO spelling of the fingerprint the bot plugin
+        // emits, and without `0-9` here `{...}` never matches it, so the whole tag is emitted
+        // as literal text. Every built-in tag is alphabetic, so this only ever widens what a
+        // custom variable may be called.
+        let Ok(reg) = Regex::new(r"(\{[a-zA-Z0-9_<>\-~:$]+*\})") else {
             return Parser {
                 needs_timestamp: false,
                 capacity: 0,
@@ -903,6 +908,47 @@ mod tests {
         let p: Parser = "{when_unix}".into();
         let log = p.format(&session, &ctx);
         assert_eq!(true, log.len() == 13);
+    }
+
+    /// A `{:name}` tag renders the `Ctx` variable of that name.
+    ///
+    /// Asserted on the rendered bytes and not on the variables map, because the map is not
+    /// what a log line reads: `TagCategory::Context` resolves through
+    /// `Ctx::append_log_value`, and a variable that is in the map but has no arm in that
+    /// function renders as an empty field. That is not a hypothetical — `{:ja4h}`, emitted by
+    /// the bot plugin, logged nothing at all, and any test that checked the map would have
+    /// passed while every access log came out short a field.
+    #[tokio::test]
+    async fn test_context_tag_renders_a_ctx_variable() {
+        let mock_io = Builder::new()
+            .read(b"GET / HTTP/1.1\r\nhost: example.test\r\n\r\n")
+            .build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let mut ctx = Ctx::default();
+        ctx.add_variable("ja4h", "13d3b0c7f1e2");
+        ctx.add_variable("waf_rule", "942100");
+
+        let p: Parser = "{:ja4h}|{:waf_rule}|{:never_set}".into();
+        let log = p.format(&session, &ctx);
+        // An unset variable renders empty rather than as a placeholder, which is what the
+        // tag did before and what a log format built around it already expects.
+        assert_eq!("13d3b0c7f1e2|942100|", log);
+
+        // A variable cannot shadow a built-in key: the fallback is reached only after every
+        // named arm, so `{status}` stays the response status whatever a plugin stores under
+        // that name.
+        ctx.add_variable("status", "not-the-status");
+        let p: Parser = "{status}".into();
+        // `-` is what the status arm renders with no response, and it is that rather than
+        // the variable's value: the fallback is reached only after every named arm.
+        assert_eq!("-", p.format(&session, &ctx));
+
+        // And a `Ctx` with no variables at all still renders, which is the common case and
+        // the one that would panic if the fallback assumed the map existed.
+        let p: Parser = "{:ja4h}".into();
+        assert_eq!("", p.format(&session, &Ctx::default()));
     }
 
     #[test]
