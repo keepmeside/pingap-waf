@@ -226,20 +226,54 @@ async fn a_route_that_is_not_public_is_401_without_a_session() {
     }
 }
 
-/// The plan-level criterion: a viewer is refused every mutating route, per route.
+/// The criterion: a viewer is refused every mutating route, per route — with one exception,
+/// named.
+///
+/// `DELETE /account/sessions/:id` is a mutation every role holds, because the alternative to a
+/// user cutting off their own lost laptop is an administrator doing it for them. So the
+/// criterion this asserts is "a viewer can change nothing except their own sessions", and that
+/// is only true for as long as the exception list has one entry in it. Pinned by name and in
+/// full, the way the public-route list is: a second exception is a failure here rather than a
+/// quiet widening of what a viewer may do.
 #[tokio::test]
 async fn a_viewer_is_403_on_every_mutating_route() {
     let f = fixture().await;
+    let own_sessions_only = |route: &pingap_admin_api::Route| {
+        matches!(route.access, Access::Needs(Capability::RevokeOwnSession))
+    };
+
+    let exceptions: Vec<String> = table()
+        .iter()
+        .filter(|route| route.access.is_mutating() && own_sessions_only(route))
+        .map(|route| format!("{} {}", route.method, route.path))
+        .collect();
+    assert_eq!(
+        exceptions,
+        vec!["DELETE /account/sessions/:id".to_string()],
+        "the set of mutating routes a viewer may reach changed"
+    );
+
     let mut checked = 0;
     for route in table() {
         if !route.access.is_mutating() {
             continue;
         }
-        let request = request_for(
-            route,
-            Some(caller(&f, Role::Viewer, AuthLevel::TwoFactor)),
-        );
-        let response = dispatch(&f.state, &request).await;
+        let viewer = caller(&f, Role::Viewer, AuthLevel::TwoFactor);
+        let response =
+            dispatch(&f.state, &request_for(route, Some(viewer))).await;
+        if own_sessions_only(route) {
+            // The exception, asserted from both sides. Only the refusal is checked above; if
+            // this one were dropped the list could name a route that is in fact denied, and
+            // the test would pass while the criterion quietly narrowed.
+            assert_ne!(
+                response.status,
+                StatusCode::FORBIDDEN,
+                "a viewer was refused {} {}, which every role holds",
+                route.method,
+                route.path
+            );
+            continue;
+        }
         assert_eq!(
             response.status,
             StatusCode::FORBIDDEN,

@@ -35,6 +35,26 @@ pub enum RequestMode {
     Block,
 }
 
+impl RequestMode {
+    /// Every mode a request-side category accepts, in increasing strictness.
+    ///
+    /// `Serialize` and this list exist so an API can publish what a category accepts
+    /// rather than have a caller hardcode the three strings: the point of
+    /// [`RequestMode`] and [`ResponseMode`] being separate types is that `block` is
+    /// not offerable on a response-side category, and a UI that guesses the set from
+    /// a string list is a UI that offers it.
+    pub const ALL: [Self; 3] = [Self::Off, Self::Detect, Self::Block];
+
+    /// Config key, matching the `serde` rename.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Detect => "detect",
+            Self::Block => "block",
+        }
+    }
+}
+
 /// Enforcement mode for a response-side category.
 ///
 /// There is no `Block`. See [`RequestMode`] for why, and
@@ -49,6 +69,21 @@ pub enum ResponseMode {
     /// status line has already been sent, so the response still completes with
     /// its original status.
     Redact,
+}
+
+impl ResponseMode {
+    /// Every mode a response-side category accepts. No `Block`, and the absence is
+    /// the fact worth publishing — see [`RequestMode::ALL`].
+    pub const ALL: [Self; 3] = [Self::Off, Self::Detect, Self::Redact];
+
+    /// Config key, matching the `serde` rename.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Detect => "detect",
+            Self::Redact => "redact",
+        }
+    }
 }
 
 /// A mode value as it arrives from config, before it is known which surface the
@@ -1041,5 +1076,42 @@ mod tests {
         );
         assert_eq!(v.anomaly_threshold, 8);
         assert_eq!(v.paranoia.get(), 2);
+    }
+
+    #[test]
+    fn a_mode_key_is_the_spelling_config_accepts() {
+        // `key()` is what an API publishes as the set of modes a category accepts, and
+        // the `serde` rename is what a config file is parsed with. Two spellings of one
+        // thing, so they are compared rather than both trusted: a UI offering a mode the
+        // parser would reject produces a write that fails at apply time, and one that
+        // omits a mode the parser accepts silently removes a control.
+        //
+        // Checked in the parsing direction, which is the one that matters — a key nobody
+        // can write is the failure, and a key that serialises back is not proof of that.
+        use serde::Deserialize as _;
+        for mode in RequestMode::ALL {
+            let de = serde::de::value::StrDeserializer::<
+                serde::de::value::Error,
+            >::new(mode.key());
+            assert_eq!(
+                RequestMode::deserialize(de),
+                Ok(mode),
+                "{mode:?} publishes a key config would not parse"
+            );
+        }
+        for mode in ResponseMode::ALL {
+            let de = serde::de::value::StrDeserializer::<
+                serde::de::value::Error,
+            >::new(mode.key());
+            assert_eq!(
+                ResponseMode::deserialize(de),
+                Ok(mode),
+                "{mode:?} publishes a key config would not parse"
+            );
+        }
+        // The absence is the point of the two types, so it is asserted and not left to
+        // the reader of `ALL`.
+        assert!(ResponseMode::ALL.iter().all(|m| m.key() != "block"));
+        assert!(RequestMode::ALL.iter().any(|m| m.key() == "block"));
     }
 }

@@ -312,6 +312,7 @@ fn intent_for(
         listeners,
         domains,
         policies: policy_confs,
+        certificates: BTreeMap::new(),
         trusted_proxies: None,
     }
 }

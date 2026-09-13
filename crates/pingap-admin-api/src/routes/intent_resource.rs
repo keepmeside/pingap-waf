@@ -182,7 +182,32 @@ pub(crate) async fn upsert<T: Serialize + DeserializeOwned>(
     pick: fn(&mut Intent) -> &mut BTreeMap<String, T>,
 ) -> Result<ApiResponse> {
     let value: T = request.json()?;
-    let mut intent = base_intent(state).await?;
+    insert(
+        state,
+        request,
+        kind,
+        name,
+        value,
+        base_intent(state).await?,
+        pick,
+    )
+    .await
+}
+
+/// The write half of [`upsert`], for a resource whose stored value is not the request body
+/// verbatim — one that has to read what is already there before it can decide what to keep.
+///
+/// Takes the base intent rather than loading it, so a handler that needs the previous value
+/// reads it once and cannot race itself between the read and the write.
+pub(crate) async fn insert<T: Serialize>(
+    state: &AppState,
+    request: &ApiRequest,
+    kind: &str,
+    name: &str,
+    value: T,
+    mut intent: Intent,
+    pick: fn(&mut Intent) -> &mut BTreeMap<String, T>,
+) -> Result<ApiResponse> {
     let existed = pick(&mut intent).insert(name.to_string(), value).is_some();
     apply(
         state,

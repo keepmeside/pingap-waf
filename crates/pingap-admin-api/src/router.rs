@@ -154,6 +154,15 @@ fn build() -> Vec<Route> {
             access: Access::Needs(Capability::ViewOwnSessions),
             handler: handler!(routes::account::own_sessions),
         },
+        // The write half of the listing above, and the reason the listing exists: an operator
+        // who has recognised a device can cut it off. Ownership is the handler's, not the
+        // gate's — every role may revoke its own and no role may revoke another's here.
+        Route {
+            method: Method::DELETE,
+            path: "/account/sessions/:id",
+            access: Access::Needs(Capability::RevokeOwnSession),
+            handler: handler!(routes::account::revoke_session),
+        },
         // ---- users -------------------------------------------------------------------
         Route {
             method: Method::GET,
@@ -297,6 +306,44 @@ fn build() -> Vec<Route> {
             path: "/policies/:name",
             access: Access::Needs(Capability::EditPolicy),
             handler: handler!(routes::policies::delete),
+        },
+        // Certificates. Mounted at `/ssl`, the reference API's path for this resource:
+        // `/certificates` is the retained route that answers from the running provider.
+        // Same four operations, with one difference the module documents — the reads return
+        // a view, because this is the one category holding key material.
+        Route {
+            method: Method::GET,
+            path: "/ssl",
+            access: Access::Needs(Capability::ViewConfig),
+            handler: handler!(routes::ssl::list),
+        },
+        Route {
+            method: Method::GET,
+            path: "/ssl/:name",
+            access: Access::Needs(Capability::ViewConfig),
+            handler: handler!(routes::ssl::get),
+        },
+        Route {
+            method: Method::PUT,
+            path: "/ssl/:name",
+            access: Access::Needs(Capability::EditCertificate),
+            handler: handler!(routes::ssl::put),
+        },
+        Route {
+            method: Method::DELETE,
+            path: "/ssl/:name",
+            access: Access::Needs(Capability::EditCertificate),
+            handler: handler!(routes::ssl::delete),
+        },
+        // The WAF's compiled-in category table. A read over the build rather than over
+        // intent, so it is not one of the four-operation resources above and has no write:
+        // what an operator configures is a profile in `/policies`, and this is the
+        // vocabulary that profile is written in.
+        Route {
+            method: Method::GET,
+            path: "/waf/categories",
+            access: Access::Needs(Capability::ViewConfig),
+            handler: handler!(routes::waf::categories),
         },
     ]
 }

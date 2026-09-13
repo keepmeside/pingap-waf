@@ -79,12 +79,14 @@ pub type Result<T> = std::result::Result<T, ProjectionError>;
 /// how `pingap-discovery` reads it (`format_addrs`). A struct rather than a bare string so
 /// the projection cannot produce `"10.0.0.1:8080 notanumber"`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Backend {
     pub addr: String,
     pub weight: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Upstream {
     pub backends: Vec<Backend>,
     pub lb_algorithm: Option<String>,
@@ -96,6 +98,7 @@ pub struct Upstream {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsSettings {
     pub min_version: Option<String>,
     pub max_version: Option<String>,
@@ -105,6 +108,7 @@ pub struct TlsSettings {
 
 /// A listening socket, shared by every domain bound to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Listener {
     pub addr: String,
     pub http2: Option<bool>,
@@ -154,6 +158,7 @@ impl PolicyBinding {
 /// `locations` list. There is no domain object in the data plane and this does not add
 /// one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Domain {
     /// One Location can serve several names; they are joined with commas, which is how
     /// `locations.<n>.host` is read.
@@ -177,11 +182,46 @@ pub struct Domain {
     pub policies: Vec<PolicyBinding>,
 }
 
+/// A TLS certificate: either a PEM pair, or an ACME issuer that produces one.
+///
+/// Exactly one of those two shapes is valid and [`generate`] refuses the rest. Half of
+/// either is worth refusing at projection rather than at handshake: `CertificateConf`'s own
+/// validation parses each half *only if present*, so a chain with no key passes it, loads
+/// nothing, and the server falls back to a self-signed certificate — a browser error
+/// nobody correlates with the control-plane write that caused it.
+///
+/// `tls_key` is stored and projected but **never returned by a read route**. The API layer
+/// owns that redaction; this type cannot, because the projection needs the value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Certificate {
+    /// Hostnames this certificate answers for, matched against SNI. Comma-joined into
+    /// `certificates.<n>.domains`.
+    pub domains: Vec<String>,
+    /// PEM chain. Present with `tls_key`, or absent with an `acme` issuer.
+    pub tls_cert: Option<String>,
+    /// PEM private key. Write-only at the API boundary.
+    pub tls_key: Option<String>,
+    pub is_default: Option<bool>,
+    /// A certificate authority rather than a leaf. Used for client-certificate chains.
+    pub is_ca: Option<bool>,
+    /// ACME directory name, e.g. `lets_encrypt`.
+    pub acme: Option<String>,
+    pub dns_challenge: Option<bool>,
+    /// `ali`, `cf`, `tencent`, `huawei` or `manual`. pingap-config rejects anything else.
+    pub dns_provider: Option<String>,
+    pub dns_service_url: Option<String>,
+    /// How many days before expiry to renew.
+    pub buffer_days: Option<u16>,
+    pub remark: Option<String>,
+}
+
 /// Everything the control plane knows, in one value.
 ///
 /// `BTreeMap` throughout rather than `HashMap`: this is the input to a hash that drift
 /// detection compares, so iteration order is part of the contract.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Intent {
     pub upstreams: BTreeMap<String, Upstream>,
     pub listeners: BTreeMap<String, Listener>,
@@ -190,6 +230,20 @@ pub struct Intent {
     /// The projection does not interpret these — the owning plugin validates its own
     /// parameters — it only checks that every binding names one that exists.
     pub policies: BTreeMap<String, PluginConf>,
+    /// Keyed by config-entry name. Unlike every other category these hold key material,
+    /// which is stored and projected but never returned by a read route.
+    ///
+    /// `#[serde(default)]` because a version row written before this category existed has
+    /// no such key, and rollback reads the *target* version's stored intent — without the
+    /// default, restoring an older version fails on a field it could never have had.
+    ///
+    /// Deliberately per-field and not on the container. A container-level default would
+    /// also accept an intent whose `domains` or `upstreams` key is missing or corrupt, and
+    /// project it as an *empty* config — committing a gateway with nothing configured while
+    /// reporting success. A missing `certificates` is a known older shape; a missing
+    /// `domains` is a corrupt row and must stay a loud failure.
+    #[serde(default)]
+    pub certificates: BTreeMap<String, Certificate>,
     /// Process-global, not per-domain: `basic.trusted_proxies` is one list for the whole
     /// process. A per-domain real-IP control is not expressible and must not be offered.
     pub trusted_proxies: Option<Vec<String>>,
@@ -225,9 +279,24 @@ impl Intent {
         "servers.<n>.enable_server_timing",
         "servers.<n>.modules",
         "servers.<n>.tls_min_version",
+        // Derived from a listener's `tls` block rather than configured: it is the only key
+        // that makes a pingap server terminate TLS, so leaving it out of the projection
+        // would leave TLS settings that do nothing.
+        "servers.<n>.global_certificates",
         "tls_max_version",
         "tls_cipher_list",
         "tls_ciphersuites",
+        "certificates.<n>.domains",
+        "certificates.<n>.tls_cert",
+        "certificates.<n>.tls_key",
+        "certificates.<n>.is_default",
+        "certificates.<n>.is_ca",
+        "certificates.<n>.acme",
+        "certificates.<n>.dns_challenge",
+        "certificates.<n>.dns_provider",
+        "certificates.<n>.dns_service_url",
+        "certificates.<n>.buffer_days",
+        "certificates.<n>.remark",
         "basic.trusted_proxies",
     ];
 }

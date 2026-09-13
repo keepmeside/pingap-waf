@@ -26,11 +26,48 @@ pub mod domains;
 pub(crate) mod intent_resource;
 pub mod listeners;
 pub mod policies;
+pub mod ssl;
 pub mod system;
 pub mod upstreams;
 pub mod users;
+pub mod waf;
 
-use crate::{ApiError, Caller, Result};
+use crate::{ApiError, AppState, Caller, Result};
+use pingap_controlplane::NewActivity;
+
+/// One activity row per mutation, naming who did what to which target.
+///
+/// Written by the handler rather than by the router, because only the handler knows the
+/// target it actually touched. The criterion is one row per mutation, so a handler that
+/// mutates twice writes twice — and one that returns an error before mutating writes none.
+///
+/// Config-shaped resources do not call this: the `Applier` writes the row, because it is the
+/// thing that knows the `ConfigVersion` the mutation produced.
+pub(crate) async fn audit(
+    state: &AppState,
+    actor: &Caller,
+    action: &str,
+    target: &str,
+    now: i64,
+) -> Result<()> {
+    state
+        .store
+        .record_activity(
+            NewActivity {
+                actor_id: Some(actor.user_id.clone()),
+                actor_username: actor.username.clone(),
+                action: action.to_string(),
+                target: target.to_string(),
+                config_version: None,
+                ip: None,
+                user_agent: None,
+                detail: None,
+            },
+            now,
+        )
+        .await?;
+    Ok(())
+}
 
 /// The first captured path segment, which for every resource route is its name.
 pub(crate) fn name(params: &[String]) -> Result<&str> {

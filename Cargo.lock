@@ -4587,6 +4587,7 @@ dependencies = [
  "http",
  "pingap-config",
  "pingap-controlplane",
+ "pingap-waf",
  "pretty_assertions",
  "serde",
  "serde_json",

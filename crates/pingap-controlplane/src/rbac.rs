@@ -73,8 +73,21 @@ pub enum Capability {
     ViewNodes,
     /// The user list. A viewer cannot see who else has access.
     ViewUsers,
-    /// One's *own* sessions. Everyone has this; it is how a user revokes their laptop.
+    /// One's *own* sessions. Everyone has this; it is how a user sees which devices are
+    /// signed in. The write half is [`Self::RevokeOwnSession`].
     ViewOwnSessions,
+    /// Read config as text, rather than as the intent resources the API projects it into.
+    ///
+    /// Admin only, and not because it is the write half that is dangerous. The config *is*
+    /// every secret this process holds, verbatim — TLS private keys, basic-auth credentials,
+    /// JWT signing keys — so reading it is reading all of them. Redacting it instead would
+    /// mean enumerating every key every plugin can hold, which is a denylist that leaks the
+    /// first time someone adds a plugin.
+    ///
+    /// A read and so not mutating: holding it back from a session that has not completed its
+    /// second factor would lock the admin's own config pages behind a challenge the rest of
+    /// the read surface does not ask for.
+    ViewRawConfig,
 
     // ---- traffic and policy ------------------------------------------------------
     EditDomain,
@@ -87,14 +100,26 @@ pub enum Capability {
     // ---- administrative ----------------------------------------------------------
     RestoreBackup,
     ManageUsers,
+    /// Revoke one's *own* session. Every role has it: a lost laptop is what it exists for,
+    /// and the alternative to cutting the session off is waiting for it to expire. It is a
+    /// mutation and so needs a completed second factor, which the blanket "a password-only
+    /// session may look but not touch" rule already requires of every non-`GET`.
+    RevokeOwnSession,
     /// Revoke someone else's session.
     RevokeAnySession,
     EnrolNode,
     RestartProcess,
+    /// Write config text straight to storage, past the projection.
+    ///
+    /// The escape hatch's write half. It is a capability rather than a role comparison in the
+    /// plugin so the power is named in the matrix beside the ones it sits with, and so the
+    /// second factor it requires is derived from `is_mutating` rather than remembered at the
+    /// call site. See [`Capability::ViewRawConfig`] for why the read is admin-only too.
+    WriteRawConfig,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 20] = [
+    pub const ALL: [Capability; 23] = [
         Capability::ViewConfig,
         Capability::ViewLogs,
         Capability::ViewMetrics,
@@ -104,6 +129,7 @@ impl Capability {
         Capability::ViewNodes,
         Capability::ViewUsers,
         Capability::ViewOwnSessions,
+        Capability::ViewRawConfig,
         Capability::EditDomain,
         Capability::EditUpstream,
         Capability::EditPolicy,
@@ -112,9 +138,11 @@ impl Capability {
         Capability::RunBackup,
         Capability::RestoreBackup,
         Capability::ManageUsers,
+        Capability::RevokeOwnSession,
         Capability::RevokeAnySession,
         Capability::EnrolNode,
         Capability::RestartProcess,
+        Capability::WriteRawConfig,
     ];
 
     /// Whether exercising this capability changes state.
@@ -135,6 +163,7 @@ impl Capability {
                 | Self::ViewNodes
                 | Self::ViewUsers
                 | Self::ViewOwnSessions
+                | Self::ViewRawConfig
         )
     }
 }
@@ -162,6 +191,7 @@ impl Role {
                     | ViewBackups
                     | ViewNodes
                     | ViewOwnSessions
+                    | RevokeOwnSession
                     | EditDomain
                     | EditUpstream
                     | EditPolicy
@@ -179,6 +209,7 @@ impl Role {
                     | ViewBackups
                     | ViewNodes
                     | ViewOwnSessions
+                    | RevokeOwnSession
             ),
         }
     }
@@ -254,8 +285,27 @@ mod tests {
     fn a_viewer_is_refused_every_mutating_capability() {
         // Enumerated over the capability list rather than asserted on a middleware, so a
         // capability added later is covered whether or not anyone remembers this test.
+        //
+        // One exception, named and pinned: revoking your own session is a mutation every
+        // role holds, because the alternative to a user cutting off their own lost laptop is
+        // an administrator doing it for them. Asserted as a complete list rather than a
+        // predicate, so a second exception fails here instead of quietly widening what a
+        // viewer may change. `every_role_can_manage_its_own_sessions` asserts the other side
+        // of it — that the one exception is really held, not merely excused.
+        let mutating_and_viewer_visible: Vec<Capability> = Capability::ALL
+            .into_iter()
+            .filter(|capability| {
+                capability.is_mutating() && Role::Viewer.allows(*capability)
+            })
+            .collect();
+        assert_eq!(
+            mutating_and_viewer_visible,
+            vec![Capability::RevokeOwnSession],
+            "the set of mutating capabilities a viewer holds changed"
+        );
+
         for capability in Capability::ALL {
-            if !capability.is_mutating() {
+            if !capability.is_mutating() || Role::Viewer.allows(capability) {
                 continue;
             }
             assert_eq!(
@@ -343,6 +393,49 @@ mod tests {
     }
 
     #[test]
+    fn the_raw_config_surface_is_the_admins_alone() {
+        // Reading config as text is reading every secret the process holds — TLS private
+        // keys, basic-auth credentials, JWT signing keys — because the config is where they
+        // live. So the read is denied to the same roles as the write, which is true of no
+        // other read capability in the matrix, and the reason these two are asserted
+        // together rather than left to the generic viewer gate.
+        for capability in
+            [Capability::ViewRawConfig, Capability::WriteRawConfig]
+        {
+            for role in [Role::Operator, Role::Viewer] {
+                assert_eq!(
+                    authorize(role, AuthLevel::TwoFactor, capability),
+                    Err(Denial::Role),
+                    "{role:?} was allowed {capability:?}"
+                );
+            }
+            assert_eq!(
+                authorize(Role::Admin, AuthLevel::TwoFactor, capability),
+                Ok(())
+            );
+        }
+        // The read is still a read: refusing it to a session that has not completed its
+        // second factor would lock the admin's own config pages behind a challenge no other
+        // read surface asks for. The write is not a read, and is refused until they do.
+        assert_eq!(
+            authorize(
+                Role::Admin,
+                AuthLevel::PasswordOnly,
+                Capability::ViewRawConfig
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            authorize(
+                Role::Admin,
+                AuthLevel::PasswordOnly,
+                Capability::WriteRawConfig
+            ),
+            Err(Denial::SecondFactorRequired)
+        );
+    }
+
+    #[test]
     fn an_admin_has_every_capability() {
         for capability in Capability::ALL {
             assert_eq!(
@@ -399,7 +492,7 @@ mod tests {
         );
         assert_eq!(
             Capability::ALL.iter().filter(|c| c.is_mutating()).count(),
-            11,
+            13,
             "the mutating/read split moved; check both the viewer gate and the \
              second-factor requirement, which are derived from it"
         );
@@ -407,16 +500,37 @@ mod tests {
 
     #[test]
     fn every_role_can_manage_its_own_sessions() {
-        // How a user revokes the laptop they lost. Withholding it from a viewer would
-        // mean an administrator has to do it for them.
+        // How a user sees the laptop they lost, and then cuts it off. Withholding either
+        // from a viewer would mean an administrator has to do it for them.
         for role in Role::ALL {
+            for capability in
+                [Capability::ViewOwnSessions, Capability::RevokeOwnSession]
+            {
+                assert_eq!(
+                    authorize(role, AuthLevel::TwoFactor, capability),
+                    Ok(()),
+                    "{role:?} was refused {capability:?}"
+                );
+            }
+            // The listing is a read and the revocation is not, so only the revocation waits
+            // on the second factor. That split is why these are two capabilities rather than
+            // one: a single capability would have to be non-mutating to keep the listing
+            // reachable, and would then let a password-only session cut one off.
             assert_eq!(
                 authorize(
                     role,
-                    AuthLevel::TwoFactor,
+                    AuthLevel::PasswordOnly,
                     Capability::ViewOwnSessions
                 ),
                 Ok(())
+            );
+            assert_eq!(
+                authorize(
+                    role,
+                    AuthLevel::PasswordOnly,
+                    Capability::RevokeOwnSession
+                ),
+                Err(Denial::SecondFactorRequired)
             );
         }
     }

@@ -14,9 +14,9 @@
 
 //! Users. Reading is `ViewUsers`, changing anything is `ManageUsers`.
 
-use super::{caller, now_sec};
+use super::{audit, caller, now_sec};
 use crate::{ApiError, ApiRequest, ApiResponse, AppState, Result};
-use pingap_controlplane::{NewActivity, NewUser, Role, hash_password};
+use pingap_controlplane::{NewUser, Role, hash_password};
 use serde::{Deserialize, Serialize};
 
 /// A user as any reader sees them. Built field by field, so the password hash cannot reach a
@@ -152,35 +152,4 @@ pub async fn update(
             }
         })?,
     ))
-}
-
-/// One activity row per mutation, naming who did what to which target.
-///
-/// Written by the handler rather than by the router, because only the handler knows the
-/// target it actually touched. The criterion is one row per mutation, so a handler that
-/// mutates twice writes twice — and one that returns an error before mutating writes none.
-async fn audit(
-    state: &AppState,
-    actor: &crate::Caller,
-    action: &str,
-    target: &str,
-    now: i64,
-) -> Result<()> {
-    state
-        .store
-        .record_activity(
-            NewActivity {
-                actor_id: Some(actor.user_id.clone()),
-                actor_username: actor.username.clone(),
-                action: action.to_string(),
-                target: target.to_string(),
-                config_version: None,
-                ip: None,
-                user_agent: None,
-                detail: None,
-            },
-            now,
-        )
-        .await?;
-    Ok(())
 }

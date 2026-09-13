@@ -1,6 +1,6 @@
 //! Intent to config, totally and deterministically.
 //!
-//! Every reference is resolved here rather than left for `pingap -t` or for runtime,
+//! Every reference is resolved here rather than left for `pingap-waf -t` or for runtime,
 //! because the failure modes downstream are silent: pingap drops a plugin name it cannot
 //! resolve with no error and no log, and an empty plugin list means "continue to
 //! upstream". A dangling policy binding must therefore be a message from this function,
@@ -8,10 +8,13 @@
 
 use super::hash::canonical_toml;
 use super::{
-    Domain, Intent, Listener, Projected, ProjectionError, Result, Upstream,
+    Certificate, Domain, Intent, Listener, Projected, ProjectionError, Result,
+    Upstream,
 };
 use bytesize::ByteSize;
-use pingap_config::{LocationConf, PingapConfig, ServerConf, UpstreamConf};
+use pingap_config::{
+    CertificateConf, LocationConf, PingapConfig, ServerConf, UpstreamConf,
+};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -74,6 +77,18 @@ pub fn generate(intent: &Intent) -> Result<Projected> {
     }
 
     for (name, listener) in &intent.listeners {
+        // `global_certificates` is the only key that makes a pingap server terminate TLS,
+        // so a listener that asks for TLS settings and has nothing to serve is refused
+        // here rather than left to fall back to a self-signed certificate at handshake.
+        if listener.tls.is_some() && intent.certificates.is_empty() {
+            return Err(ProjectionError::BadValue {
+                field: format!("listener `{name}`.tls"),
+                value: "tls settings".to_string(),
+                reason: "no certificate is defined, so there is nothing to \
+                         terminate TLS with"
+                    .to_string(),
+            });
+        }
         config.servers.insert(
             name.clone(),
             server_conf(
@@ -82,6 +97,12 @@ pub fn generate(intent: &Intent) -> Result<Projected> {
                 wants_grpc_web.get(name.as_str()).copied().unwrap_or(false),
             ),
         );
+    }
+
+    for (name, certificate) in &intent.certificates {
+        config
+            .certificates
+            .insert(name.clone(), certificate_conf(name, certificate)?);
     }
 
     for (name, plugin) in &intent.policies {
@@ -112,6 +133,64 @@ fn upstream_conf(upstream: &Upstream) -> UpstreamConf {
         verify_cert: upstream.verify_cert,
         ..Default::default()
     }
+}
+
+/// One certificate, refusing the shapes that load nothing.
+///
+/// `CertificateConf::validate` parses `tls_cert` and `tls_key` only when they are present,
+/// so "a chain and no key" is not an error it can catch — and the server then serves a
+/// self-signed certificate instead, which reaches the operator as a browser warning with no
+/// trail back to the write that caused it. The invariant is checked here, where the reason
+/// can name the entry.
+fn certificate_conf(
+    name: &str,
+    certificate: &Certificate,
+) -> Result<CertificateConf> {
+    let present =
+        |value: &Option<String>| value.as_ref().is_some_and(|v| !v.is_empty());
+    let has_chain = present(&certificate.tls_cert);
+    let has_key = present(&certificate.tls_key);
+    let has_acme = present(&certificate.acme);
+
+    if has_chain != has_key {
+        return Err(ProjectionError::BadValue {
+            field: format!("certificate `{name}`"),
+            value: if has_chain {
+                "tls_cert with no tls_key".to_string()
+            } else {
+                "tls_key with no tls_cert".to_string()
+            },
+            reason: "a manual certificate needs both PEM halves, and an ACME \
+                     one needs neither"
+                .to_string(),
+        });
+    }
+    if !has_chain && !has_acme {
+        return Err(ProjectionError::BadValue {
+            field: format!("certificate `{name}`"),
+            value: "no PEM pair and no ACME issuer".to_string(),
+            reason:
+                "there is nothing to serve and nothing that will obtain one"
+                    .to_string(),
+        });
+    }
+
+    Ok(CertificateConf {
+        // Comma-joined, which is how SNI matching reads it. Empty means "no host
+        // restriction", so an empty list is emitted as absent rather than as "".
+        domains: (!certificate.domains.is_empty())
+            .then(|| certificate.domains.join(",")),
+        tls_cert: certificate.tls_cert.clone(),
+        tls_key: certificate.tls_key.clone(),
+        is_default: certificate.is_default,
+        is_ca: certificate.is_ca,
+        acme: certificate.acme.clone(),
+        dns_challenge: certificate.dns_challenge,
+        dns_provider: certificate.dns_provider.clone(),
+        dns_service_url: certificate.dns_service_url.clone(),
+        buffer_days: certificate.buffer_days,
+        remark: certificate.remark.clone(),
+    })
 }
 
 fn location_conf(name: &str, domain: &Domain) -> Result<LocationConf> {
@@ -178,6 +257,12 @@ fn server_conf(
         tls_max_version: tls.max_version,
         tls_cipher_list: tls.cipher_list,
         tls_ciphersuites: tls.ciphersuites,
+        // Derived, not configured, and the reason a `tls` block is not inert. `pingap-proxy`
+        // sets `is_tls` from this flag alone, so version and cipher settings on a server
+        // without it apply to a plaintext listener. Written as absent rather than `false`
+        // for the same reason `grpc_web` is: the two mean the same thing to pingap and
+        // emitting the default would show up as a content change for no behaviour.
+        global_certificates: listener.tls.is_some().then_some(true),
         // gRPC-web needs two keys at two levels: the Location opts in and the Server must
         // load the module. Setting only one is a silent no-op, so the module is derived
         // from the domains rather than configured separately.

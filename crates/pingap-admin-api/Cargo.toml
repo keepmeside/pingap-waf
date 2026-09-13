@@ -23,6 +23,11 @@ bytes = { workspace = true }
 pingap-controlplane = { workspace = true }
 # Config-shaped resources are stored as intent and projected, never written directly.
 pingap-config = { workspace = true }
+# The WAF's category table and its CRS lineage, for the read that tells a UI what a
+# category is and which modes it accepts. Default features only, which is the engine
+# without the pingora plugin: `categories` and `config` are pure Rust, so this adds no
+# `*-sys` crate to the API's graph and no `#[ctor]` registration to the process.
+pingap-waf = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

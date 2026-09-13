@@ -452,6 +452,7 @@ mod tests {
             listeners,
             domains,
             policies,
+            certificates: BTreeMap::new(),
             trusted_proxies: None,
         }
     }

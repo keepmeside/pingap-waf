@@ -110,7 +110,9 @@ impl Category {
     /// Load-bearing: response-side categories cannot deny. The body hook's result
     /// type has no `Respond` variant and the status line is already downstream by
     /// the time it runs, so the strongest available action is rewriting bytes.
-    /// [`crate::config::CategoryMode`] enforces the consequence.
+    /// [`RequestMode`](crate::config::RequestMode) and
+    /// [`ResponseMode`](crate::config::ResponseMode) are separate types so a
+    /// config cannot express the consequence.
     pub const fn is_response_side(self) -> bool {
         matches!(self, Self::DataLeakage | Self::WebShell)
     }

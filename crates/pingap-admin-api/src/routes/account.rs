@@ -15,13 +15,14 @@
 //! The caller's own account.
 //!
 //! Everything here is scoped to the caller by the handler, not by the role gate. That is the
-//! distinction `Capability::ViewOwnSessions` encodes: every role has it, so the router lets a
-//! viewer through, and it is this module's job to make sure what comes back is theirs. A
-//! handler here that took a user id from the path or the body would turn a capability every
-//! role holds into a way to read any account.
+//! distinction `Capability::ViewOwnSessions` and `Capability::RevokeOwnSession` encode: every
+//! role has both, so the router lets a viewer through, and it is this module's job to make
+//! sure what comes back — and what is acted on — is theirs. A handler here that took a user id
+//! from the path or the body would turn a capability every role holds into a way to read any
+//! account, or to cut off any session.
 
-use super::{caller, now_sec};
-use crate::{ApiRequest, ApiResponse, AppState, Result};
+use super::{audit, caller, now_sec};
+use crate::{ApiError, ApiRequest, ApiResponse, AppState, Result};
 use pingap_controlplane::{AuthLevel, Role};
 use serde::Serialize;
 
@@ -112,4 +113,41 @@ pub async fn own_sessions(
         })
         .collect();
     ApiResponse::json(&view)
+}
+
+/// Cut off one of the caller's own sessions.
+///
+/// Ownership is established by looking the id up in the caller's own listing rather than by
+/// reading the session and comparing its `user_id`. `revoke_session` takes no user id, so a
+/// handler that passed the path straight to it would let any user revoke any session — a
+/// denial of service against an administrator, from a route every role can reach.
+///
+/// Someone else's session, an unknown id, and one already revoked or expired all answer 404.
+/// One status for all three because they are the same fact from where the caller stands: not
+/// a session of yours that can be revoked. Distinguishing them would confirm which ids
+/// exist. It also means a repeat request writes no audit row — an entry claiming a revocation
+/// that this call did not perform.
+pub async fn revoke_session(
+    state: &AppState,
+    request: &ApiRequest,
+    params: &[String],
+) -> Result<ApiResponse> {
+    let caller = caller(request)?;
+    let id = params.first().ok_or_else(|| ApiError::BadRequest {
+        reason: "no session id in the path".to_string(),
+    })?;
+    let now = now_sec();
+    let own = state.store.list_sessions(&caller.user_id).await?;
+    let revoked = own
+        .iter()
+        .any(|session| session.id == *id && session.is_usable(now));
+    if !revoked {
+        return Err(ApiError::NotFound {
+            kind: "session".to_string(),
+            id: id.clone(),
+        });
+    }
+    state.store.revoke_session(id, now).await?;
+    audit(state, caller, "session.revoke", id, now).await?;
+    Ok(ApiResponse::no_content())
 }

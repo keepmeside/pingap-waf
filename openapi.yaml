@@ -1,0 +1,1989 @@
+openapi: 3.0.3
+
+# The admin API. Checked against the route table by
+# `crates/pingap-admin-api/tests/openapi.rs`, in both directions: a route with no operation
+# here fails, and an operation here with no route fails unless it is one of the retained
+# paths that test names.
+#
+# `x-required-capability` on every operation is the access decision the router makes, in the
+# same spelling the role matrix serialises to. It is not documentation — the test compares it
+# against `Route::access`, so a spec that says `view_config` on a route the table guards with
+# `edit_domain` fails.
+#
+# Config-shaped resources (`/domains`, `/upstreams`, `/listeners`, `/policies`, `/ssl`) all
+# behave the same way, and the sameness is the point:
+#
+#   - `PUT` replaces the whole entry. There is no patch, because "absent means unchanged"
+#     makes a field impossible to clear.
+#   - A write regenerates the entire config from stored intent, validates it, commits it, and
+#     reads the data plane back. `200` means the gateway is enforcing it. `409` means it is
+#     not, and the body says why and what was restored.
+#   - Request bodies carry `additionalProperties: false` because the DTOs carry
+#     `#[serde(deny_unknown_fields)]`. A key the contract does not name is a 400, not a
+#     silently dropped setting.
+#
+# See docs/config-projection.md for the apply sequence and docs/domain-model.md for the
+# field-by-field mapping onto pingap's config keys.
+
+info:
+  title: pingap-waf admin API
+  version: 0.13.10
+  description: |
+    Control plane for the gateway: accounts and roles, the config resources that are stored
+    as intent and projected, and the version history the projection produces.
+
+    Served by the same process as the data plane, on the admin listener only, under `/api`.
+    Every route except `GET /health` and `POST /auth/login` needs a session.
+
+    A mutation records one activity row. A config mutation additionally records a
+    `ConfigVersion`, and is reported as `applied` only once the data plane has been read back
+    and found to be enforcing it.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: /api
+    description: The admin listener. Bound to an explicit interface, never `0.0.0.0`.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: health
+    description: Liveness, for a load balancer.
+  - name: auth
+    description: Login, second factor, logout. Retained surface.
+  - name: account
+    description: The caller's own account and sessions.
+  - name: users
+    description: Account administration.
+  - name: config
+    description: Intent resources, written through the projection.
+  - name: versions
+    description: Config versions, drift and rollback.
+  - name: audit
+    description: The activity log.
+  - name: retained
+    description: |
+      Raw config text and process control, answered before the route table. Admin only, and
+      a write through it bypasses the projection: no version row, no validation, no
+      post-commit verification, and drift detection will legitimately flag the result.
+      See docs/api-parity.md.
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Liveness, unauthenticated
+      description: |
+        `status` answers for the process and `store` for the admin surface, because the
+        gateway is required to keep serving with the control-plane store down. A caller that
+        conflates them takes a serving node out of rotation over a database file.
+
+        Two fields and nothing else: no version, build, pid or store path.
+      security: []
+      x-required-capability: public
+      responses:
+        '200':
+          description: The gateway is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /account:
+    get:
+      tags: [account]
+      operationId: getAccount
+      summary: The caller's own profile
+      description: >
+        No password hash and no second-factor secret. `auth_level` comes from the session
+        rather than the user row: the role is what this account is, the auth level is what
+        this session has done, and a UI deciding whether to prompt for a TOTP code is asking
+        about the session.
+      x-required-capability: authenticated
+      responses:
+        '200':
+          description: The caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /account/sessions:
+    get:
+      tags: [account]
+      operationId: listOwnSessions
+      summary: The caller's own sessions
+      description: >
+        Scoped to the caller by the handler, not by the gate — every role holds the
+        capability. No token, hashed or otherwise: the listing exists so an operator can
+        recognise a device and cut it off, which needs the address, the agent and the times.
+      x-required-capability: view_own_sessions
+      responses:
+        '200':
+          description: Sessions belonging to the caller, revoked and expired ones included.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SessionView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /account/sessions/{id}:
+    delete:
+      tags: [account]
+      operationId: revokeOwnSession
+      summary: Cut off one of the caller's own sessions
+      description: |
+        Ownership is established against the caller's own listing, never against the path.
+        `revoke_session` takes no user id, so a handler that passed the path straight to it
+        would let any user revoke any session — a denial of service against an administrator
+        from the lowest-privileged role in the system.
+
+        Someone else's session, an unknown id, and one already revoked or expired all answer
+        `404`. One status for all three because they are the same fact from where the caller
+        stands, and distinguishing them would confirm which ids exist. It also means a repeat
+        request writes no audit row claiming a revocation it did not perform.
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      x-required-capability: revoke_own_session
+      responses:
+        '204':
+          description: Revoked. Takes effect on the next request that presents the token.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /users:
+    get:
+      tags: [users]
+      operationId: listUsers
+      summary: Every account
+      description: >
+        Not available to a viewer: knowing who else holds access is itself administrative.
+      x-required-capability: view_users
+      responses:
+        '200':
+          description: Accounts, without their password hashes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [users]
+      operationId: createUser
+      summary: Create an account
+      x-required-capability: manage_users
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUser'
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: The username or the email is taken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /users/{id}:
+    patch:
+      tags: [users]
+      operationId: updateUser
+      summary: Activate or deactivate an account
+      description: >
+        Activation only. Role reassignment is not offered because the store has no method
+        that writes `role`, and accepting a field this handler cannot honour is the failure
+        this API refuses everywhere else. Deactivating an account cuts off its open sessions.
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      x-required-capability: manage_users
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUser'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /domains:
+    get:
+      tags: [config]
+      operationId: listDomains
+      summary: Every domain
+      x-required-capability: view_config
+      responses:
+        '200':
+          $ref: '#/components/responses/DomainMap'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+
+  /domains/{name}:
+    parameters:
+      - $ref: '#/components/parameters/Name'
+    get:
+      tags: [config]
+      operationId: getDomain
+      summary: One domain
+      description: >
+        A domain is intent, not a data-plane object. pingap has a Server, a Location and an
+        Upstream; the projection turns one domain into a Location plus a membership in its
+        listener's location list. See docs/domain-model.md.
+      x-required-capability: view_config
+      responses:
+        '200':
+          description: The domain.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+    put:
+      tags: [config]
+      operationId: putDomain
+      summary: Create or replace a domain
+      description: |
+        Regenerates the whole config and applies it. `200` means the gateway is enforcing the
+        result; `409` means it is not, and the body says why and what was restored.
+
+        A domain naming an upstream or listener that does not exist is a `400`: generation is
+        total, so a dangling reference cannot be filled in later, and pingap drops a name it
+        cannot resolve with no error and no log.
+      x-required-capability: edit_domain
+      requestBody:
+        $ref: '#/components/requestBodies/Domain'
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+    delete:
+      tags: [config]
+      operationId: deleteDomain
+      summary: Remove a domain
+      description: >
+        A name that is not there is `404` rather than a silent success: the projection is
+        total, so a delete that matched nothing would still write a version and an audit row
+        claiming a removal.
+      x-required-capability: edit_domain
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+
+  /upstreams:
+    get:
+      tags: [config]
+      operationId: listUpstreams
+      summary: Every upstream
+      x-required-capability: view_config
+      responses:
+        '200':
+          $ref: '#/components/responses/UpstreamMap'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+
+  /upstreams/{name}:
+    parameters:
+      - $ref: '#/components/parameters/Name'
+    get:
+      tags: [config]
+      operationId: getUpstream
+      summary: One upstream
+      x-required-capability: view_config
+      responses:
+        '200':
+          description: The upstream.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Upstream'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+    put:
+      tags: [config]
+      operationId: putUpstream
+      summary: Create or replace an upstream
+      description: >
+        `weight` is a field of each backend rather than part of its address string. pingap
+        reads `"10.0.0.1:8080 5"` — address and weight space-separated — and accepting that
+        pre-formatted would let an operator type `"10.0.0.1:8080 five"`, which projects into
+        a config the discovery layer silently reads as weight 1.
+      x-required-capability: edit_upstream
+      requestBody:
+        $ref: '#/components/requestBodies/Upstream'
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+    delete:
+      tags: [config]
+      operationId: deleteUpstream
+      summary: Remove an upstream
+      x-required-capability: edit_upstream
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+
+  /listeners:
+    get:
+      tags: [config]
+      operationId: listListeners
+      summary: Every listener
+      x-required-capability: view_config
+      responses:
+        '200':
+          $ref: '#/components/responses/ListenerMap'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+
+  /listeners/{name}:
+    parameters:
+      - $ref: '#/components/parameters/Name'
+    get:
+      tags: [config]
+      operationId: getListener
+      summary: One listener
+      description: >
+        Separate from domains because several domains sit on one listener, and the projection
+        derives each listener's location list from the domains rather than having an operator
+        maintain it twice.
+      x-required-capability: view_config
+      responses:
+        '200':
+          description: The listener.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Listener'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+    put:
+      tags: [config]
+      operationId: putListener
+      summary: Create or replace a listener
+      description: |
+        TLS termination is derived, not configured. `servers.<n>.global_certificates` is the
+        only key that makes pingap treat a server as TLS, so it is projected from the presence
+        of `tls` and is not settable. Offering it would allow the two states that do not work:
+        TLS versions and ciphers applying to a plaintext socket, and a TLS listener that
+        cannot be turned off.
+
+        A listener with a `tls` block and no certificate defined anywhere in the intent is a
+        `400`: there would be nothing to serve, and the handshake would fall back to a
+        self-signed certificate, reaching an operator as a browser warning with no trail back
+        to the write that caused it.
+      x-required-capability: edit_domain
+      requestBody:
+        $ref: '#/components/requestBodies/Listener'
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+    delete:
+      tags: [config]
+      operationId: deleteListener
+      summary: Remove a listener
+      x-required-capability: edit_domain
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+
+  /policies:
+    get:
+      tags: [config]
+      operationId: listPolicies
+      summary: Every policy profile
+      x-required-capability: view_config
+      responses:
+        '200':
+          $ref: '#/components/responses/PolicyMap'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+
+  /policies/{name}:
+    parameters:
+      - $ref: '#/components/parameters/Name'
+    get:
+      tags: [config]
+      operationId: getPolicy
+      summary: One policy profile
+      x-required-capability: view_config
+      responses:
+        '200':
+          description: The profile's own config table.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginConf'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+    put:
+      tags: [config]
+      operationId: putPolicy
+      summary: Create or replace a policy profile
+      description: |
+        WAF, ACL and bot profiles under one route, because they are one map. A profile is
+        named `category:profile` — `waf:strict`, `acl:edge` — and that naming is the isolation
+        mechanism, not a convention: a plugin instance is process-global and keyed by its
+        config-entry name, so two domains that must count independently have to bind two
+        *different* profiles.
+
+        The body is the plugin's own config table, uninterpreted here. The projection's gate
+        asks the real plugin factory whether the table constructs before anything is
+        committed, so a profile whose regex is quadratic, whose paranoia is out of range, or
+        whose category this build does not have is refused with the reason — rather than
+        accepted and silently absent at reload.
+      x-required-capability: edit_policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PluginConf'
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+    delete:
+      tags: [config]
+      operationId: deletePolicy
+      summary: Remove a policy profile
+      x-required-capability: edit_policy
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+
+  /ssl:
+    get:
+      tags: [config]
+      operationId: listCertificates
+      summary: Every certificate, without its private key
+      x-required-capability: view_config
+      responses:
+        '200':
+          $ref: '#/components/responses/CertificateViewMap'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+
+  /ssl/{name}:
+    parameters:
+      - $ref: '#/components/parameters/Name'
+    get:
+      tags: [config]
+      operationId: getCertificate
+      summary: One certificate, without its private key
+      description: >
+        Mounted at `/ssl`, the reference product's path for this resource. `/certificates` is
+        the retained route that answers from the *running* provider — what is loaded and when
+        it expires — and this is the definition that provider is built from.
+      x-required-capability: view_config
+      responses:
+        '200':
+          description: The certificate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/PendingVersion'
+    put:
+      tags: [config]
+      operationId: putCertificate
+      summary: Create or replace a certificate
+      description: |
+        Exactly one of two shapes is valid: a PEM pair, or an ACME issuer and neither PEM
+        half. The half-shapes are refused here rather than at handshake, because pingap's own
+        certificate validation parses each PEM half *only if present* — so a chain with no key
+        passes it, loads nothing, and the server serves a self-signed certificate instead.
+
+        **`tls_key` may be omitted, and that is the one field where omission does not mean
+        clear.** The read routes never return it, so a `PUT` that replaced the whole entry
+        would demand a secret the server just refused to hand back. Omitting it means "keep the
+        stored one", and that is unambiguous rather than a special case: a chain with no key
+        is not a valid certificate, so there is no "clear the key" state to confuse it with.
+        Switching to an issued certificate clears both halves at once.
+      x-required-capability: edit_certificate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Certificate'
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+    delete:
+      tags: [config]
+      operationId: deleteCertificate
+      summary: Remove a certificate
+      x-required-capability: edit_certificate
+      responses:
+        '200':
+          $ref: '#/components/responses/Applied'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+
+  /config-versions:
+    get:
+      tags: [versions]
+      operationId: listConfigVersions
+      summary: Version history, newest first
+      description: >
+        Without the stored intent: a listing is for choosing a version, and the intent can
+        carry TLS key references and access-list credentials.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      x-required-capability: view_config
+      responses:
+        '200':
+          description: Versions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VersionView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /config-versions/{id}/rollback:
+    post:
+      tags: [versions]
+      operationId: rollbackConfigVersion
+      summary: Restore an earlier version
+      description: |
+        Regenerates from the target version's stored intent and runs the whole apply —
+        validate, commit, verify — so a restored config is confirmed enforcing exactly like
+        any other, and records its own version rather than reusing the target's.
+
+        A version that was never `applied` is refused: "the config the gateway is running" and
+        "the intent an operator chose" are different facts, and restoring one nobody confirmed
+        would be a guess.
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      x-required-capability: edit_domain
+      responses:
+        '200':
+          description: Restored, and confirmed enforcing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollbackResult'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/NotApplied'
+
+  /activity:
+    get:
+      tags: [audit]
+      operationId: listActivity
+      summary: The audit trail, newest first
+      description: >
+        Ranges rather than offsets, because the log only grows and an offset shifts under a
+        concurrent insert. An unparseable filter value is ignored rather than refused: the
+        range is a filter, and answering a malformed `since` with `400` would break an
+        operator's bookmarked URL when the parameter's shape changed.
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+        - $ref: '#/components/parameters/Limit'
+      x-required-capability: view_events
+      responses:
+        '200':
+          description: Activity rows.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Activity'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /waf/categories:
+    get:
+      tags: [config]
+      operationId: listWafCategories
+      summary: What this build's WAF can enforce
+      description: |
+        A read over the compiled-in category table, not over intent — there is nothing to
+        store and nothing to project. What a profile sets is written through
+        `PUT /policies/waf:<profile>`; this is the vocabulary it is written in.
+
+        `modes` is the load-bearing field. A response-side category cannot block: the body
+        hook's result type has no `Respond` variant and the status line is already downstream
+        by the time it runs, so `redact` is the strongest thing it can do. The set is read off
+        the engine's two mode enums rather than spelled out here.
+
+        `crs_group` and `crs_file` are a **lineage mapping, not a compatibility claim** — no
+        promise that an arbitrary CRS `.conf` loads. See docs/waf-category-mapping.md.
+      x-required-capability: view_config
+      responses:
+        '200':
+          description: Every category, in CRS numeric order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WafCategory'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ---- retained surface ---------------------------------------------------------------
+  #
+  # Answered by src/plugin/admin.rs before the route table, so the shapes here are upstream's
+  # except where this fork changed them. They are documented rather than left out because a
+  # client of this API reaches them, and the capability annotations are enforced by the same
+  # gate the router uses.
+
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Exchange a password for a session token
+      description: |
+        Rate-limited per IP. A wrong password and an unknown user are the same answer.
+
+        `--admin user:pass` is a bootstrap credential: it is consulted only to create the
+        first account, and never again once any user exists.
+
+        When `auth_level` is `password_only` the account has a second factor enrolled and the
+        caller may read but not mutate until `POST /auth/totp` completes it.
+      security: []
+      x-required-capability: public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Wrong credentials, or a deactivated account.
+        '403':
+          description: Too many failures from this address.
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+
+  /auth/totp:
+    post:
+      tags: [auth]
+      operationId: completeTotp
+      summary: Complete the second factor
+      description: >
+        A replayed code is indistinguishable from a wrong one, and a code spent by one user is
+        still available to another.
+      x-required-capability: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpRequest'
+      responses:
+        '204':
+          description: The session is promoted to `two_factor`.
+        '401':
+          description: The code was wrong, or already spent.
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Revoke the current session
+      x-required-capability: authenticated
+      responses:
+        '204':
+          description: Revoked. The token is refused from the next request.
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: authMe
+      summary: The session, as the login flow sees it
+      x-required-capability: authenticated
+      responses:
+        '200':
+          description: Username, role and auth level.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [username, role, auth_level]
+                properties:
+                  username:
+                    type: string
+                  role:
+                    $ref: '#/components/schemas/Role'
+                  auth_level:
+                    $ref: '#/components/schemas/AuthLevel'
+
+  /basic:
+    get:
+      tags: [retained]
+      operationId: getBasicInfo
+      summary: Process and system introspection
+      description: >
+        Upstream's shape, which this fork does not own: version, build, kernel, pid, threads,
+        memory, feature flags, upstream health, and the current config hash. Authenticated,
+        and never reachable without a session — `GET /health` is the unauthenticated liveness
+        route and carries none of this.
+      x-required-capability: authenticated
+      responses:
+        '200':
+          description: System information.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+
+  /certificates:
+    get:
+      tags: [retained]
+      operationId: listLoadedCertificates
+      summary: What the running provider has loaded
+      description: |
+        Live state, not intent — expiry, issuer, domains and ACME state, read off the
+        certificate provider rather than out of the config.
+
+        Returns no key material. The provider's certificate struct carries the PEM private key
+        and derives `Serialize`, so serialising it put every loaded key into this response
+        body; the fields are now named explicitly.
+      x-required-capability: view_raw_config
+      responses:
+        '200':
+          description: Loaded certificates, by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/LoadedCertificate'
+
+  /configs/{category}:
+    get:
+      tags: [retained]
+      operationId: getConfigCategory
+      summary: Read a config category as text
+      description: |
+        **Admin only, and the read is the half that cannot be narrowed.** The config is every
+        secret this process holds, verbatim — TLS private keys, basic-auth credentials, JWT
+        signing keys — so reading it is reading all of them. Redacting it instead would mean
+        enumerating every key every plugin can hold, which is a denylist that leaks the first
+        time someone adds a plugin.
+
+        `category` may be `full`, which returns TOML, HCL and KDL renderings together. Any
+        further path segment is ignored on a read: the handler is given the category and
+        answers with all of it.
+      parameters:
+        - $ref: '#/components/parameters/Category'
+      x-required-capability: view_raw_config
+      responses:
+        '200':
+          description: The category's entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /configs/{category}/{name}:
+    parameters:
+      - $ref: '#/components/parameters/Category'
+      - $ref: '#/components/parameters/EntryName'
+    post:
+      tags: [retained]
+      operationId: putConfigEntry
+      summary: Write one config entry directly
+      description: |
+        The escape hatch. **Bypasses the projection**: no version row, no validation gate, no
+        post-commit verification, and drift detection will legitimately flag the result.
+        Prefer the `/domains`, `/upstreams`, `/listeners`, `/policies` and `/ssl` routes, which
+        are the same edits with those guarantees.
+      x-required-capability: write_raw_config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '204':
+          description: Written.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    delete:
+      tags: [retained]
+      operationId: deleteConfigEntry
+      summary: Remove one config entry directly
+      description: Refused while the entry is still referenced by a location or a server.
+      x-required-capability: write_raw_config
+      responses:
+        '204':
+          description: Removed.
+        '400':
+          description: Still referenced, or the URL named no entry.
+
+  /configs/import:
+    post:
+      tags: [retained]
+      operationId: importConfig
+      summary: Replace the whole config from a submitted document
+      description: |
+        The body is TOML, not JSON — it is handed straight to `save_all`. Same guarantees as
+        `putConfigEntry`, which is to say none of the projection's.
+      x-required-capability: write_raw_config
+      requestBody:
+        required: true
+        content:
+          application/toml:
+            schema:
+              type: string
+              description: A complete pingap config document.
+      responses:
+        '204':
+          description: Imported.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /config-history/{category}/{name}:
+    get:
+      tags: [retained]
+      operationId: getConfigHistory
+      summary: Previous values of one config entry
+      description: >
+        pingap's own per-entry history, which only the etcd backend keeps. Gated as raw config
+        because a historical `certificate` entry contains the key that was in it at the time.
+      parameters:
+        - $ref: '#/components/parameters/Category'
+        - $ref: '#/components/parameters/EntryName'
+      x-required-capability: view_raw_config
+      responses:
+        '200':
+          description: History entries, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [history]
+                properties:
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      required: [created_at, data]
+                      properties:
+                        created_at:
+                          type: integer
+                          format: int64
+                        data:
+                          type: object
+                          additionalProperties: true
+        '400':
+          description: The category is unknown, or the URL named no entry.
+
+  /restart:
+    post:
+      tags: [retained]
+      operationId: restart
+      summary: Graceful restart of this process
+      x-required-capability: restart_process
+      responses:
+        '204':
+          description: Restarting.
+        '400':
+          description: The restart was refused.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        An opaque session token from `POST /auth/login`, stored hashed. There is no refresh
+        token and no JWT to renew: an expired session is re-authenticated.
+
+  parameters:
+    Name:
+      name: name
+      in: path
+      required: true
+      description: The config-entry name. For a policy profile this is `category:profile`.
+      schema:
+        type: string
+    EntryName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+    Category:
+      name: category
+      in: path
+      required: true
+      description: One of pingap's config categories, or `full`.
+      schema:
+        type: string
+        enum:
+          - basic
+          - upstream
+          - location
+          - server
+          - plugin
+          - certificate
+          - storage
+          - full
+    UserId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    SessionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    VersionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    Since:
+      name: since
+      in: query
+      required: false
+      description: Unix seconds, inclusive.
+      schema:
+        type: integer
+        format: int64
+    Until:
+      name: until
+      in: query
+      required: false
+      description: Unix seconds, inclusive.
+      schema:
+        type: integer
+        format: int64
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+
+  requestBodies:
+    Domain:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Domain'
+    Upstream:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Upstream'
+    Listener:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Listener'
+
+  responses:
+    Applied:
+      description: >
+        Committed, and confirmed enforcing by reading the data plane back.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApplyResult'
+    NotApplied:
+      description: |
+        The write did not reach `applied`. Either the previous version has not settled yet, or
+        this one was committed, failed verification, and an earlier version was restored —
+        `rolled_back_to` says which.
+
+        `409` rather than `200`, because a `200` on a version that failed verification is
+        precisely the "believed-applied" report the projection exists to make impossible.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApplyResult'
+    PendingVersion:
+      description: >
+        The newest version has not been confirmed enforcing yet, so there is no safe base to
+        read or edit from. The scheduled sweep settles it within the minute.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadRequest:
+      description: The body was refused, and the reason names the field.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthenticated:
+      description: No session, or one that is expired, revoked or unknown.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: >
+        The role does not hold the capability, or the session has not completed its second
+        factor. `action` distinguishes them: `complete_second_factor` means the caller can fix
+        it, and its absence means the denial is final. Telling a viewer to authenticate further
+        would imply that doing so grants a capability their role never will.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: No such entry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    StoreUnavailable:
+      description: >
+        The control-plane store cannot be reached. Distinct from a `500` on purpose: a missing
+        store is a state the operator can act on, and a crash-shaped error hides that. The
+        gateway keeps serving traffic regardless.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    DomainMap:
+      description: Every domain, keyed by name.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/Domain'
+    UpstreamMap:
+      description: Every upstream, keyed by name.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/Upstream'
+    ListenerMap:
+      description: Every listener, keyed by name.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/Listener'
+    PolicyMap:
+      description: Every policy profile, keyed by `category:profile`.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/PluginConf'
+    CertificateViewMap:
+      description: Every certificate, keyed by name, without private keys.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/CertificateView'
+
+  schemas:
+    Error:
+      type: object
+      required: [error, action]
+      properties:
+        error:
+          type: string
+          description: A reason that names the field or entry, not a parser internals dump.
+        action:
+          type: string
+          nullable: true
+          description: >
+            Set only when the caller can fix the refusal. `complete_second_factor` is the only
+            value today.
+          enum:
+            - complete_second_factor
+            - null
+
+    Role:
+      type: string
+      enum: [admin, operator, viewer]
+      description: >
+        `admin` everything. `operator` traffic and policy, but not accounts, node enrolment or
+        the process. `viewer` reads, and mutates nothing except its own sessions.
+
+    AuthLevel:
+      type: string
+      enum: [password_only, two_factor]
+      description: >
+        How far this session has authenticated. `two_factor` also covers an account with no
+        second factor enrolled, which is why a password-only session is the exceptional state
+        rather than the default.
+
+    ConfigStatus:
+      type: string
+      enum: [pending, applied, failed, superseded]
+      description: >
+        `applied` is set only by reading the data plane back. A successful write produces
+        `pending`; a WAF whose constructor rejects its config produces `failed` and restores
+        the previous version.
+
+    PluginConf:
+      type: object
+      additionalProperties: true
+      description: >
+        A plugin's own configuration table. Interpreted by the plugin that owns it and by
+        nothing else; the projection only checks that every binding names an entry that
+        exists, and the gate asks the plugin factory whether the table constructs.
+
+    WafCategory:
+      type: object
+      required: [key, crs_group, crs_file, response_side, id_range, modes]
+      properties:
+        key:
+          type: string
+          description: The key a profile's `categories` table uses.
+          example: sql_injection
+        crs_group:
+          type: integer
+          description: The CRS group this category's rules descend from. Lineage, not compatibility.
+          example: 942
+        crs_file:
+          type: string
+          description: The upstream CRS rule file the lineage traces to.
+          example: REQUEST-942-APPLICATION-ATTACK-SQLI.conf
+        response_side:
+          type: boolean
+          description: Evaluates on the way out rather than the way in, and so cannot deny.
+        id_range:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: integer
+            format: int64
+          description: >
+            Native rule ID bounds, derived from the CRS group so an ID is self-describing —
+            `942017` is visibly a SQLi rule. The ranges cannot overlap because the groups are
+            distinct, which the engine's own tests assert.
+          example: [942000, 942999]
+        modes:
+          type: array
+          items:
+            type: string
+            enum: [off, detect, block, redact]
+          description: >
+            Every mode this category accepts, in increasing strictness. `block` is absent for a
+            response-side category and `redact` for a request-side one; a UI offering either
+            where it does not belong is offering a write the projection will refuse.
+          example: [off, detect, block]
+
+    PolicyBinding:
+      description: |
+        Externally tagged: `{"waf":"strict"}`, `{"acl":"edge"}`, `{"bot":"deny-unknown"}`. The
+        variant is the plugin category and the payload the profile, and the config entry the
+        pair names is `category:profile`.
+      oneOf:
+        - type: object
+          required: [waf]
+          additionalProperties: false
+          properties:
+            waf:
+              type: string
+        - type: object
+          required: [acl]
+          additionalProperties: false
+          properties:
+            acl:
+              type: string
+        - type: object
+          required: [bot]
+          additionalProperties: false
+          properties:
+            bot:
+              type: string
+
+    Backend:
+      type: object
+      required: [addr, weight]
+      additionalProperties: false
+      properties:
+        addr:
+          type: string
+          description: >
+            `host:port`, with no weight suffix. The projection formats the space-separated
+            weight pingap's discovery layer reads; an operator typing it could type
+            `"10.0.0.1:8080 five"`, which that layer silently reads as weight 1.
+          example: 10.0.0.1:8080
+        weight:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 65535
+
+    Upstream:
+      type: object
+      required:
+        - backends
+        - lb_algorithm
+        - health_check
+        - discovery
+        - tls_sni
+        - verify_cert
+      additionalProperties: false
+      properties:
+        backends:
+          type: array
+          items:
+            $ref: '#/components/schemas/Backend'
+        lb_algorithm:
+          type: string
+          nullable: true
+        health_check:
+          type: string
+          nullable: true
+        discovery:
+          type: string
+          nullable: true
+          description: '`static`, `dns`, `docker` or `transparent`.'
+        tls_sni:
+          type: string
+          nullable: true
+        verify_cert:
+          type: boolean
+          nullable: true
+
+    TlsSettings:
+      type: object
+      required: [min_version, max_version, cipher_list, ciphersuites]
+      additionalProperties: false
+      properties:
+        min_version:
+          type: string
+          nullable: true
+        max_version:
+          type: string
+          nullable: true
+        cipher_list:
+          type: string
+          nullable: true
+        ciphersuites:
+          type: string
+          nullable: true
+
+    Listener:
+      type: object
+      required: [addr, http2, tls, access_log, server_timing]
+      additionalProperties: false
+      properties:
+        addr:
+          type: string
+          example: 0.0.0.0:443
+        http2:
+          type: boolean
+          nullable: true
+        tls:
+          nullable: true
+          description: >
+            Its presence is what makes the listener terminate TLS. There is no separate
+            on/off flag; see `putListener`.
+          allOf:
+            - $ref: '#/components/schemas/TlsSettings'
+        access_log:
+          type: string
+          nullable: true
+        server_timing:
+          type: boolean
+          nullable: true
+
+    Domain:
+      type: object
+      required:
+        - hostnames
+        - path
+        - listener
+        - upstream
+        - priority
+        - notes
+        - client_max_body_size
+        - grpc_web
+        - reverse_proxy_headers
+        - max_processing
+        - max_retries
+        - policies
+      additionalProperties: false
+      properties:
+        hostnames:
+          type: array
+          items:
+            type: string
+          description: Joined with commas into `locations.<n>.host`, which is how pingap reads it.
+        path:
+          type: string
+          nullable: true
+        listener:
+          type: string
+          description: Key into `/listeners`. A name that does not exist is a `400`.
+        upstream:
+          type: string
+          description: Key into `/upstreams`. A name that does not exist is a `400`.
+        priority:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 65535
+          description: Emitted as `locations.<n>.weight`, which is pingap's match precedence.
+        notes:
+          type: string
+          nullable: true
+        client_max_body_size:
+          type: string
+          nullable: true
+          description: >
+            Parsed as a `ByteSize`. `8mb` is 8 000 000 bytes and `8mib` is 8 388 608 — `mb` is
+            decimal.
+          example: 8mb
+        grpc_web:
+          type: boolean
+          description: >
+            Needs two keys at two levels: the location opts in and the server must load the
+            module. Setting only one is a silent no-op, so the projection derives the server
+            module from the domains rather than having it configured separately.
+        reverse_proxy_headers:
+          type: boolean
+          nullable: true
+        max_processing:
+          type: integer
+          nullable: true
+          format: int32
+        max_retries:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 255
+        policies:
+          type: array
+          description: >
+            Evaluated in order, and the first plugin to answer terminates the request. The
+            projection preserves the order given: putting the cheapest gate first is the
+            operator's call, not something to normalise away.
+          items:
+            $ref: '#/components/schemas/PolicyBinding'
+
+    Certificate:
+      type: object
+      description: |
+        Exactly one of two shapes: a PEM pair (`tls_cert` and `tls_key`), or an ACME issuer and
+        neither half. A half-pair is a `400`, because pingap's own validation parses each half
+        only if present and would load nothing.
+
+        Every field is required in the body, including the ones set to `null`. `tls_key` is the
+        exception to what that means: omitting or nulling it keeps the stored key, because no
+        read route ever returned it. See `putCertificate`.
+      required:
+        - domains
+        - tls_cert
+        - tls_key
+        - is_default
+        - is_ca
+        - acme
+        - dns_challenge
+        - dns_provider
+        - dns_service_url
+        - buffer_days
+        - remark
+      additionalProperties: false
+      properties:
+        domains:
+          type: array
+          items:
+            type: string
+          description: >
+            Hostnames this certificate answers for, matched against SNI. Comma-joined on the
+            way into config; an empty list projects as absent, which means no host restriction.
+        tls_cert:
+          type: string
+          nullable: true
+          description: PEM chain.
+        tls_key:
+          type: string
+          nullable: true
+          description: PEM private key. **Write-only** — never returned by any route.
+        is_default:
+          type: boolean
+          nullable: true
+          description: Served when no SNI match.
+        is_ca:
+          type: boolean
+          nullable: true
+          description: A certificate authority rather than a leaf.
+        acme:
+          type: string
+          nullable: true
+          description: Issuer name, e.g. `lets_encrypt`. Present only for an issued certificate.
+        dns_challenge:
+          type: boolean
+          nullable: true
+          description: DNS-01 rather than HTTP-01.
+        dns_provider:
+          type: string
+          nullable: true
+          description: '`ali`, `cf`, `tencent`, `huawei` or `manual`. Anything else is refused.'
+        dns_service_url:
+          type: string
+          nullable: true
+        buffer_days:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 65535
+          description: How many days before expiry to renew.
+        remark:
+          type: string
+          nullable: true
+          description: Operator-facing only.
+
+    CertificateView:
+      type: object
+      description: >
+        A certificate as a read route may show it: every field but the private key, with
+        `has_tls_key` standing in for it. Named for what it is so a client cannot bind to a
+        `tls_key` field and receive an empty string it mistakes for a redaction.
+      required:
+        - domains
+        - tls_cert
+        - has_tls_key
+        - is_default
+        - is_ca
+        - acme
+        - dns_challenge
+        - dns_provider
+        - dns_service_url
+        - buffer_days
+        - remark
+      properties:
+        domains:
+          type: array
+          items:
+            type: string
+        tls_cert:
+          type: string
+          nullable: true
+          description: Not redacted — a certificate chain is served in every handshake.
+        has_tls_key:
+          type: boolean
+        is_default:
+          type: boolean
+          nullable: true
+        is_ca:
+          type: boolean
+          nullable: true
+        acme:
+          type: string
+          nullable: true
+        dns_challenge:
+          type: boolean
+          nullable: true
+        dns_provider:
+          type: string
+          nullable: true
+        dns_service_url:
+          type: string
+          nullable: true
+        buffer_days:
+          type: integer
+          nullable: true
+        remark:
+          type: string
+          nullable: true
+
+    LoadedCertificate:
+      type: object
+      description: Live state from the certificate provider. No key material.
+      required: [domains, acme, issuer, not_before, not_after]
+      properties:
+        domains:
+          type: array
+          items:
+            type: string
+        acme:
+          type: string
+          nullable: true
+        issuer:
+          type: string
+        not_before:
+          type: integer
+          format: int64
+          description: Unix seconds.
+        not_after:
+          type: integer
+          format: int64
+          description: Unix seconds. Renewal status beyond this is not projected and cannot be.
+
+    ApplyResult:
+      type: object
+      required: [version_id, hash, status, error, rolled_back_to]
+      properties:
+        version_id:
+          type: string
+        hash:
+          type: string
+          description: >
+            Over canonical content, not file bytes, so reformatting is not a drift signal.
+        status:
+          $ref: '#/components/schemas/ConfigStatus'
+        error:
+          type: string
+          nullable: true
+          description: Why the version failed, when it did.
+        rolled_back_to:
+          type: string
+          nullable: true
+          description: >
+            Set when the write was committed, failed verification, and an earlier version was
+            restored.
+
+    VersionView:
+      type: object
+      required: [id, hash, status, actor_username, error, created_at, settled_at]
+      properties:
+        id:
+          type: string
+        hash:
+          type: string
+        status:
+          $ref: '#/components/schemas/ConfigStatus'
+        actor_username:
+          type: string
+        error:
+          type: string
+          nullable: true
+        created_at:
+          type: integer
+          format: int64
+        settled_at:
+          type: integer
+          format: int64
+          nullable: true
+
+    RollbackResult:
+      type: object
+      required: [version, rolled_back_to]
+      properties:
+        version:
+          description: The rollback's own version, not the target's.
+          allOf:
+            - $ref: '#/components/schemas/VersionView'
+        rolled_back_to:
+          type: string
+          nullable: true
+          description: Set when the restored config itself failed verification and an earlier one was put back — a rollback that did not hold.
+
+    Activity:
+      type: object
+      required:
+        - id
+        - actor_id
+        - actor_username
+        - action
+        - target
+        - config_version
+        - ip
+        - user_agent
+        - detail
+        - created_at
+      properties:
+        id:
+          type: string
+        actor_id:
+          type: string
+          nullable: true
+        actor_username:
+          type: string
+          description: >
+            Recorded as text as well as by id, so the entry stays readable after the account is
+            removed. An audit trail that becomes anonymous when a user is deleted is not an
+            audit trail.
+        action:
+          type: string
+          example: domain.update:site
+        target:
+          type: string
+        config_version:
+          type: string
+          nullable: true
+          description: The version a config mutation produced. Absent for account mutations.
+        ip:
+          type: string
+          nullable: true
+        user_agent:
+          type: string
+          nullable: true
+        detail:
+          type: string
+          nullable: true
+        created_at:
+          type: integer
+          format: int64
+
+    Profile:
+      type: object
+      required: [username, email, role, auth_level, is_active, created_at]
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        auth_level:
+          $ref: '#/components/schemas/AuthLevel'
+        is_active:
+          type: boolean
+        created_at:
+          type: integer
+          format: int64
+
+    SessionView:
+      type: object
+      required:
+        - id
+        - auth_level
+        - ip
+        - user_agent
+        - created_at
+        - expires_at
+        - revoked_at
+        - usable
+        - current
+      properties:
+        id:
+          type: string
+        auth_level:
+          $ref: '#/components/schemas/AuthLevel'
+        ip:
+          type: string
+          nullable: true
+        user_agent:
+          type: string
+          nullable: true
+        created_at:
+          type: integer
+          format: int64
+        expires_at:
+          type: integer
+          format: int64
+        revoked_at:
+          type: integer
+          format: int64
+          nullable: true
+        usable:
+          type: boolean
+          description: >
+            Derived here rather than left to the client to work out from two timestamps and a
+            null.
+        current:
+          type: boolean
+          description: >
+            Which entry is the caller's, so a UI can warn before offering to cut off the
+            session the operator is using.
+
+    UserView:
+      type: object
+      required: [id, username, email, role, is_active, created_at]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        is_active:
+          type: boolean
+        created_at:
+          type: integer
+          format: int64
+
+    CreateUser:
+      type: object
+      required: [username, email, password, role]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+          minLength: 1
+        email:
+          type: string
+        password:
+          type: string
+          format: password
+          minLength: 1
+          description: Stored as argon2id. The hash carries its own parameters, so a later parameter change does not invalidate existing credentials.
+        role:
+          $ref: '#/components/schemas/Role'
+
+    UpdateUser:
+      type: object
+      required: [is_active]
+      additionalProperties: false
+      properties:
+        is_active:
+          type: boolean
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      required: [token, auth_level, role, username]
+      properties:
+        token:
+          type: string
+          description: >
+            Returned once and never again — the store holds only its hash. `password_only` in
+            `auth_level` means a second factor is outstanding, which is what a UI shows the
+            TOTP prompt from rather than from a separate round trip.
+        auth_level:
+          $ref: '#/components/schemas/AuthLevel'
+        role:
+          $ref: '#/components/schemas/Role'
+        username:
+          type: string
+
+    TotpRequest:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+
+    Health:
+      type: object
+      required: [status, store]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        store:
+          type: string
+          enum: [available, unavailable]
+          description: >
+            A two-value state rather than a reason, because a load balancer needs to know
+            whether this node can accept admin traffic and nothing more. The reason an operator
+            needs is on an authenticated route.

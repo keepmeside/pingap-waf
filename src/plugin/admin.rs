@@ -41,7 +41,9 @@ use pingap_config::{
     CATEGORY_LOCATION, CATEGORY_PLUGIN, CATEGORY_SERVER, CATEGORY_UPSTREAM,
     PingapConfig,
 };
-use pingap_controlplane::AuthLevel;
+use pingap_controlplane::{
+    AuthLevel, Capability, Denial, NewActivity, authorize,
+};
 use pingap_core::{
     Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult, TtlLruLimit,
 };
@@ -632,6 +634,129 @@ fn get_method_path(session: &Session) -> (Method, String) {
     (method, path.to_string())
 }
 
+/// What a retained route requires, or `None` when access is not decided here.
+///
+/// `None` covers two different cases and both are deliberate. A path the route table owns is
+/// ungated *here* because `router::dispatch` decides it, and duplicating that decision is how
+/// two copies of a matrix drift. `/basic` is ungated because it carries no secret and every
+/// role holds `ViewConfig`, so a check would decide nothing.
+///
+/// What is left is the set this exists for: the paths answered before the router, which
+/// session authentication alone left open to any role that could log in. A viewer could read
+/// every TLS private key in the config and write config text straight to storage, past the
+/// projection, its version rows and its post-commit verification. A new retained path must be
+/// named here; forgetting is caught by the test that drives each of these as a viewer, which
+/// is the same shape of gate the route table's enumeration test is — narrower only because
+/// this chain is a handful of paths in a file the fork is shrinking, not a table.
+fn retained_access(path: &str, method: &Method) -> Option<Capability> {
+    let reads =
+        matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS);
+    if path.starts_with("/configs") {
+        return Some(if reads {
+            Capability::ViewRawConfig
+        } else {
+            Capability::WriteRawConfig
+        });
+    }
+    if path.starts_with("/config-history") || path == "/certificates" {
+        // Read surfaces whatever the method asks for: neither branch below dispatches on it,
+        // so a `POST` here is answered exactly like a `GET` and must be gated like one.
+        return Some(Capability::ViewRawConfig);
+    }
+    if path == "/restart" && !reads {
+        return Some(Capability::RestartProcess);
+    }
+    None
+}
+
+/// A refusal from the role matrix, as a response.
+///
+/// Both are 403 and still worth distinguishing in the body: a missing second factor is
+/// something the caller can fix by completing the challenge, while a role denial is final,
+/// and telling a viewer to authenticate further implies that doing so would help.
+fn denial_response(denial: Denial) -> HttpResponse {
+    let body = match denial {
+        Denial::SecondFactorRequired => {
+            "Forbidden, complete the second factor first"
+        },
+        Denial::Role => "Forbidden, role not permitted for this route",
+    };
+    HttpResponse {
+        status: StatusCode::FORBIDDEN,
+        body: Bytes::from_static(body.as_bytes()),
+        ..Default::default()
+    }
+}
+
+/// One audit row for a write through the retained raw-config surface.
+///
+/// These routes bypass the projection, so nothing else records them — and the escape hatch is
+/// precisely the write an audit trail most needs to show, because it is the one that produces
+/// no version row. Without this an administrator could change the gateway's configuration and
+/// leave a trail with a gap exactly where the unversioned write happened.
+///
+/// Called at the site rather than inside the handlers, which take a pingora `Session` and know
+/// nothing about who is driving one.
+///
+/// A failure to record is logged and does not fail the request: the write has already happened,
+/// so a 500 would misreport what the caller did. It is an `error` rather than a warning,
+/// because an unrecorded config write is the thing this function exists to prevent.
+async fn audit_raw_config(
+    plugin: &AdminServe,
+    principal: Option<&Principal>,
+    action: &str,
+    target: &str,
+    ip: &str,
+) {
+    let Some(principal) = principal else {
+        // Unreachable for a gated route. Logged rather than dropped, because an anonymous
+        // config write would be a far more serious finding than a missing audit row.
+        error!(
+            target: LOG_TARGET,
+            action, "a raw config write had no actor to record"
+        );
+        return;
+    };
+    let auth = plugin.auth.get().await;
+    if let Err(refusal) = auth.store_available().await {
+        error!(
+            target: LOG_TARGET,
+            action,
+            refusal = ?refusal,
+            "a raw config write could not be audited: the store is unreachable"
+        );
+        return;
+    }
+    if let Err(e) = auth
+        .store()
+        .record_activity(
+            NewActivity {
+                actor_id: Some(principal.user_id.clone()),
+                actor_username: principal.username.clone(),
+                action: action.to_string(),
+                target: target.to_string(),
+                // Deliberately `None`. A write through here has no version, and a row that
+                // claimed one would tie the audit trail to a config state it did not produce.
+                config_version: None,
+                ip: (!ip.is_empty()).then(|| ip.to_string()),
+                user_agent: None,
+                // What makes these rows findable: it is the only marker distinguishing an
+                // escape-hatch write from a projected one.
+                detail: Some("bypassed the projection".to_string()),
+            },
+            pingap_core::now_sec() as i64,
+        )
+        .await
+    {
+        error!(
+            target: LOG_TARGET,
+            action,
+            error = e.to_string(),
+            "a raw config write was not audited"
+        );
+    }
+}
+
 async fn handle_request_admin(
     plugin: &AdminServe,
     session: &mut Session,
@@ -781,23 +906,76 @@ async fn handle_request_admin(
     if params.len() >= 3 {
         category = &params[2];
     }
+    // Decided before the chain below rather than inside each of its branches, so a branch
+    // cannot be added that skips it. `principal` is `Some` for every path this can match —
+    // authentication is skipped only for short non-`/api` paths and static assets — and the
+    // `None` arm is here so that staying true is not something this code has to trust.
+    if let Some(capability) = retained_access(&path, &method) {
+        let Some(principal) = principal.as_ref() else {
+            return Ok(Some(HttpResponse {
+                status: StatusCode::UNAUTHORIZED,
+                ..Default::default()
+            }));
+        };
+        if let Err(denial) =
+            authorize(principal.role, principal.auth_level, capability)
+        {
+            return Ok(Some(denial_response(denial)));
+        }
+    }
     let resp = if path.starts_with("/configs") {
         match method {
             Method::POST => {
-                if category == "import" {
+                let result = if category == "import" {
                     plugin.import_config(session).await
                 } else if params.len() < 4 {
                     Err(pingora::Error::new_str("Url is invalid(no name)"))
                 } else {
                     plugin.update_config(session, category, &params[3]).await
+                };
+                if result.is_ok() {
+                    // `import` replaces the whole document, so its target is the document
+                    // rather than an entry that no longer has a name.
+                    let target = if category == "import" {
+                        "full".to_string()
+                    } else {
+                        format!(
+                            "{category}/{}",
+                            params.get(3).map_or("", |v| v)
+                        )
+                    };
+                    audit_raw_config(
+                        plugin,
+                        principal.as_ref(),
+                        "config.update",
+                        &target,
+                        ip,
+                    )
+                    .await;
                 }
+                result
             },
             Method::DELETE => {
-                if params.len() < 4 {
+                let result = if params.len() < 4 {
                     Err(pingora::Error::new_str("Url is invalid(no name)"))
                 } else {
                     plugin.remove_config(category, &params[3]).await
+                };
+                if result.is_ok() {
+                    let target = format!(
+                        "{category}/{}",
+                        params.get(3).map_or("", |v| v)
+                    );
+                    audit_raw_config(
+                        plugin,
+                        principal.as_ref(),
+                        "config.delete",
+                        &target,
+                        ip,
+                    )
+                    .await;
                 }
+                result
             },
             _ => plugin.get_config(category).await,
         }
@@ -939,7 +1117,22 @@ async fn handle_request_admin(
                 } else {
                     name.clone()
                 };
-                infos.insert(key, info.clone());
+                // The provider's `Certificate` carries the PEM private key and derives
+                // `Serialize`, so serialising the struct put every loaded key into this
+                // response body. Only what a dashboard shows is emitted. Field-by-field
+                // rather than a skip attribute on the shared type: that type is also
+                // deserialised, and a field skipped on the way out is a field silently
+                // dropped on the way in.
+                infos.insert(
+                    key,
+                    json!({
+                        "domains": info.domains,
+                        "acme": info.acme,
+                        "issuer": info.issuer,
+                        "not_before": info.not_before,
+                        "not_after": info.not_after,
+                    }),
+                );
             }
         }
         HttpResponse::try_from_json(&infos)
@@ -1027,7 +1220,8 @@ fn init() {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdminAsset, AdminServe, EmbeddedStaticFile, handle_request_admin,
+        AdminAsset, AdminServe, Capability, EmbeddedStaticFile,
+        handle_request_admin, retained_access,
     };
     use crate::config_manager::try_init_config_manager;
     use pingap_config::PluginConf;
@@ -1497,5 +1691,249 @@ mod tests {
         )
         .await;
         assert_eq!(503, api.status.as_u16());
+    }
+
+    /// Which retained paths are gated, and with what.
+    ///
+    /// The mapping on its own, so a path added to the chain below without an entry here is a
+    /// failure with the path's name in it rather than a request test that happens not to
+    /// cover it.
+    #[test]
+    fn test_retained_access_covers_the_paths_answered_before_the_router() {
+        use http::Method;
+        for (path, method, expected) in [
+            (
+                "/configs/upstream",
+                &Method::GET,
+                Some(Capability::ViewRawConfig),
+            ),
+            (
+                "/configs/full",
+                &Method::GET,
+                Some(Capability::ViewRawConfig),
+            ),
+            (
+                "/configs/upstream/u",
+                &Method::POST,
+                Some(Capability::WriteRawConfig),
+            ),
+            (
+                "/configs/upstream/u",
+                &Method::DELETE,
+                Some(Capability::WriteRawConfig),
+            ),
+            (
+                "/config-history/certificate/c",
+                &Method::GET,
+                Some(Capability::ViewRawConfig),
+            ),
+            // Read surfaces whatever the method: neither branch dispatches on it.
+            (
+                "/config-history/certificate/c",
+                &Method::POST,
+                Some(Capability::ViewRawConfig),
+            ),
+            (
+                "/certificates",
+                &Method::GET,
+                Some(Capability::ViewRawConfig),
+            ),
+            ("/restart", &Method::POST, Some(Capability::RestartProcess)),
+            // Not retained: the router decides these, and deciding them here too would put
+            // the same answer in two places that could disagree.
+            ("/restart", &Method::GET, None),
+            ("/domains/site", &Method::PUT, None),
+            ("/ssl/edge", &Method::PUT, None),
+            ("/basic", &Method::GET, None),
+            ("/health", &Method::GET, None),
+        ] {
+            assert_eq!(
+                retained_access(path, method),
+                expected,
+                "{method} {path}"
+            );
+        }
+    }
+
+    /// A viewer holding a valid session is refused the retained config surface.
+    ///
+    /// Driven as a request rather than as a call into `retained_access`, because what matters
+    /// is that the running plugin refuses it — a mapping that is correct and never consulted
+    /// passes a unit test and leaks anyway. The `GET`s are the load-bearing half: a
+    /// password-only session is already refused every non-`GET` further up, so only a read
+    /// proves the *role* gate and not that one.
+    #[tokio::test]
+    async fn test_a_viewer_is_refused_the_retained_config_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        let token = login(&admin, "admin", "123123").await;
+
+        let body = r#"{"username":"watcher","email":"w@example.test","password":"correct-horse","role":"viewer"}"#;
+        let created = send(
+            &admin,
+            &format!(
+                "POST /api/users HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert_eq!(
+            200,
+            created.status.as_u16(),
+            "creating the viewer failed: {}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let viewer = login(&admin, "watcher", "correct-horse").await;
+
+        for request in [
+            "GET /api/configs/upstream",
+            "GET /api/configs/full",
+            "GET /api/config-history/upstream/u",
+            "GET /api/certificates",
+        ] {
+            let resp = send(
+                &admin,
+                &format!(
+                    "{request} HTTP/1.1\r\nAuthorization: Bearer {viewer}\r\n\r\n"
+                ),
+            )
+            .await;
+            assert_eq!(403, resp.status.as_u16(), "a viewer read {request}");
+            let body = String::from_utf8_lossy(&resp.body).to_string();
+            assert!(
+                body.contains("role not permitted"),
+                "{request} was refused by something other than the role gate: {body}"
+            );
+        }
+
+        for request in [
+            "POST /api/configs/upstream/evil",
+            "DELETE /api/configs/upstream/evil",
+            "POST /api/restart",
+        ] {
+            let resp = send(
+                &admin,
+                &format!(
+                    "{request} HTTP/1.1\r\nAuthorization: Bearer {viewer}\r\nContent-Length: 0\r\n\r\n"
+                ),
+            )
+            .await;
+            assert_eq!(403, resp.status.as_u16(), "a viewer ran {request}");
+        }
+
+        // The admin still reaches it, so the assertions above describe a role gate and not a
+        // route that has stopped answering. `POST /api/restart` is deliberately not exercised
+        // here: it would restart the test process.
+        let resp = send(
+            &admin,
+            &format!(
+                "GET /api/configs/upstream HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_ne!(
+            403,
+            resp.status.as_u16(),
+            "the admin was refused the raw config read: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
+
+    /// A write through the escape hatch leaves an audit row, and one that claims no version.
+    ///
+    /// The retained `/configs` route writes config text straight to storage, so it produces no
+    /// `ConfigVersion` and the projection never sees it. That is what makes it the write an
+    /// audit trail most needs to show: without a row here, an administrator could change the
+    /// gateway's configuration and the trail would have a gap exactly where the unversioned
+    /// write happened. `config_version` being null is asserted as carefully as the row's
+    /// existence, because a row that named a version it did not produce would tie the trail to
+    /// a config state that has nothing to do with it.
+    #[tokio::test]
+    async fn test_a_raw_config_write_is_audited_without_claiming_a_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        let token = login(&admin, "admin", "123123").await;
+
+        let body = r#"{"addrs":["127.0.0.1:8080"]}"#;
+        let written = send(
+            &admin,
+            &format!(
+                "POST /api/configs/upstream/audited HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        // 204, not 200: `update_config` answers with no body on success, and the assertion
+        // is on the exact code because a 200 here would mean the response shape changed
+        // under the audit row this test is actually about.
+        assert_eq!(
+            204,
+            written.status.as_u16(),
+            "the raw config write failed: {}",
+            String::from_utf8_lossy(&written.body)
+        );
+
+        let log = send(
+            &admin,
+            &format!(
+                "GET /api/activity HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(200, log.status.as_u16());
+        let rows: serde_json::Value =
+            serde_json::from_slice(&log.body).unwrap();
+        // Filtered rather than counted: bootstrapping the first account writes rows of its
+        // own, and this test is about the config write, not about how many rows a login
+        // happens to produce.
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["action"] == "config.update")
+            .unwrap_or_else(|| panic!("the write was not audited: {rows}"));
+        assert_eq!("upstream/audited", row["target"]);
+        assert_eq!("admin", row["actor_username"]);
+        assert_eq!(
+            serde_json::Value::Null,
+            row["config_version"],
+            "a raw config write claimed a version it did not produce: {row}"
+        );
+        assert_eq!(
+            "bypassed the projection", row["detail"],
+            "the row does not say what makes it different from a projected write: {row}"
+        );
+
+        // And the delete half, which is the one that removes something.
+        let removed = send(
+            &admin,
+            &format!(
+                "DELETE /api/configs/upstream/audited HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(
+            204,
+            removed.status.as_u16(),
+            "{}",
+            String::from_utf8_lossy(&removed.body)
+        );
+        let log = send(
+            &admin,
+            &format!(
+                "GET /api/activity HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+        )
+        .await;
+        let rows: serde_json::Value =
+            serde_json::from_slice(&log.body).unwrap();
+        assert!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["action"] == "config.delete"
+                    && row["target"] == "upstream/audited"),
+            "the delete was not audited: {rows}"
+        );
     }
 }

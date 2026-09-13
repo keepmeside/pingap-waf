@@ -1,0 +1,194 @@
+# Admin API parity
+
+Every mount path the reference product exposes, and what this gateway answers for it.
+
+The reference is `TinyActive/nginx-love`: an Express API beside an nginx it configures by
+writing text and shelling out to `nginx -t && nginx -s reload`. This API is inside the
+proxy, so the shape differs even where the feature does not — there is no reload to
+trigger, no config text to regenerate, and no node-to-node sync because peers share an
+etcd keyspace. **A row that says "mapped differently" is not a gap; a row that says
+"deferred" or "waived" is, and says which.**
+
+Mount list taken from `apps/api/src/routes/index.ts` at the pinned reference commit: 19
+`router.use` mounts plus the inline `GET /health`.
+
+Everything below is served by the admin listener from the one process, under `/api`.
+
+## Mapped
+
+| Reference | Ours | Notes |
+| --- | --- | --- |
+| `GET /health` | `GET /api/health` | Unauthenticated in both. Ours returns `{"status":"ok"}` and nothing else — no version, build, pid or store path, which the reference's does return |
+| `/domains` | `GET /api/domains`, `GET/PUT/DELETE /api/domains/:name` | The domain is intent, not a data-plane object: see [the domain model](./domain-model.md). `PUT` replaces rather than patches |
+| `/system` | `GET /api/basic`, `POST /api/restart` | Retained from pingap. `/basic` is process and system introspection; `restart` needs `RestartProcess` |
+| `/ssl` | `GET /api/ssl`, `GET/PUT/DELETE /api/ssl/:name` | Certificate *definitions*, written through the projection. Live issuer and expiry status is the retained `GET /api/certificates`, which answers from the running provider |
+| `/users` | `GET/POST /api/users`, `PATCH /api/users/:id` | `PATCH` sets activation only — the store has no method that writes `role`, so the field is absent rather than accepted and ignored |
+| `/modsec` | `GET/PUT/DELETE /api/policies[/:name]`, `GET /api/waf/categories` | Mapped differently, see below |
+| `/acl` | `GET/PUT/DELETE /api/policies[/:name]` | Mapped differently, see below |
+| `/access-lists` | `GET/PUT/DELETE /api/policies[/:name]` | A named access list is a key in the `acl` profile's own config table, not a separate resource |
+| `/bot-manager` | `GET/PUT/DELETE /api/policies[/:name]` | Profiles and rules only. Its analytics routes are deferred with `logs` and `dashboard` |
+
+### Why three reference mounts are one route here
+
+`/modsec`, `/acl` and `/bot-manager` are three mounts in the reference because they are
+three databases. Here they are three values of one field: a policy profile is a config
+entry named `category:profile` — `waf:strict`, `acl:edge`, `bot:deny-unknown` — and every
+profile is a plugin config table the projection validates and the owning plugin interprets.
+
+One route over the whole map is deliberate rather than economical. A plugin instance is
+process-global and keyed by its config-entry name, so two domains that must count
+independently have to bind two *different* profiles. `/waf/profiles` would suggest the
+category owns a namespace it does not, and the naming rule that prevents cross-domain
+counter bleed would be invisible at the API boundary.
+
+What the reference does per-category and this does not offer:
+
+- **`/modsec/crs/rules` and its per-rule toggles.** Rule content is compiled into the WAF crate
+  and selected by `paranoia` and per-category mode, not edited row by row, so there is no rule
+  row to toggle. What the reference's rule browser shows instead — the categories and their CRS
+  lineage — is `GET /api/waf/categories`, read off the engine's own table rather than restated
+  beside it, and [published as a document](./waf-category-mapping.md). That route also carries
+  the modes each category accepts, because a response-side category cannot block: a UI offering
+  `block` for `data_leakage` is offering a write that either fails at apply or is silently
+  treated as `redact`, leaving an operator believing a leak is suppressed when it is only
+  rewritten.
+- **`/modsec/global`, `/acl/preview`, `/acl/apply`, `/bot-manager/preview`, `/bot-manager/apply`.**
+  A preview/apply split exists where applying means regenerating a config file and hoping
+  the reload takes. Here every write is a projection, and the projection is validated and
+  read back before the version is called `applied` — see [config projection](./config-projection.md).
+  There is no second step to preview.
+- **Custom rule CRUD as its own route.** A custom rule is a key in the profile's config
+  table, so it is written by `PUT /api/policies/:name` with the rest of the profile. The
+  engine's own cost gate refuses a rule whose shape is quadratic, at write time and with
+  the reason.
+
+## Partial
+
+| Reference | Ours | Missing |
+| --- | --- | --- |
+| `/auth` — `login`, `verify-2fa`, `logout`, `refresh`, `first-login/change-password` | `POST /api/auth/login`, `POST /api/auth/totp`, `POST /api/auth/logout`, `GET /api/auth/me` | `refresh` is waived, below. A forced password change on first login is not implemented |
+| `/account` — `profile` GET/PUT, `password`, `2fa` GET/setup/enable/disable, `activity`, `sessions` GET, `sessions/:id` DELETE | `GET /api/account`, `GET/DELETE /api/account/sessions[/:id]`, `GET /api/activity` | Profile edit, password change, and 2FA enrolment and disable |
+
+Sessions are opaque bearer tokens held in the store, hashed. There is no refresh token and
+no JWT to renew, so `/auth/refresh` has nothing to act on: a session that has expired is
+re-authenticated, and one that has not needs no renewal. Listed as a waiver rather than a
+gap for that reason.
+
+Session revocation is two capabilities rather than one, and the split is not decoration.
+`ViewOwnSessions` is a read and `RevokeOwnSession` is a mutation, so only the revocation
+waits on a completed second factor; a single capability would have to be non-mutating to
+keep the listing reachable, and would then let a password-only session cut one off. Every
+role holds both, and ownership is decided by the handler from the caller's own listing —
+`revoke_session` takes no user id, so a handler that passed the path straight to it would
+let a viewer revoke an administrator's session. Someone else's session, an unknown id and
+one already revoked all answer 404, which is one status for what is, from where the caller
+stands, one fact.
+
+The three remaining `/account` gaps are not all the same kind of missing:
+
+- **Profile edit and password change** need store methods that do not exist.
+  `ControlPlaneStore` exposes `password_hash_for` and `set_user_active` and nothing that
+  writes `email` or a password hash. Adding them is a repository and driver change, not a
+  route.
+- **2FA enrolment and disable** have their store side ready — `set_totp_secret`,
+  `totp_secret_for`, and the encrypt/decrypt helpers that keep the secret opaque at rest. What
+  is missing is plumbing and a decision: the encryption key lives in the admin plugin's auth
+  state and this crate holds no secret at all, so enrolment means threading it in, and an
+  enrolment attempt made with no key configured needs an answer an operator can act on rather
+  than a 500.
+
+## Deferred to the phase that owns the data
+
+These mounts are not stubs and not waivers: the API has nothing to serve until the
+subsystem behind them exists.
+
+| Reference | Owned by | What it will supply |
+| --- | --- | --- |
+| `/logs`, `/performance`, `/dashboard` | Observability | WAF verdicts and JA4H fingerprints as structured `Ctx` data rather than log-file scraping, aggregated in Rust because the store's window functions lack `lag`/`lead` |
+| `/alerts` | Alerts | Rules (projected) and channels, plus delivery history (store-only) |
+| `/backup` | Backup & Restore | Schedules, export, restore |
+| `/slave` | Cluster via etcd Peers | Peer inventory, last-seen, version, config hash |
+| `/bot-manager` analytics | Observability | Top fingerprints, hit rates |
+
+## Waived
+
+| Reference | Why |
+| --- | --- |
+| `/nlb` | L4 load balancing is a non-goal. Pingora's `ServerAddress` is `Tcp` or `Uds`, so UDP cannot be listened on without patching Pingora, and the TCP half is not in scope for v1 |
+| `/system-config` — `node-mode`, `connect-master`, `disconnect-master`, `test-master-connection`, `sync` | There is no master. Peers share an etcd keyspace, so there is no mode to set, no master to connect to and no sync to trigger |
+| `/node-sync` — `export`, `import`, `current-hash` | The same decision. Node-to-node API transfer with a per-node key is what etcd distribution replaces; a config hash is still observable, through `/api/config-versions` |
+| `/domains/nginx/reload` | There is no nginx and no config text to reload. A write through the projection commits, reloads and is verified before it is reported |
+| `/auth/refresh` | No refresh token exists to refresh — see Partial |
+
+## Routes with no reference counterpart
+
+| Ours | Why it exists |
+| --- | --- |
+| `GET/PUT/DELETE /api/listeners[/:name]` | A listening socket is shared by every domain on it and is a first-class config object in pingap. The reference has no counterpart because nginx `listen` directives live inside a server block |
+| `GET /api/config-versions`, `POST /api/config-versions/:id/rollback` | The reference has no versioned config; it has files and a reload. Here every write produces a version that is only called `applied` once the data plane has been read back and found to be enforcing it, and rollback regenerates from a stored intent rather than restoring a file |
+| `GET /api/activity` | One row per mutation, with actor, action, target and the config version it produced |
+| `GET /api/policies[/:name]` | See "Why three reference mounts are one route here" |
+
+## The retained raw-config surface
+
+These predate the route table and are answered before it, in `src/plugin/admin.rs`:
+
+| Route | Capability |
+| --- | --- |
+| `GET /api/configs/<category>[/<name>]` | `ViewRawConfig` |
+| `POST /api/configs/import`, `POST/DELETE /api/configs/<category>/<name>` | `WriteRawConfig` |
+| `GET /api/config-history/<category>/<name>` | `ViewRawConfig` |
+| `GET /api/certificates` | `ViewRawConfig` |
+
+**All four are admin-only, reads included.** That is not caution about the write half. The
+config *is* every secret this process holds, verbatim — TLS private keys, basic-auth
+credentials, JWT signing keys — so `GET /api/configs/full` is a read of all of them.
+Redacting it instead would mean enumerating every key every plugin can hold, which is a
+denylist that leaks the first time someone adds a plugin.
+
+The consequence is worth stating plainly: an `operator` or `viewer` cannot use the vendored
+admin UI's config pages, because that UI reads config as text. It uses the projected
+resources instead, which is what the role matrix intends.
+
+`POST` and `DELETE` on `/api/configs` write config **directly**, bypassing the projection.
+That is a deliberate escape hatch and it is the reason these routes are not in the route
+table's write path: a write through them produces no version row, runs no validation and
+no post-commit verification, and drift detection will legitimately flag the result. It is
+documented here so the flag is recognised rather than investigated.
+
+They are audited, though, and that is not a detail. An escape hatch that produces no version is
+exactly the write an audit trail most needs to show, because nothing else records it: without a
+row, an administrator could change the gateway's configuration and the trail would have a gap
+where the unversioned write happened. So `config.update` and `config.delete` rows carry the
+actor, the `category/name` target, the client address, `config_version: null` and
+`detail: "bypassed the projection"` — the last being what makes them findable, and the null
+being asserted as carefully as the row's existence, since a row naming a version it did not
+produce would tie the trail to an unrelated config state.
+
+If the control-plane store is unreachable the write still succeeds and the row cannot be
+written. That is logged at `error` rather than failing the request: the write has already
+happened, so a 500 would misreport what the caller did.
+
+`GET /api/certificates` answers from the running certificate provider rather than from
+intent, and returns expiry, issuer, domains and ACME state only. It previously serialised
+the provider's certificate struct, which carries the PEM private key.
+
+## The machine-readable spec
+
+[`openapi.yaml`](../openapi.yaml) describes both halves of the surface: the router's paths
+and the retained ones. It is checked against the router rather than trusted, by
+`crates/pingap-admin-api/tests/openapi.rs`:
+
+- every registered route appears in the spec, carrying the capability the router enforces,
+  so a route added without a spec entry — or with the wrong access declared — fails;
+- every operation in the spec is either a registered route or one of the retained paths
+  above, pinned by name, so an operation whose route was renamed or deleted fails instead
+  of quietly documenting a 404;
+- every operation declares `x-required-capability`, so neither direction can pass
+  vacuously.
+
+The capability strings are serde's own `snake_case` rendering of
+`pingap_controlplane::Capability` — the encoding the matrix is already stored as — so a
+renamed variant is a failure here rather than a permission no role holds.
+
+Both checks run under `make test`, which is a CI gate; no separate workflow step is needed.

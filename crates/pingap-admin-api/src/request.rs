@@ -59,9 +59,10 @@ impl ApiRequest {
     ///
     /// `serde_json` ignores unknown fields by default, which on a config API means a
     /// typo'd key is accepted and silently does nothing — the same class of failure as a
-    /// setting that never projects. Every DTO in this crate carries
-    /// `#[serde(deny_unknown_fields)]`; this is the call site that makes the refusal
-    /// visible to the caller instead of a 500.
+    /// setting that never projects. Every DTO carries `#[serde(deny_unknown_fields)]`: the
+    /// ones declared in this crate, and the `pingap-controlplane` intent types the
+    /// config-shaped routes deserialise into. This is the call site that turns the refusal
+    /// into something the caller can read instead of a 500.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> crate::Result<T> {
         serde_json::from_slice(self.body.as_ref()).map_err(|e| {
             crate::ApiError::BadRequest {

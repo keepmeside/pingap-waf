@@ -68,12 +68,13 @@ the key and nothing more.
 | Reverse-proxy headers | `locations.<n>.enable_reverse_proxy_headers` | Location |
 | Real client IP | `basic.trusted_proxies` | **process-global** |
 | TLS versions and ciphers | `servers.<n>.tls_min_version`, `tls_max_version`, `tls_cipher_list`, `tls_ciphersuites` | Server |
+| TLS termination itself | `servers.<n>.global_certificates` — **derived**, see below | Server |
 | Access log format | `servers.<n>.access_log` | Server |
 | Server-Timing header | `servers.<n>.enable_server_timing` | Server |
 | Concurrency cap | `locations.<n>.max_processing` | Location |
 | Retries | `locations.<n>.max_retries`, `max_retry_window` | Location |
 
-Two entries in that table are not what a UI would assume, and both must be surfaced
+Three entries in that table are not what a UI would assume, and all three must be surfaced
 rather than smoothed over:
 
 **Real client IP is process-global, not per-domain.** `basic.trusted_proxies` is one
@@ -85,6 +86,14 @@ all rather than enforce on an address the client chose.
 
 **gRPC-web needs two keys at two levels.** The Location opts in and the Server must load
 the module. Setting only one is a silent no-op.
+
+**TLS termination is not a toggle, it is derived.** `servers.<n>.global_certificates` is
+the *only* key that makes a pingap server terminate TLS — `pingap-proxy/src/server.rs`
+derives `is_tls` from it and from nothing else — so it is projected from the presence of
+the listener's `tls` block and is not separately configurable. Offering it as a setting
+would allow the two states that do not work: TLS versions and ciphers on a plaintext
+listener, and a TLS listener that cannot be turned off. A listener with a `tls` block and
+no certificate defined anywhere in the intent is refused at projection.
 
 ### HSTS
 
@@ -101,6 +110,39 @@ set_headers = ["Strict-Transport-Security:max-age=31536000; includeSubDomains"]
 precisely because it has no config counterpart: it would have to grow its own header
 writer beside a plugin that already does the job, and projection would then own two ways
 to emit one header.
+
+## Certificates
+
+One `[certificates.<name>]` entry per certificate, matched to a connection by SNI against
+its `domains`. Certificates are **process-global, not per-listener**: a server either uses
+the global store or it does not, and which certificate answers is decided by the hostname
+the client asked for.
+
+| Certificate field | Config key | Notes |
+| --- | --- | --- |
+| `domains` | `certificates.<n>.domains` | Comma-joined; empty means no host restriction |
+| `tls_cert` | `certificates.<n>.tls_cert` | PEM chain. Present only for a manual certificate |
+| `tls_key` | `certificates.<n>.tls_key` | PEM key. **Write-only**: stored and projected, never returned by a read route |
+| `is_default` | `certificates.<n>.is_default` | Served when no SNI match |
+| `is_ca` | `certificates.<n>.is_ca` | A CA rather than a leaf |
+| `acme` | `certificates.<n>.acme` | Issuer name, e.g. `lets_encrypt`. Present only for an issued certificate |
+| `dns_challenge` | `certificates.<n>.dns_challenge` | DNS-01 rather than HTTP-01 |
+| `dns_provider` | `certificates.<n>.dns_provider` | `ali`, `cf`, `tencent`, `huawei`, `manual` |
+| `dns_service_url` | `certificates.<n>.dns_service_url` | Provider endpoint |
+| `buffer_days` | `certificates.<n>.buffer_days` | Days before expiry to renew |
+| `remark` | `certificates.<n>.remark` | Operator-facing only |
+
+**Exactly one of two shapes is valid, and the projection refuses the rest.** A manual
+certificate carries `tls_cert` *and* `tls_key`; an ACME one carries `acme` and neither PEM
+half, because there is nothing to store until it is issued. The half-shapes are the ones
+worth refusing: `pingap-config`'s own validation parses each PEM half *only if present*, so
+a chain with no key passes `pingap-waf -t`, loads nothing, and the server falls back to a
+self-signed certificate at handshake — which reaches an operator as a browser warning with
+no trail back to the write that caused it.
+
+**Renewal status is not projected and cannot be.** Expiry, last issuance and last error are
+properties of the running ACME client, not of intent, and have no row in this table. They
+are read off the certificate provider, which is an observability surface.
 
 ## Policy bindings
 
