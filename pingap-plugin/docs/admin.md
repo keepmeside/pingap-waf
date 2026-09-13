@@ -24,10 +24,10 @@ the admin UI should live on an existing server behind a path prefix.
 ## Via the command line
 
 ```bash
-pingap -c /opt/pingap/conf --admin=pingap:123123@127.0.0.1:3018
+pingap-waf -c /opt/pingap/conf --admin=pingap:123123@127.0.0.1:3018
 
 # or, mounted under a prefix on an existing listener
-pingap -c /opt/pingap/conf --admin=pingap:123123@0.0.0.0:80/pingap
+pingap-waf -c /opt/pingap/conf --admin=pingap:123123@0.0.0.0:80/pingap
 ```
 
 Equivalent environment variables: `PINGAP_ADMIN_ADDR`, `PINGAP_ADMIN_USER`,
@@ -100,7 +100,7 @@ curl -H "Authorization: $TOKEN:$TS" http://127.0.0.1:3018/api/basic
 
 ## Control-panel mode
 
-`pingap --cp --admin=user:pass@127.0.0.1:3018` runs only the admin node: it
+`pingap-waf --cp --admin=user:pass@127.0.0.1:3018` runs only the admin node: it
 manages configuration in the shared backend (typically etcd) without proxying
 traffic itself. Data-plane instances watch the same backend and hot reload.
 

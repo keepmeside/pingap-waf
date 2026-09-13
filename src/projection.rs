@@ -140,7 +140,7 @@ impl DataPlane for ProviderDataPlane {
 
 /// Asks the real plugin factory whether a config can be built.
 ///
-/// This is the check `pingap -t` cannot do for a category the build lacks, and it runs
+/// This is the check `pingap-waf -t` cannot do for a category the build lacks, and it runs
 /// against the same registry the reload will use, so a config it accepts is one the reload
 /// can construct.
 pub struct FactoryPluginCheck;
@@ -563,11 +563,15 @@ mod tests {
     /// `std::env::current_exe()` is the libtest harness inside a unit test, so a validator
     /// pointed at it would run libtest instead of the gateway — exit non-zero for the wrong
     /// reason and produce a rejection that proves nothing.
+    ///
+    /// `CARGO_BIN_EXE_<name>` would be the obvious answer, but cargo only sets it for
+    /// integration tests and benchmarks, not for unit tests inside the binary target. So
+    /// the name is spelled out here and must match `[[bin]] name` in the root Cargo.toml.
     fn gateway_binary() -> std::path::PathBuf {
         let mut dir = std::env::current_exe().expect("current exe");
         dir.pop(); // deps/
         dir.pop(); // debug/
-        let candidate = dir.join("pingap");
+        let candidate = dir.join("pingap-waf");
         assert!(
             candidate.is_file(),
             "no gateway binary at {candidate:?}; build it before running this test"
@@ -1062,7 +1066,7 @@ gzip_level = 6
         assert_eq!(plugin.config_key(), plugin_config_key(&conf));
     }
 
-    /// The factory check refuses what `pingap -t` passes: a category this build does not
+    /// The factory check refuses what `pingap-waf -t` passes: a category this build does not
     /// have.
     #[test]
     fn test_factory_check_refuses_an_unknown_category() {
@@ -1095,7 +1099,7 @@ gzip_level = 6
 
     /// The security criterion behind the subprocess rule, asserted rather than argued.
     ///
-    /// `pingap -t` calls `set_trusted_proxies` before it reaches its own `--test` branch, so
+    /// `pingap-waf -t` calls `set_trusted_proxies` before it reaches its own `--test` branch, so
     /// an *in-process* validation of a candidate config would repoint this process's
     /// trusted-proxy table — and a rejected candidate would not put it back. Every
     /// XFF-derived ACL and rate-limit decision would then be silently wrong, with nothing to

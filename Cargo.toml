@@ -1,19 +1,44 @@
 [package]
+# The package keeps upstream's name `pingap`; the *binary* is `pingap-waf`, via
+# the explicit `[[bin]]` below. Renaming the package is not available — the
+# fork's own WAF crate at crates/pingap-waf already owns that name, and cargo
+# refuses two packages with the same name in one workspace.
+#
+# clap's `#[command]` in src/main.rs omits `name`, so it takes the binary target
+# name: `--help` and `--version` say `pingap-waf` with no source change. Nothing
+# resolves the binary by a literal name at runtime — config validation spawns
+# `std::env::current_exe()` and hot restart uses the recorded exec path — so the
+# rename is transparent to both.
+#
+# Declaring `[[bin]]` turns off cargo's auto-discovery of src/main.rs, which the
+# declaration replaces. Auto-discovery of src/bin/* is unaffected, so
+# `cargo run --bin generate-mermaid` still works.
+#
+# Deliberately unchanged: the 19 `pingap-*` crate names, the `PINGAP_*`
+# environment variables, and the runtime paths `/etc/pingap`, `/run/pingap.pid`
+# and `/tmp/pingap_upgrade.sock`. Those are a contract with existing
+# deployments, not build artifacts — and `pingap-controlplane` uses "pingap" as
+# its token issuer while `pingap-cache` uses it as its on-disk namespace, so
+# changing them would invalidate issued tokens and stored caches.
 name = "pingap"
 version.workspace = true
 authors = ["Tree Xie <tree.xie@outlook.com>"]
 edition = "2024"
 categories = ["network-programming", "web-programming::http-server"]
-keywords = ["proxy", "http", "gateway"]
-description = "A reverse proxy like nginx"
+keywords = ["proxy", "http", "gateway", "waf", "security"]
+description = "A Pingora reverse proxy with a native WAF, domain ACL, JA4H bot management and a control plane"
 license = "Apache-2.0"
-homepage = "https://github.com/vicanso/pingap"
-repository = "https://github.com/vicanso/pingap"
+homepage = "https://github.com/keepmeside/pingap-waf"
+repository = "https://github.com/keepmeside/pingap-waf"
 exclude = ["asset/*", "test/*", "Cargo.lock", "web/*", ".github/*", "docs/*"]
 readme = "./README.md"
 rust-version = "1.88"
-default-run = "pingap"
+default-run = "pingap-waf"
 build = "build.rs"
+
+[[bin]]
+name = "pingap-waf"
+path = "src/main.rs"
 
 [lints.clippy]
 # Set the unwrap_used lint level to deny
@@ -154,52 +179,65 @@ harness = false
 [package.metadata.cargo-machete]
 ignored = ["humantime-serde", "hcl-rs", "kdl"]
 
-# Debian packaging (cargo-deb). The paths below are not a fresh choice: they are
-# the ones pingap.service has always used, so the unit works as installed.
+# Debian packaging (cargo-deb). The config path below is not a fresh choice: it
+# is the one pingap-waf.service has always used, so the unit works as installed.
+# `/etc/pingap` and `PINGAP_*` keep upstream's names on purpose — they are a
+# runtime contract, and moving them would break every existing deployment for no
+# gain. `usr/sbin` and `usr/share/doc` follow the package name, as Debian policy
+# requires.
 #
 # Built from the musl targets in publish.yml, which link statically - hence
 # `depends` is empty rather than `$auto`. `$auto` would run dpkg-shlibdeps and
 # tie the package to the glibc of whichever runner built it.
 [package.metadata.deb]
+# The Cargo package is still `pingap` (see the note at the top of this file), so
+# without this the .deb would be named for upstream while installing a binary and
+# a unit called pingap-waf. cargo-deb is not run by this fork's CI — publish.yml
+# is not vendored — but the metadata should still describe the artifact it would
+# produce.
+name = "pingap-waf"
 maintainer = "Tree Xie <tree.xie@outlook.com>"
 copyright = "2024-2026, Tree Xie <tree.xie@outlook.com>"
 license-file = ["LICENSE", "0"]
 extended-description = """\
-Pingap is a reverse proxy built on Cloudflare Pingora, configured through TOML, \
-HCL or KDL and manageable from a built-in web admin panel. It supports dynamic \
-upstreams, health checks, ACME certificates and a plugin chain for auth, \
-caching, rate limiting and traffic splitting."""
+pingap-waf is a fork of Pingap, the reverse proxy built on Cloudflare Pingora. \
+It adds a native Rust WAF with CRS-category parity, a per-domain ACL, JA4H bot \
+management, and a control plane with per-user admin auth, 2FA and config \
+versioning. Configuration is TOML, HCL or KDL, hot-reloadable, and manageable \
+from a built-in web admin panel; the WAF is attached per location as a plugin \
+and defaults to detect-only."""
 section = "net"
 priority = "optional"
 # Statically linked, so nothing to resolve at install time.
 depends = ""
 assets = [
-    ["target/release/pingap", "usr/sbin/pingap", "755"],
+    ["target/release/pingap-waf", "usr/sbin/pingap-waf", "755"],
     # The one config file that is canonical in every layout pingap supports, so
     # dropping it here cannot trigger the startup layout migration. Everything
     # in /etc is registered as a conffile, so an edited copy survives upgrades.
     ["conf/basic.toml", "etc/pingap/conf/basic.toml", "644"],
-    ["README.md", "usr/share/doc/pingap/README.md", "644"],
+    ["README.md", "usr/share/doc/pingap-waf/README.md", "644"],
     # Reference material, deliberately outside /etc: these use the one file per
     # category layout, which would collide with the `?separation` layout the
     # unit asks for if they were loaded as live config.
-    ["conf/servers.toml", "usr/share/doc/pingap/examples/servers.toml", "644"],
-    ["conf/locations.toml", "usr/share/doc/pingap/examples/locations.toml", "644"],
-    ["conf/upstreams.toml", "usr/share/doc/pingap/examples/upstreams.toml", "644"],
-    ["conf/plugins.toml", "usr/share/doc/pingap/examples/plugins.toml", "644"],
-    ["conf/certificates.toml", "usr/share/doc/pingap/examples/certificates.toml", "644"],
+    ["conf/servers.toml", "usr/share/doc/pingap-waf/examples/servers.toml", "644"],
+    ["conf/locations.toml", "usr/share/doc/pingap-waf/examples/locations.toml", "644"],
+    ["conf/upstreams.toml", "usr/share/doc/pingap-waf/examples/upstreams.toml", "644"],
+    ["conf/plugins.toml", "usr/share/doc/pingap-waf/examples/plugins.toml", "644"],
+    ["conf/certificates.toml", "usr/share/doc/pingap-waf/examples/certificates.toml", "644"],
 ]
 # cargo-deb writes the generated systemd maintainer scripts here. Without this
 # key it installs the unit but emits no postinst/postrm at all, so nothing runs
 # `systemctl daemon-reload` and `purge` leaves the unit registered.
 maintainer-scripts = "packaging/debian"
 
-# `unit-scripts = "."` because pingap.service lives at the repo root and is the
-# file the docs point at. Installed but neither enabled nor started: the shipped
-# config defines no server, so doing either here would only produce a failed
-# unit. `systemctl enable --now pingap` once there is something to serve.
+# `unit-scripts = "."` because pingap-waf.service lives at the repo root and is
+# the file the docs point at. Installed but neither enabled nor started: the
+# shipped config defines no server, so doing either here would only produce a
+# failed unit. `systemctl enable --now pingap-waf` once there is something to
+# serve.
 [package.metadata.deb.systemd-units]
-unit-name = "pingap"
+unit-name = "pingap-waf"
 unit-scripts = "."
 enable = false
 start = false

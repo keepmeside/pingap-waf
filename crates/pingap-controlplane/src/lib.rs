@@ -6,7 +6,7 @@
 //!
 //! The boundary is the load-bearing decision: **the gateway must start and serve with
 //! this store unavailable.** Config (file or etcd) owns domains, upstreams, certificates
-//! and policy, and already has validation, history, an etcd watch and `pingap -t`. This
+//! and policy, and already has validation, history, an etcd watch and `pingap-waf -t`. This
 //! store owns identity and history. Nothing here is on the request path.
 
 pub mod auth;

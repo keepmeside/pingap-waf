@@ -67,7 +67,7 @@ of stream and emits the result.
 - Compressed upstream responses are opaque bytes here: if the upstream returns
   gzip, the filters will not match. Either ask the upstream not to compress, or
   compress in Pingap with [`compression`](compression.md) after this plugin.
-- A rule that fails to parse is a startup error, so `pingap -t` catches quoting
+- A rule that fails to parse is a startup error, so `pingap-waf -t` catches quoting
   mistakes. Patterns and replacements must be wrapped in single quotes and cannot
   themselves contain a single quote.
 - Replacement happens on raw bytes, so a match that straddles a multi-byte UTF-8

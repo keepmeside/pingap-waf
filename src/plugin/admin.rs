@@ -319,7 +319,7 @@ impl AdminServe {
     ///
     /// A failure here is a broken installation — `new_applier` only fails when this
     /// executable's own path cannot be resolved, which is what validation needs to spawn
-    /// `pingap -t`. Reported as a state the operator can read rather than a panic, on the
+    /// `pingap-waf -t`. Reported as a state the operator can read rather than a panic, on the
     /// same reasoning as an unavailable store: the data plane keeps serving either way.
     async fn api(&self) -> std::result::Result<&AppState, String> {
         self.api
@@ -1157,7 +1157,7 @@ mod tests {
 
     /// The same key is required by `basic_auth` and `combined_auth`, and the
     /// rejection above must not reach them. Asserted through the factory,
-    /// which is the path `pingap -t` takes.
+    /// which is the path `pingap-waf -t` takes.
     #[test]
     fn test_basic_auth_and_combined_auth_still_accept_authorizations() {
         let factory = pingap_plugin::get_plugin_factory();

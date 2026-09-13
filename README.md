@@ -6,10 +6,11 @@ auth — on top of the vendored pingap reverse proxy, which is kept at upstream 
 so `git merge upstream/main` stays readable.
 
 > **This fork publishes no binaries, container images, or releases.** Build it from
-> source. Upstream's `install.sh`, the `vicanso/pingap` image, and upstream's release
-> assets all install **upstream pingap**, which contains none of the code described
-> below. Likewise <https://pingap.io/> documents upstream; this fork's own features
-> are documented under [`docs/`](./docs/README.md).
+> source. The `install.sh` and `docker-compose.yml` in this repository are upstream's
+> and still resolve to `vicanso/pingap`, so both install **upstream pingap** — which
+> contains none of the code described below, and whose binary is called `pingap`
+> rather than this fork's `pingap-waf`. Likewise <https://pingap.io/> documents
+> upstream; this fork's own features are documented under [`docs/`](./docs/README.md).
 
 Vendored base: pingap **0.13.10**, commit `51025efca56f342a9a1e5e40559637f32b9140bf`
 (tag `v0.13.10`, 2026-08-29), Apache-2.0. Provenance for every import is recorded in
@@ -143,8 +144,18 @@ make release-full     # tracing + imageoptim
 make release-perf     # release-perf profile, includes the pyroscope agent
 
 # validate a config and exit
-./target/release/pingap --conf ./examples/grpc-web/grpc-web.toml -t
+./target/release/pingap-waf --conf ./examples/grpc-web/grpc-web.toml -t
 ```
+
+The **binary** is `pingap-waf`; the Cargo **package** is still `pingap`. The fork's
+own WAF crate at `crates/pingap-waf` already owns the other name and cargo refuses
+two packages with one name in a workspace, so an explicit `[[bin]]` renames the
+target instead. `--help`, `--version`, the Docker `CMD` and the systemd unit
+(`pingap-waf.service`) all say `pingap-waf`. Runtime contracts keep upstream's
+names — `PINGAP_*`, `/etc/pingap`, `/run/pingap.pid`, `/tmp/pingap_upgrade.sock` —
+because those are not build artifacts, and `pingap-controlplane` uses `pingap` as
+its token issuer while `pingap-cache` uses it as its on-disk namespace. See
+[`NOTICE`](./NOTICE) divergence 6.
 
 ### Features
 

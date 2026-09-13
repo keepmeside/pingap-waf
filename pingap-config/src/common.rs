@@ -274,7 +274,7 @@ impl Validate for CertificateConf {
 
         // An unrecognised dns provider used to fall through to the manual task,
         // which just waits for a TXT record nobody is going to add. Reject it
-        // here so `pingap -t` reports the typo instead.
+        // here so `pingap-waf -t` reports the typo instead.
         if let Some(dns_provider) = &self.dns_provider
             && normalize_dns_provider(dns_provider).is_none()
         {

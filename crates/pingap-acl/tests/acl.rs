@@ -84,7 +84,7 @@ async fn an_unsupported_step_is_rejected_rather_than_silently_ignored() {
 
 #[tokio::test]
 async fn an_unknown_field_or_operator_fails_config_load_by_name() {
-    // What `pingap -t` surfaces. A rule the engine cannot evaluate must not load: the
+    // What `pingap-waf -t` surfaces. A rule the engine cannot evaluate must not load: the
     // operator would believe it is enforcing.
     let msg = error(
         "category = \"acl\"\nrules = [ { field = \"country\", operator = \

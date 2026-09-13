@@ -1,10 +1,15 @@
 import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 
-const github = "https://github.com/vicanso/pingap";
+// This fork's repository. `upstream` is kept separate on purpose: the crate and
+// plugin READMEs the site assembles are upstream's files, and the source footers
+// scripts/build-website.sh appends to them point at upstream for that reason.
+const github = "https://github.com/keepmeside/pingap-waf";
+const upstream = "https://github.com/vicanso/pingap";
 
-// Custom domain (pingap.io) serves at site root. Override for project pages:
-//   DOCS_BASE=/pingap/ npm run docs:build
+// Nothing deploys this site — the fork does not vendor upstream's pages.yml, so
+// both the assembly step and this build are run by hand. DOCS_BASE exists for
+// serving the output under a subpath, e.g. username.github.io/pingap-waf/.
 const base = process.env.DOCS_BASE || "/";
 
 function pluginSidebar(prefix: string, labels: {
@@ -113,6 +118,63 @@ function guideSidebar(prefix: string, labels: {
     { text: labels.modules, link: `${prefix}/guide/modules` },
     { text: labels.acme, link: `${prefix}/guide/acme-flow` },
     { text: labels.examples, link: `${prefix}/guide/examples` },
+    // Fork-owned pages, assembled from docs/ by scripts/build-website.sh. The
+    // labels are not parameterised because the site is English-only — there is
+    // no second locale left to supply them for. Keep this list in step with the
+    // fork_docs array in the build script: a page copied but not listed here is
+    // unreachable, and a page listed but not copied is a dead sidebar link.
+    {
+      text: "WAF",
+      items: [
+        { text: "waf plugin", link: `${prefix}/guide/waf-plugin` },
+        {
+          text: "Category to CRS lineage",
+          link: `${prefix}/guide/waf-category-mapping`,
+        },
+        { text: "Latency", link: `${prefix}/guide/waf-benchmark` },
+      ],
+    },
+    {
+      text: "ACL and domains",
+      items: [
+        { text: "acl plugin", link: `${prefix}/guide/acl-plugin` },
+        { text: "Domain model", link: `${prefix}/guide/domain-model` },
+      ],
+    },
+    {
+      text: "Bot management",
+      items: [{ text: "JA4 support", link: `${prefix}/guide/ja4-support` }],
+    },
+    {
+      text: "Control plane",
+      items: [
+        {
+          text: "Store and admin auth",
+          link: `${prefix}/guide/control-plane-store`,
+        },
+        { text: "Config projection", link: `${prefix}/guide/config-projection` },
+      ],
+    },
+    {
+      text: "Spike findings",
+      collapsed: true,
+      items: [
+        {
+          text: "Detector baseline",
+          link: `${prefix}/guide/spikes/detector-baseline`,
+        },
+        {
+          text: "Config validation",
+          link: `${prefix}/guide/spikes/config-validate-finding`,
+        },
+        { text: "JA4 reachability", link: `${prefix}/guide/spikes/ja4-finding` },
+        { text: "Turso driver", link: `${prefix}/guide/spikes/turso-finding` },
+        {
+          text: "Body forwarding",
+          link: `${prefix}/guide/spikes/body-forwarding-finding`,
+        },
+      ],
+    },
   ];
 }
 
@@ -162,10 +224,13 @@ export default withMermaid(
             { text: "Crates", link: "/crates/" },
             { text: "Examples", link: "/guide/examples" },
             {
-              text: "vLatest",
+              // No "Releases" entry: this fork publishes no release assets, so
+              // the link would land on an empty page. Upstream's releases are
+              // reachable through its own repository entry.
+              text: "Repository",
               items: [
-                { text: "GitHub", link: github },
-                { text: "Releases", link: `${github}/releases` },
+                { text: "This fork", link: github },
+                { text: "Upstream pingap", link: upstream },
               ],
             },
           ],

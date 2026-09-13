@@ -16,7 +16,7 @@ Allow- or deny-list requests by `User-Agent`, matched with regular expressions.
 
 Patterns use the [`regex`] crate's syntax and are **unanchored** — `go-http-client`
 matches anywhere in the header. Anchor with `^…$` when you mean an exact value.
-An invalid pattern is a startup error, so `pingap -t` catches it.
+An invalid pattern is a startup error, so `pingap-waf -t` catches it.
 
 ## Examples
 

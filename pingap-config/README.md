@@ -32,7 +32,7 @@ pub struct PingapConfig {
 | `certificates` | TLS certificates, including ACME settings |
 | `storages` | Reusable configuration fragments referenced by `includes`; also where ACME keeps its challenge state |
 
-Every section implements `Validate`. `pingap -t` loads the configuration, runs
+Every section implements `Validate`. `pingap-waf -t` loads the configuration, runs
 all validators and exits — run it in CI and before a reload.
 
 ## Storage backends
@@ -55,9 +55,9 @@ directory it guessed was a file would silently ignore `separation` and write
 never have written.
 
 ```bash
-pingap -c /opt/pingap/conf --autoreload
-pingap -c "etcd://127.0.0.1:2379/pingap?timeout=10s&connect_timeout=5s" --autoreload
-pingap -c "/opt/pingap/conf?separation=true&enable_history=true"
+pingap-waf -c /opt/pingap/conf --autoreload
+pingap-waf -c "etcd://127.0.0.1:2379/pingap?timeout=10s&connect_timeout=5s" --autoreload
+pingap-waf -c "/opt/pingap/conf?separation=true&enable_history=true"
 ```
 
 Query parameters for the file backend (directories only):
@@ -103,7 +103,7 @@ that entry and so cannot clean up a file containing all the others. That single
 write is what turns a directory carrying one old layout into a broken one.
 
 `MemoryStorage` backs the config-file-less quick start
-(`pingap --domain=… --upstream=…`): the configuration is synthesized from the
+(`pingap-waf --domain=… --upstream=…`): the configuration is synthesized from the
 command line and held in memory, with writes optionally mirrored to a file so an
 ACME-issued certificate survives a restart.
 
@@ -179,11 +179,11 @@ upstream "api" {
 Conversion and migration on the command line:
 
 ```bash
-pingap -c /opt/pingap/conf --to-hcl ./conf.hcl        # dump as HCL
-pingap -c /opt/pingap/conf --to-kdl ./conf.kdl        # dump as KDL
-pingap -c /opt/pingap/conf --sync etcd://127.0.0.1:2379/pingap   # file -> etcd
-pingap --template > pingap.toml                       # starter config
-pingap -c /opt/pingap/conf -t                         # validate and exit
+pingap-waf -c /opt/pingap/conf --to-hcl ./conf.hcl        # dump as HCL
+pingap-waf -c /opt/pingap/conf --to-kdl ./conf.kdl        # dump as KDL
+pingap-waf -c /opt/pingap/conf --sync etcd://127.0.0.1:2379/pingap   # file -> etcd
+pingap-waf --template > pingap.toml                       # starter config
+pingap-waf -c /opt/pingap/conf -t                         # validate and exit
 ```
 
 ## Hot reload

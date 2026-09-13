@@ -1,9 +1,9 @@
 //! The validation gate: does this generated config actually load?
 //!
-//! Two checks, because neither alone is enough. Phase 02's Spike D measured `pingap -t`
+//! Two checks, because neither alone is enough. Phase 02's Spike D measured `pingap-waf -t`
 //! against four classes of invalid config and it **exited 0 on three of them**:
 //!
-//! | Invalid config | `pingap -t` |
+//! | Invalid config | `pingap-waf -t` |
 //! | --- | --- |
 //! | Malformed TOML | caught, with file/line/column |
 //! | Unknown plugin category | passes |
@@ -76,7 +76,7 @@ impl PluginCheck for NoPluginCheck {
     }
 }
 
-/// Runs `pingap -t` against a staged copy.
+/// Runs `pingap-waf -t` against a staged copy.
 pub struct Validator {
     binary: PathBuf,
 }
@@ -114,7 +114,7 @@ impl Validator {
             if let Err(reason) = plugins.check(name, conf) {
                 return Ok(Verdict::Rejected {
                     reason: format!(
-                        "plugin `{name}` cannot be built: {reason}. `pingap -t` does not \
+                        "plugin `{name}` cannot be built: {reason}. `pingap-waf -t` does not \
                          catch this — a Location-attached plugin is never constructed \
                          during a config test"
                     ),
@@ -124,7 +124,7 @@ impl Validator {
         self.run_config_test(projected).await
     }
 
-    /// Stage the config into a temporary directory and run `pingap -t -c <dir>`.
+    /// Stage the config into a temporary directory and run `pingap-waf -t -c <dir>`.
     async fn run_config_test(&self, projected: &Projected) -> Result<Verdict> {
         let dir = tempfile::tempdir().map_err(|e| {
             super::ProjectionError::Serialise {
@@ -168,7 +168,7 @@ impl Validator {
             reason.push_str(&out);
         }
         if reason.is_empty() {
-            reason = format!("`pingap -t` exited with {}", output.status);
+            reason = format!("`pingap-waf -t` exited with {}", output.status);
         }
         Ok(Verdict::Rejected { reason })
     }

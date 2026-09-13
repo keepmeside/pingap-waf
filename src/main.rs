@@ -1077,8 +1077,8 @@ fn main() {
         // `logger_try_init`, in which case the `error!` below reaches nobody.
         eprintln!("{e}");
         error!(error = e.to_string());
-        // Exit non-zero. Without this `pingap -t` reported success on a config
-        // it had just refused to load, so `pingap -t && systemctl reload pingap`
+        // Exit non-zero. Without this `pingap-waf -t` reported success on a config
+        // it had just refused to load, so `pingap-waf -t && systemctl reload pingap`
         // reloaded anyway, and a supervisor could not tell a failed start from
         // a clean shutdown.
         std::process::exit(1);

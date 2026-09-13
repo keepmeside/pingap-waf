@@ -117,7 +117,7 @@ the same factory and are configured exactly the same way.
 1. Implement `pingap_core::Plugin`. Only the hooks you need have to be
    overridden — every method has a default no-op implementation.
 2. Parse `&PluginConf` in `TryFrom`, using the `get_*_conf` helpers in
-   `src/plugin.rs`, and reject invalid combinations there so that `pingap -t`
+   `src/plugin.rs`, and reject invalid combinations there so that `pingap-waf -t`
    catches them before the proxy starts.
 3. Return `get_hash_key(conf)` from `config_key()`. Pingap uses it to detect
    whether a hot reload actually changed this plugin instance.

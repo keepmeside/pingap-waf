@@ -14,7 +14,7 @@ work.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `category` | string | — | Must be `forward_auth`. |
-| `auth_url` | string | — | **Required.** Auth endpoint. Parsed at startup, so typos fail `pingap -t`. |
+| `auth_url` | string | — | **Required.** Auth endpoint. Parsed at startup, so typos fail `pingap-waf -t`. |
 | `request_headers` | string[] | *(all)* | Which original request headers to forward. Empty forwards everything. |
 | `add_headers` | string[] | — | Headers copied from the auth response onto the upstream request on success. |
 | `timeout` | duration | `10s` | Per-subrequest timeout. |

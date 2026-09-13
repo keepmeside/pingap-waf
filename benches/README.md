@@ -24,7 +24,7 @@ sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
 ## Pingap
 
 ```bash
-pingap -d -c ~/tmp/pingap.toml --log=~/tmp/pingap.log
+pingap-waf -d -c ~/tmp/pingap.toml --log=~/tmp/pingap.log
 ```
 
 ### Pingap direct response

@@ -33,7 +33,7 @@ added automatically for the duration — you do not need to declare it.
 The one-command quick start does the same thing with no config file at all:
 
 ```bash
-pingap --domain=pingap.io --upstream=192.168.1.1:3000
+pingap-waf --domain=pingap.io --upstream=192.168.1.1:3000
 ```
 
 ## DNS-01
@@ -60,7 +60,7 @@ buffer_days = 30
 
 The canonical names are `ali` and `cf`; `aliyun` and `cloudflare` are accepted
 as aliases because earlier documentation used those spellings. Anything else is
-rejected by `pingap -t` rather than quietly falling back to the manual task and
+rejected by `pingap-waf -t` rather than quietly falling back to the manual task and
 waiting for a TXT record nobody is going to add.
 
 Any value in `dns_service_url` may be written as `$ENV:NAME` and is read from the

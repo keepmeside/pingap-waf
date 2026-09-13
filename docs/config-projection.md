@@ -22,7 +22,7 @@ intent (Turso)
    ▼
 Projected { config, canonical toml }
    │
-   │ validate      PluginCheck (in-process)  →  `pingap -t -c <staged tmpdir>` (subprocess)
+   │ validate      PluginCheck (in-process)  →  `pingap-waf -t -c <staged tmpdir>` (subprocess)
    │                    │
    │                    └── rejected ──► ConfigVersion { status: failed, error }, nothing written
    ▼
@@ -83,10 +83,10 @@ filled by `#[ctor]` registration inside each plugin crate, so a check compiled i
 pass everything it exists to catch. The binary supplies the real implementation
 (`FactoryPluginCheck` in `src/projection.rs`).
 
-**`pingap -t`, as a subprocess against a staged copy.** Spike D measured `-t` against four
+**`pingap-waf -t`, as a subprocess against a staged copy.** Spike D measured `-t` against four
 classes of invalid config:
 
-| Invalid config | `pingap -t` |
+| Invalid config | `pingap-waf -t` |
 | --- | --- |
 | Malformed TOML | rejected, with file, line and column |
 | Unknown plugin category | **exits 0** — `validate_plugins` only `warn!`s |

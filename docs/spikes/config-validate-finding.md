@@ -1,13 +1,13 @@
 # Spike D — Out-of-process config validation
 
-**Status: CONDITIONAL GO for Phase 08's two-phase apply. `pingap -t` is usable as
+**Status: CONDITIONAL GO for Phase 08's two-phase apply. `pingap-waf -t` is usable as
 a subprocess gate, but it is porous on plugin validity and it mutates
 process-global state — so it must never be called in-process.**
 
 Decision gate for Phase 08. Run 2026-09-02 against the vendored binary at
 `vendor/pingap-0.13.10`.
 
-## Q1 — Does `pingap -t -c <dir>` validate a candidate directory?
+## Q1 — Does `pingap-waf -t -c <dir>` validate a candidate directory?
 
 **Yes.** A well-formed candidate directory the running gateway is not using
 validates cleanly and exits 0.
@@ -69,7 +69,7 @@ rate-limit decision.
 
 1. **Validation runs as a subprocess against a staged copy. Not negotiable, and
    not merely a preference** — the global-state mutation above is the reason.
-2. **Exit 0 from `pingap -t` does not mean the config will load.** Phase 08's
+2. **Exit 0 from `pingap-waf -t` does not mean the config will load.** Phase 08's
    step 6b post-commit verification is therefore not redundant with pre-commit
    validation; it is the only thing that catches a plugin which validates and
    then fails to construct. Keep both.
@@ -151,7 +151,7 @@ branch is reached, folding whatever layout it finds into the current `ConfigMode
 This is a **filesystem** side effect, and it is a stronger reason for the staged copy than
 the two process-global ones already recorded: validating against the live directory would
 rewrite an operator's config file as a side effect of checking it. It also means
-`pingap -t -c /etc/pingap` is not a read-only operation, which an operator would not
+`pingap-waf -t -c /etc/pingap` is not a read-only operation, which an operator would not
 expect.
 
 Guarded by `crates/pingap-controlplane/tests/projection.rs::validating_never_touches_a_directory_the_caller_owns`,

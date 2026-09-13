@@ -53,7 +53,7 @@ msrv:
 
 
 bloat:
-	cargo bloat --release --crates --bin pingap
+	cargo bloat --release --crates --bin pingap-waf
 
 outdated:
 	cargo outdated
@@ -78,7 +78,7 @@ release-full:
 
 release-all:
 	cargo build --release --features=full
-	mv target/release/pingap target/release/pingap-full
+	mv target/release/pingap-waf target/release/pingap-waf-full
 	cargo build --release
 	ls -lh target/release
 

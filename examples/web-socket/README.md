@@ -4,7 +4,7 @@ WebSocket服务：`wss://ws.postman-echo.com/raw`，使用postman测试
 
 
 ```bash
-pingap -c ~/github/pingap/examples/web-socket --admin=127.0.0.1:3018 --autoreload
+pingap-waf -c ~/github/pingap/examples/web-socket --admin=127.0.0.1:3018 --autoreload
 ```
 
 

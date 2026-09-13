@@ -10,7 +10,7 @@ recover without it, and the driver behaviours every writer must respect.
 
 | Store | Owns | Why |
 | --- | --- | --- |
-| pingap config (file / etcd) | domains, upstreams, TLS, WAF / ACL / bot policy, plugin instances, alert *rule definitions* | already has validation, history, an etcd watch, hot reload and `pingap -t` |
+| pingap config (file / etcd) | domains, upstreams, TLS, WAF / ACL / bot policy, plugin instances, alert *rule definitions* | already has validation, history, an etcd watch, hot reload and `pingap-waf -t` |
 | control-plane store | users, 2FA secrets, sessions, refresh tokens, activity log, alert *history*, metric rollups, backup metadata, node status, WAF events | append-heavy, queried by range, role-filtered |
 
 **The gateway starts and serves with the store absent, deleted, or
@@ -20,9 +20,9 @@ unreachable:
 
 - the data plane proxies as configured;
 - the admin login page loads;
-- every admin API route answers **503** with `control-plane store unavailable:
-  <reason>`, not 401 (which would send an operator to reset a password) and not
-  500 (which reads as a crash);
+- every admin API route answers **503** with
+  `control-plane store unavailable: <reason>`, not 401 (which would send an
+  operator to reset a password) and not 500 (which reads as a crash);
 - `GET /api/basic` reports the reason in `control_plane_store_error`.
 
 Deleting the store loses history and accounts. It does not lose configuration,
@@ -35,7 +35,7 @@ operator already knows is pingap's, already backs up, and already restricts.
 Override with `store=` on the admin address:
 
 ```bash
-pingap -c /etc/pingap/pingap.toml \
+pingap-waf -c /etc/pingap/pingap.toml \
   --admin 'admin:s3cret@127.0.0.1:3018/?store=/var/lib/pingap/control-plane.db&totp_key=...'
 ```
 
@@ -89,7 +89,7 @@ An operator whose store already has users can drop it from the command line.
 ### Migrating from `authorizations`
 
 A `category = "admin"` entry that still carries `authorizations` **fails
-`pingap -t`** with the replacement named. Refused rather than ignored: an
+`pingap-waf -t`** with the replacement named. Refused rather than ignored: an
 operator with the key in their config believes admin auth is configured, and
 silently dropping it would leave them believed-secure but open. The rejection
 is scoped to the admin plugin — `basic_auth` and `combined_auth` read the same

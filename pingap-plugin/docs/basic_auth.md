@@ -16,7 +16,7 @@ dashboards and anything behind a browser where a login page is overkill.
 | `hide_credentials` | bool | `false` | Strip `Authorization` before proxying upstream. |
 
 `authorizations` entries are validated as base64 at startup, so a typo fails
-`pingap -t` instead of silently locking everyone out. Credentials are compared in
+`pingap-waf -t` instead of silently locking everyone out. Credentials are compared in
 constant time.
 
 ## Generating an entry

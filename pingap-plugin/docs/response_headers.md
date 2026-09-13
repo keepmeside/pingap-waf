@@ -84,7 +84,7 @@ An instance handles exactly one of the two — it is not both.
 ## Usage notes
 
 - `remove_headers` and `rename_headers` names must be valid HTTP header names or
-  startup fails, which `pingap -t` will report.
+  startup fails, which `pingap-waf -t` will report.
 - `rename_headers` appends to the destination, so renaming onto an existing
   header produces two values rather than overwriting.
 - A dynamic value that cannot be resolved falls back to the literal configured

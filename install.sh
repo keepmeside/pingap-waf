@@ -1,5 +1,14 @@
 #!/usr/bin/env sh
 
+# This is upstream's installer, vendored unchanged, and it installs UPSTREAM
+# pingap. REPO below is vicanso/pingap and the release assets it downloads
+# contain a binary named `pingap`.
+#
+# This fork builds a binary named `pingap-waf` and publishes no release assets,
+# so there is nothing here for it to download. Do not repoint target_bin at
+# pingap-waf: that would install upstream's binary under this fork's name. Build
+# from source instead -- see the root README.md.
+
 set -eu
 printf '\n'
 

@@ -77,6 +77,27 @@ pingap  --  vendored, and the host program of this fork
      than vendored, since upstream's describes a published binary and image this
      fork does not ship.
 
+  6. The binary is `pingap-waf`, not `pingap`. The Cargo package keeps upstream's
+     name `pingap`, because the fork's own WAF crate at `crates/pingap-waf`
+     already owns `pingap-waf` and cargo refuses two packages with the same name
+     in one workspace; an explicit `[[bin]]` renames the target instead, and
+     clap's `#[command]` omits `name`, so `--help` and `--version` follow with no
+     source change. `Dockerfile`, `entrypoint.sh`, `Makefile` (`release-all` and
+     `bloat`), the systemd unit (renamed to `pingap-waf.service`), and the
+     cargo-deb `name`, assets and `unit-name` all follow.
+
+     `install.sh` and `docker-compose.yml` are deliberately NOT repointed. Both
+     fetch upstream's image and release assets, which contain a binary called
+     `pingap`; renaming the target there would install upstream's binary under
+     this fork's name.
+
+     Runtime contracts keep upstream's names as well — `PINGAP_*`, `/etc/pingap`,
+     `/run/pingap.pid`, `/tmp/pingap_upgrade.sock`, the `pingap` token issuer in
+     `pingap-controlplane` and the `pingap` on-disk cache namespace in
+     `pingap-cache`. Those are not build artifacts: changing them would
+     invalidate issued tokens and stored caches, and break every existing
+     deployment, without changing what the binary is called.
+
 ================================================================================
 pingora  --  upstream dependency, not vendored
 ================================================================================

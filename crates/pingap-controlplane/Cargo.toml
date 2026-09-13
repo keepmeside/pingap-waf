@@ -48,7 +48,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 snafu = { workspace = true }
 # `process` and `fs`: validation stages the candidate config to a temp dir and runs
-# `pingap -t` against it as a subprocess, never in-process.
+# `pingap-waf -t` against it as a subprocess, never in-process.
 tokio = { workspace = true, features = ["sync", "macros", "rt", "process", "fs", "time"] }
 tracing = { workspace = true }
 # TOTP secrets are encrypted at rest with a key from configuration. `pingap-util`

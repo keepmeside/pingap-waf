@@ -264,7 +264,7 @@ fn the_contract_file_names_every_config_key_the_projection_emits() {
 #[test]
 fn a_domain_naming_an_unknown_upstream_or_listener_is_refused() {
     // Generation is total, so a dangling reference cannot be "filled in later" — it
-    // would reach `pingap -t` as a config that names an upstream that does not exist.
+    // would reach `pingap-waf -t` as a config that names an upstream that does not exist.
     let mut bad = intent();
     bad.domains.get_mut("api").expect("api").upstream = "nope".to_string();
     let err =
@@ -295,7 +295,7 @@ fn a_policy_binding_with_no_matching_policy_is_refused() {
 
 #[test]
 fn the_generated_config_passes_pingap_own_validation() {
-    // Not the full gate — that is a subprocess `pingap -t` — but the in-crate check
+    // Not the full gate — that is a subprocess `pingap-waf -t` — but the in-crate check
     // pingap-config offers, so a structurally impossible config fails here before it
     // costs a process spawn.
     let out = generate(&intent()).expect("generates");
@@ -341,7 +341,7 @@ impl PluginCheck for KnownPlugins {
 
 #[tokio::test]
 async fn the_gate_refuses_a_plugin_this_build_cannot_construct() {
-    // Spike D's third and fourth rows: `pingap -t` exits 0 on a category compiled out of
+    // Spike D's third and fourth rows: `pingap-waf -t` exits 0 on a category compiled out of
     // the build and on a known category with invalid parameters. The control plane's own
     // check is the only thing standing between those and a committed config, so it runs
     // first and the subprocess never has to be spawned.
@@ -359,7 +359,7 @@ async fn the_gate_refuses_a_plugin_this_build_cannot_construct() {
             assert!(reason.contains("waf:strict"), "{reason}");
             assert!(reason.contains("not in this build"), "{reason}");
             assert!(
-                reason.contains("pingap -t` does not catch this"),
+                reason.contains("pingap-waf -t` does not catch this"),
                 "the reason should say why the subprocess would have passed: {reason}"
             );
         },
@@ -432,13 +432,13 @@ fn pingap_binary() -> Option<std::path::PathBuf> {
     // .../target/debug/deps/projection-<hash> -> .../target/debug
     dir.pop();
     dir.pop();
-    let candidate = dir.join("pingap");
+    let candidate = dir.join("pingap-waf");
     candidate.is_file().then_some(candidate)
 }
 
 #[tokio::test]
 async fn validating_never_touches_a_directory_the_caller_owns() {
-    // `pingap -t -c <dir>` is **not** read-only: it folds the directory into the current
+    // `pingap-waf -t -c <dir>` is **not** read-only: it folds the directory into the current
     // config layout before it reaches its own `--test` branch, renaming `pingap.toml` to
     // `pingap.toml.bak` and writing one file per category. Measured, not assumed — see the
     // assertions below.
@@ -499,7 +499,7 @@ async fn validating_never_touches_a_directory_the_caller_owns() {
     assert!(status.success(), "the projection should validate");
     assert!(
         staged.path().join("pingap.toml.bak").is_file(),
-        "`pingap -t` no longer rewrites its config directory; if that is now true, this \
+        "`pingap-waf -t` no longer rewrites its config directory; if that is now true, this \
          test and the comment above should be simplified rather than deleted"
     );
 }

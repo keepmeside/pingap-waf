@@ -1,0 +1,28 @@
+# pingap-waf server
+# /usr/lib/systemd/system/pingap-waf.service
+# sudo systemctl enable pingap-waf.service
+#
+# The binary is /usr/sbin/pingap-waf, matching the package name. The runtime
+# paths deliberately keep upstream's names — /etc/pingap for config,
+# /run/pingap.pid, /var/log/pingap — because they are a contract with existing
+# deployments and with the defaults compiled into the binary (src/main.rs sets
+# pid_file to /run/pingap.pid and upgrade_sock to /tmp/pingap_upgrade.sock).
+# PIDFile below must match whatever the config's `pid_file` resolves to.
+
+
+[Unit]
+Description=A high performance reverse proxy with a native WAF, ACL and bot management
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+User=root
+PIDFile=/run/pingap.pid
+ExecStartPre=/usr/sbin/pingap-waf --conf=/etc/pingap/conf?separation -t
+ExecStart=/usr/sbin/pingap-waf --conf=/etc/pingap/conf?separation -d --log=/var/log/pingap --autorestart
+ExecStop=/sbin/start-stop-daemon --quiet --stop --retry QUIT/5 --pidfile /run/pingap.pid
+TimeoutStopSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

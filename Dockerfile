@@ -22,11 +22,11 @@ RUN cd /pingap \
 FROM ubuntu:24.04
 
 COPY --from=builder /etc/ssl /etc/ssl
-COPY --from=builder /pingap/target/release/pingap /usr/local/bin/pingap
+COPY --from=builder /pingap/target/release/pingap-waf /usr/local/bin/pingap-waf
 COPY --from=builder /pingap/entrypoint.sh /entrypoint.sh
 
 RUN mkdir -p /opt/pingap/conf
 
-CMD ["pingap"]
+CMD ["pingap-waf"]
 
 ENTRYPOINT ["/entrypoint.sh"]

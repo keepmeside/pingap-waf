@@ -123,7 +123,7 @@ impl Gateway {
         // Straight to stderr and captured into a file, rather than `--log`: that flag
         // installs a *rolling* file writer whose real filename carries a date suffix, and a
         // test asserting on log contents must know where to read.
-        let child = Command::new(env!("CARGO_BIN_EXE_pingap"))
+        let child = Command::new(env!("CARGO_BIN_EXE_pingap-waf"))
             .arg("-c")
             .arg(&conf_dir)
             .arg("--autoreload")
@@ -696,7 +696,7 @@ impl ConfigSink for DirSink {
     }
 }
 
-/// The real plugin factory, which is the check `pingap -t` cannot perform for a
+/// The real plugin factory, which is the check `pingap-waf -t` cannot perform for a
 /// Location-attached plugin.
 struct FactoryCheck;
 
@@ -764,7 +764,7 @@ async fn control_plane(conf_dir: &Path) -> ControlPlane {
     ControlPlane {
         applier: Applier::new(
             store.clone(),
-            Validator::new(env!("CARGO_BIN_EXE_pingap")),
+            Validator::new(env!("CARGO_BIN_EXE_pingap-waf")),
             Arc::new(FactoryCheck),
             Arc::new(DirSink {
                 conf_dir: conf_dir.to_path_buf(),

@@ -16,7 +16,7 @@
 //! reverse proxy can be started without writing a config file:
 //!
 //! ```sh
-//! pingap --domain=pingap.io --upstream=192.168.1.1:3000 --cert=/etc/ssl/pingap.io
+//! pingap-waf --domain=pingap.io --upstream=192.168.1.1:3000 --cert=/etc/ssl/pingap.io
 //! ```
 //!
 //! The generated config is handed to the memory config storage, which means it

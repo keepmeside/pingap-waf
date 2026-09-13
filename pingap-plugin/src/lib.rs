@@ -114,7 +114,7 @@ pub fn get_step_conf(
 /// `get_step_conf` falls back to the default for an unknown or unsupported
 /// value, which turns a misconfigured `step` into a plugin that quietly never
 /// runs. Plugins that implement only some of the steps should use this so the
-/// mistake surfaces at `pingap -t` instead.
+/// mistake surfaces at `pingap-waf -t` instead.
 pub fn get_step_conf_in(
     value: &PluginConf,
     category: &str,

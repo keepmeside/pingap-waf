@@ -178,6 +178,41 @@ build_en() {
   append_source_footer "${EN}/guide/acme-flow.md" "docs/acme_chart.md" \
     "https://github.com/vicanso/pingap/blob/main/docs/acme_chart.md"
 
+  # Fork-owned documentation: the WAF, ACL, bot and control-plane behaviour that
+  # upstream does not have, and therefore the pages pingap.io cannot carry. An
+  # explicit list rather than a docs/*.md glob, so publishing a page stays a
+  # deliberate act that also means adding it to the sidebar in
+  # website/.vitepress/config.mts — a glob would silently ship a half-written
+  # page with no way to navigate to it.
+  local fork_repo="https://github.com/keepmeside/pingap-waf"
+  local fork_docs=(
+    waf-plugin waf-category-mapping waf-benchmark
+    acl-plugin domain-model
+    ja4-support
+    control-plane-store config-projection
+  )
+  local page
+  for page in "${fork_docs[@]}"; do
+    cp "${ROOT}/docs/${page}.md" "${EN}/guide/${page}.md"
+    rewrite_links "${EN}/guide/${page}.md" guide
+    append_source_footer "${EN}/guide/${page}.md" "docs/${page}.md" \
+      "${fork_repo}/blob/main/docs/${page}.md"
+  done
+
+  # Spike findings, placed under guide/spikes/ so the `./spikes/<name>.md` links
+  # in waf-plugin.md and waf-benchmark.md resolve unchanged. clean_generated
+  # removes the whole guide/ tree on every run, so this directory is rebuilt.
+  mkdir -p "${EN}/guide/spikes"
+  local spike
+  for src in "${ROOT}"/docs/spikes/*.md; do
+    [[ -f "$src" ]] || continue
+    spike="$(basename "$src" .md)"
+    cp "$src" "${EN}/guide/spikes/${spike}.md"
+    rewrite_links "${EN}/guide/spikes/${spike}.md" guide
+    append_source_footer "${EN}/guide/spikes/${spike}.md" \
+      "docs/spikes/${spike}.md" "${fork_repo}/blob/main/docs/spikes/${spike}.md"
+  done
+
   cp "${ROOT}/examples/README.md" "${EN}/guide/examples.md"
   rewrite_links "${EN}/guide/examples.md" guide
   sed -E -i.bak \
@@ -293,7 +328,7 @@ curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | sh
 ### One-command HTTPS proxy
 
 ```bash
-pingap --domain=pingap.io --upstream=192.168.1.1:3000
+pingap-waf --domain=pingap.io --upstream=192.168.1.1:3000
 ```
 
 ## Browse the docs
