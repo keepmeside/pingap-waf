@@ -34,7 +34,6 @@ website/index.md
 website/plugins/
 website/crates/
 website/guide/
-website/zh/
 # Legacy docsify leftovers
 website/en/
 website/assets/docsify-app.js
@@ -73,9 +72,11 @@ spikes/*/target/
 # Developer-local working trees, never published. `.xia-src` holds third-party
 # reference clones, each carrying its own .git — tracking them would create
 # gitlinks to repositories nobody else can resolve. `plans` holds the local
-# plan/report tree. Both are inputs to the work, not part of the product.
+# plan/report tree. `CLAUDE.md` holds agent instructions for working in this
+# checkout. None of the three is part of the product.
 /.xia-src/
 /plans/
+/CLAUDE.md
 
 # Control-plane store (Phase 07) and any local SQLite artifact
 *.db

@@ -1,28 +1,26 @@
 # Building the documentation site
 
-Bilingual documentation for Pingap, built with **[VitePress](https://vitepress.dev/)**
-and deployed to GitHub Pages (custom domain <https://pingap.io/>).
+Documentation for pingap-waf, built with **[VitePress](https://vitepress.dev/)**.
+English only.
 
-## Languages
-
-| URL | Language | Source of truth |
-| --- | --- | --- |
-| <https://pingap.io/> | English (default) | `pingap-*/README.md`, `pingap-plugin/docs/*`, `docs/`, `examples/` |
-| <https://pingap.io/zh/> | 中文 | `docs/zh/**` |
+Nothing builds or deploys this automatically: the fork does not vendor upstream's
+`.github/workflows/pages.yml` (see the root `NOTICE` for why), so both the assembly
+step and the VitePress build are run by hand. Upstream's <https://pingap.io/> is
+built from upstream's tree and does not carry any page from this repository.
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `.vitepress/config.mts` | VitePress config (nav, sidebar, i18n, mermaid) |
+| `.vitepress/config.mts` | VitePress config — nav, sidebar, mermaid, `base` |
 | `.vitepress/theme/` | Brand colours and layout tweaks |
 | `public/logo.png` | Site logo |
-| `index.md`, `plugins/`, `crates/`, `guide/` | **Generated** English content |
-| `zh/**` | **Generated** Chinese content |
-| `package.json` | VitePress + mermaid deps |
+| `index.md`, `plugins/`, `crates/`, `guide/` | **Generated** content |
+| `package.json`, `package-lock.json` | VitePress + mermaid deps |
 
-Do **not** edit generated markdown under `plugins/`, `crates/`, `guide/` or
-`zh/` by hand — re-run the build script.
+Do **not** edit generated markdown under `plugins/`, `crates/` or `guide/` by hand —
+re-run the build script. Hand-maintained files are `BUILD.md`, `.vitepress/config.mts`,
+`.vitepress/theme/`, `package.json`, `package-lock.json` and `public/`.
 
 ## Local development
 
@@ -54,15 +52,28 @@ custom domain):
 DOCS_BASE=/pingap/ npm run docs:build
 ```
 
-## Updating Chinese docs
+`DOCS_BASE` is read by `.vitepress/config.mts` and defaults to `/`.
 
-Edit files under `docs/zh/` (not under `website/zh/`). Then re-run
-`./scripts/build-website.sh`.
+## What the site is assembled from
 
-## CI
+`scripts/build-website.sh` is the authoritative mapping. It copies:
 
-`.github/workflows/pages.yml`:
+| Site path | Source |
+| --- | --- |
+| `crates/*` | `pingap-*/README.md` (one page per crate) |
+| `plugins/index.md` | `pingap-plugin/README.md` |
+| `plugins/*` | `pingap-plugin/docs/*.md` |
+| `guide/modules.md` | `docs/modules.md` |
+| `guide/acme-flow.md` | `docs/acme_chart.md` |
+| `guide/examples.md` | `examples/README.md` |
+| `index.md` | generated inline by the script |
 
-1. Runs `scripts/build-website.sh`
-2. `npm ci && npm run docs:build` in `website/`
-3. Uploads `website/.vitepress/dist` to GitHub Pages
+**The fork's own pages are not part of the site.** `docs/waf-plugin.md`,
+`docs/acl-plugin.md`, `docs/ja4-support.md`, `docs/control-plane-store.md`,
+`docs/config-projection.md`, `docs/domain-model.md`, `docs/waf-benchmark.md` and
+`docs/waf-category-mapping.md` are not copied by the script, so they are read on
+GitHub rather than on the site. Adding them means extending `build_en` and the
+`guide` sidebar in `.vitepress/config.mts`.
+
+Generated and gitignored — never edit by hand: `index.md`, `plugins/`, `crates/`,
+`guide/`.

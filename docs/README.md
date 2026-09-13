@@ -10,8 +10,7 @@
 - **Bot management** (this fork) — [JA4 support and the `bot` plugin](./ja4-support.md)
 - **Control plane** (this fork) — [store, per-user admin auth, driver constraints](./control-plane-store.md),
   [config projection and versioning](./config-projection.md)
-- **Chinese translations** — [zh/](./zh/) (home, plugins, crates, guide)
-- **Documentation site** (VitePress, bilingual) — assembled by
+- **Documentation site** (VitePress, English only) — assembled by
   [`scripts/build-website.sh`](../scripts/build-website.sh) and built under
   [`website/`](../website/). This fork does not vendor upstream's
   `.github/workflows/pages.yml` (see the root `NOTICE` for why), so the site is
@@ -19,8 +18,7 @@
 
   | URL | Content |
   | --- | --- |
-  | <https://pingap.io/> | **Upstream** pingap, English — built from upstream's crate / plugin READMEs. It does not carry the fork pages listed above |
-  | <https://pingap.io/zh/> | **Upstream** pingap, 中文 — from upstream's `docs/zh/` |
+  | <https://pingap.io/> | **Upstream** pingap, built from upstream's crate / plugin READMEs. It carries none of the fork pages listed above |
 
   Local preview:
 

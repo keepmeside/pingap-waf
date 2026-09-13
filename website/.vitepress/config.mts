@@ -200,58 +200,6 @@ export default withMermaid(
           darkModeSwitchTitle: "Switch to dark theme",
         },
       },
-      zh: {
-        label: "中文",
-        lang: "zh-CN",
-        title: "Pingap",
-        description: "基于 Cloudflare Pingora 的高性能反向代理",
-        link: "/zh/",
-        themeConfig: {
-          nav: [
-            { text: "指南", link: "/zh/guide/modules" },
-            { text: "插件", link: "/zh/plugins/" },
-            { text: "组件", link: "/zh/crates/" },
-            { text: "示例", link: "/zh/guide/examples" },
-            {
-              text: "更多",
-              items: [
-                { text: "GitHub", link: github },
-                { text: "Releases", link: `${github}/releases` },
-              ],
-            },
-          ],
-          sidebar: {
-            "/zh/guide/": guideSidebar("/zh", {
-              modules: "架构",
-              acme: "ACME 流程",
-              examples: "示例",
-            }),
-            "/zh/plugins/": pluginSidebar("/zh", {
-              overview: "概览",
-              auth: "认证与授权",
-              access: "访问控制",
-              traffic: "流量",
-              content: "内容",
-              ops: "运维",
-            }),
-            "/zh/crates/": crateSidebar("/zh", "索引"),
-          },
-          footer: {
-            message: "基于 Apache-2.0 许可发布。",
-            copyright: "Copyright © Pingap contributors",
-          },
-          docFooter: {
-            prev: "上一页",
-            next: "下一页",
-          },
-          returnToTopLabel: "回到顶部",
-          sidebarMenuLabel: "菜单",
-          darkModeSwitchLabel: "外观",
-          lightModeSwitchTitle: "切换到浅色主题",
-          darkModeSwitchTitle: "切换到深色主题",
-          outlineTitle: "本页目录",
-        },
-      },
     },
   }),
 );

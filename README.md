@@ -247,8 +247,7 @@ from.
 | Control plane | [store, per-user admin auth, driver constraints](./docs/control-plane-store.md) · [config projection and versioning](./docs/config-projection.md) |
 | Upstream surface | [crate index](./docs/README.md) · [modules](./docs/modules.md) · [plugins](./pingap-plugin/README.md) · [examples](./examples/README.md) |
 
-This fork's own documentation is English-only. [`docs/zh/`](./docs/zh) translates the
-vendored upstream surface and is a maintained translation, not a generated one.
+This fork's documentation is English-only.
 
 ## Licence
 

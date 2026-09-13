@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Assemble VitePress content for the bilingual docs site under website/.
+# Assemble VitePress content for the docs site under website/.
 # English (root locale): crate READMEs + pingap-plugin docs + docs/ + examples/
-# Chinese (/zh/): docs/zh/**
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SITE="${ROOT}/website"
 EN="${SITE}"
-ZH="${SITE}/zh"
 
 CRATES=(
   util core config discovery health upstream location
@@ -77,7 +75,6 @@ rewrite_links() {
     -e 's|\(\.\./examples/README\.md\)|(/guide/examples)|g' \
     -e 's|\(\./examples/README\.md\)|(/guide/examples)|g' \
     -e 's|\(\.\./README\.md\)|(/)|g' \
-    -e 's|\(\./README_zh\.md\)|(/zh/)|g' \
     -e 's|\(\./asset/pingap-logo\.png\)|(/logo.png)|g' \
     -e 's|\(\.\./asset/pingap-logo\.png\)|(/logo.png)|g' \
     -e 's|\(\.\./\.\./asset/pingap-logo\.png\)|(/logo.png)|g' \
@@ -124,9 +121,6 @@ clean_generated() {
   # English content at site root (keep VitePress scaffolding)
   rm -rf "${SITE}/plugins" "${SITE}/crates" "${SITE}/guide"
   rm -f "${SITE}/index.md"
-  # Chinese locale
-  rm -rf "${ZH}/plugins" "${ZH}/crates" "${ZH}/guide"
-  rm -f "${ZH}/index.md"
   # legacy docsify leftovers
   rm -rf "${SITE}/en"
   rm -f "${SITE}/_sidebar.md" "${SITE}/_navbar.md" "${SITE}/README.md"
@@ -245,9 +239,6 @@ hero:
     - theme: alt
       text: Plugins
       link: /plugins/
-    - theme: alt
-      text: 中文文档
-      link: /zh/
 features:
   - title: High performance
     details: Built in Rust on Cloudflare Pingora. HTTP/1.1, HTTP/2 and gRPC-Web with low latency and memory safety.
@@ -361,179 +352,6 @@ See [pingap-proxy](/crates/proxy) and [Plugin lifecycle](/plugins/#lifecycle-ste
 EOF
 }
 
-# --- Chinese assembly (/zh) --------------------------------------------------
-
-build_zh() {
-  echo "Building Chinese content → ${ZH}"
-  local SRC="${ROOT}/docs/zh"
-  if [[ ! -d "$SRC" ]]; then
-    echo "ERROR: missing ${SRC} — Chinese docs are required." >&2
-    exit 1
-  fi
-
-  mkdir -p "${ZH}/crates" "${ZH}/plugins" "${ZH}/guide"
-
-  # plugins
-  if [[ -d "${SRC}/plugins" ]]; then
-    for src in "${SRC}/plugins"/*.md; do
-      [[ -f "$src" ]] || continue
-      local name
-      name="$(basename "$src")"
-      if [[ "$name" == "README.md" ]]; then
-        cp "$src" "${ZH}/plugins/index.md"
-      else
-        cp "$src" "${ZH}/plugins/${name}"
-      fi
-    done
-  fi
-  for f in "${ZH}/plugins"/*.md; do
-    [[ -f "$f" ]] || continue
-    rewrite_links "$f" plugin
-    # Fix zh internal links that still point with .md or to English-style paths
-    sed -E -i.bak \
-      -e 's|\(\.\./en/|/|g' \
-      -e 's|\(/en/|/|g' \
-      "$f"
-    rm -f "${f}.bak"
-    strip_md_links "$f"
-  done
-
-  # crates
-  if [[ -d "${SRC}/crates" ]]; then
-    for src in "${SRC}/crates"/*.md; do
-      [[ -f "$src" ]] || continue
-      local name
-      name="$(basename "$src")"
-      if [[ "$name" == "README.md" ]]; then
-        cp "$src" "${ZH}/crates/index.md"
-      else
-        cp "$src" "${ZH}/crates/${name}"
-      fi
-    done
-  fi
-  for f in "${ZH}/crates"/*.md; do
-    [[ -f "$f" ]] || continue
-    rewrite_links "$f" crate
-    strip_md_links "$f"
-  done
-
-  # guide
-  if [[ -d "${SRC}/guide" ]]; then
-    for src in "${SRC}/guide"/*.md; do
-      [[ -f "$src" ]] || continue
-      cp "$src" "${ZH}/guide/$(basename "$src")"
-    done
-  fi
-  for f in "${ZH}/guide"/*.md; do
-    [[ -f "$f" ]] || continue
-    rewrite_links "$f" guide
-    strip_md_links "$f"
-  done
-
-  local plugin_count crate_count
-  plugin_count="$(find "${ZH}/plugins" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
-  crate_count="$(find "${ZH}/crates" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
-  if [[ "$plugin_count" -lt 20 ]]; then
-    echo "ERROR: expected ≥20 Chinese plugin pages, found ${plugin_count}" >&2
-    exit 1
-  fi
-  if [[ "$crate_count" -lt 15 ]]; then
-    echo "ERROR: expected ≥15 Chinese crate pages, found ${crate_count}" >&2
-    exit 1
-  fi
-
-  # VitePress Chinese home (prefer modern layout over raw docs/zh/README.md)
-  cat >"${ZH}/index.md" <<'EOF'
----
-layout: home
-hero:
-  name: Pingap
-  text: 高性能反向代理
-  tagline: 基于 Cloudflare Pingora — 配置热更新、Web 管理界面，以及 20+ 认证 / 限流 / 缓存 / 可观测性插件。
-  image:
-    src: /logo.png
-    alt: Pingap
-  actions:
-    - theme: brand
-      text: 快速了解
-      link: /zh/guide/modules
-    - theme: alt
-      text: 插件文档
-      link: /zh/plugins/
-    - theme: alt
-      text: English
-      link: /
-features:
-  - title: 高性能
-    details: Rust + Pingora 构建，支持 HTTP/1.1、HTTP/2 与 gRPC-Web，内存安全且延迟可控。
-  - title: 热更新
-    details: --autoreload 零停机应用多数配置变更；--autorestart 支持优雅重启。
-  - title: 插件网关
-    details: JWT、限流、缓存、CORS、静态文件、IP/UA 限制等，按 location 灵活挂载。
-  - title: 服务发现
-    details: 静态列表、DNS、Docker 标签与透明代理，适配动态后端。
-  - title: 自动 HTTPS
-    details: Let's Encrypt HTTP-01 / DNS-01，支持主流 DNS 服务商签发通配符证书。
-  - title: 可观测性
-    details: Prometheus、OpenTelemetry、访问日志、Sentry 与 Pyroscope 一站集成。
----
-
-## 快速开始
-
-### Docker Compose
-
-```yaml
-services:
-  pingap:
-    image: vicanso/pingap:latest
-    container_name: pingap-instance
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./pingap_data:/opt/pingap
-    environment:
-      - PINGAP_CONF=/opt/pingap/conf
-      - PINGAP_ADMIN_ADDR=0.0.0.0:80/pingap
-      - PINGAP_ADMIN_USER=pingap
-      - PINGAP_ADMIN_PASSWORD=<YourSecurePassword>
-    command: ["pingap", "--autoreload"]
-```
-
-```bash
-mkdir pingap_data
-docker compose up -d
-# 管理后台: http://localhost/pingap
-```
-
-### 安装二进制
-
-```bash
-curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | sh
-# 完整特性构建: PINGAP_FULL=1 sh
-```
-
-### 一条命令 HTTPS 代理
-
-```bash
-pingap --domain=pingap.io --upstream=192.168.1.1:3000
-```
-
-## 浏览文档
-
-| 分区 | 说明 |
-| --- | --- |
-| [架构](/zh/guide/modules) | 模块职责与依赖图 |
-| [插件](/zh/plugins/) | 插件索引与配置说明 |
-| [组件](/zh/crates/) | 工作区 crate 参考 |
-| [示例](/zh/guide/examples) | API 网关、gRPC-Web、静态站点等 |
-| [ACME 流程](/zh/guide/acme-flow) | 证书签发时序图 |
-
-中文源文件维护在仓库 [`docs/zh/`](https://github.com/vicanso/pingap/tree/main/docs/zh)。
-EOF
-}
-
 # --- main --------------------------------------------------------------------
 
 mkdir -p "${SITE}/public" "${SITE}/.vitepress/theme"
@@ -544,12 +362,10 @@ fi
 
 clean_generated
 build_en
-build_zh
 
 echo ""
 echo "VitePress content assembled under ${SITE}"
 echo "  EN  plugins=$(find "${EN}/plugins" -name '*.md' | wc -l | tr -d ' ') crates=$(find "${EN}/crates" -name '*.md' | wc -l | tr -d ' ') guide=$(find "${EN}/guide" -name '*.md' | wc -l | tr -d ' ')"
-echo "  ZH  plugins=$(find "${ZH}/plugins" -name '*.md' | wc -l | tr -d ' ') crates=$(find "${ZH}/crates" -name '*.md' | wc -l | tr -d ' ') guide=$(find "${ZH}/guide" -name '*.md' | wc -l | tr -d ' ')"
 echo ""
 echo "Next:"
 echo "  cd website && npm install && npm run docs:dev"

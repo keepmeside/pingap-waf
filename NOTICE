@@ -30,10 +30,10 @@ pingap  --  vendored, and the host program of this fork
   `web/` (React admin UI), `conf/`, `benches/`, `docs/`, `examples/`, `website/`,
   `packaging/`, `scripts/`, `hooks/`, `icons/`, `asset/`, `dist/README.md`,
   and the root build and tooling files (`Cargo.toml`, `Cargo.lock`, `build.rs`,
-  `Makefile`, `Dockerfile`, `CLAUDE.md`, `bacon.toml`, `clippy.toml`,
+  `Makefile`, `Dockerfile`, `bacon.toml`, `clippy.toml`,
   `typos.toml`, `cliff.toml`, `.rustfmt.toml`, `.cargo/`, `entrypoint.sh`,
-  `install.sh`, `publish.sh`, `pingap.service`, `docker-compose.yml`, and the
-  README/CHANGELOG/CLA documents).
+  `install.sh`, `publish.sh`, `pingap.service`, `docker-compose.yml`,
+  `README.md`, `CHANGELOG.md` and `CLA.md`).
 
   Deliberate divergences from the upstream tree, all recorded here because a
   future merge will otherwise read them as accidental drift:
@@ -65,6 +65,17 @@ pingap  --  vendored, and the host program of this fork
      resolved credential list is empty, which means an admin listener started
      without credentials serves an unauthenticated config-write API rather than
      denying. See the fork's own history for the change and its tests.
+
+  5. Four upstream paths are deliberately absent: `CLAUDE.md` (agent
+     instructions for working in a checkout — kept locally by whoever needs
+     them and gitignored, not distributed), `README_zh.md`, and the Chinese
+     documentation tree `docs/zh/`. The docs site is English-only as a result:
+     `build_zh` is gone from `scripts/build-website.sh` and the `zh` locale from
+     `website/.vitepress/config.mts`. A future `git merge upstream/main` will
+     offer all of them back as additions; declining them is the intended
+     resolution, not an oversight. The root `README.md` is also rewritten rather
+     than vendored, since upstream's describes a published binary and image this
+     fork does not ship.
 
 ================================================================================
 pingora  --  upstream dependency, not vendored
