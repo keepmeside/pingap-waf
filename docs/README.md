@@ -12,14 +12,15 @@
   [config projection and versioning](./config-projection.md)
 - **Chinese translations** — [zh/](./zh/) (home, plugins, crates, guide)
 - **Documentation site** (VitePress, bilingual) — assembled by
-  [`scripts/build-website.sh`](../scripts/build-website.sh), built under
-  [`website/`](../website/), deployed by
-  [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
+  [`scripts/build-website.sh`](../scripts/build-website.sh) and built under
+  [`website/`](../website/). This fork does not vendor upstream's
+  `.github/workflows/pages.yml` (see the root `NOTICE` for why), so the site is
+  built by hand and nothing deploys automatically.
 
   | URL | Content |
   | --- | --- |
-  | <https://pingap.io/> | English (from crate / plugin READMEs) |
-  | <https://pingap.io/zh/> | 中文 (from `docs/zh/`) |
+  | <https://pingap.io/> | **Upstream** pingap, English — built from upstream's crate / plugin READMEs. It does not carry the fork pages listed above |
+  | <https://pingap.io/zh/> | **Upstream** pingap, 中文 — from upstream's `docs/zh/` |
 
   Local preview:
 

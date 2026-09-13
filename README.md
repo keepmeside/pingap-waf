@@ -1,317 +1,257 @@
-# pingap
+# pingap-waf
 
-Before the pingap version is stable, no pull requests will be accepted. If you have any questions, please create a new issue first.
+A fork of [pingap](https://github.com/vicanso/pingap) that adds a native WAF, a
+domain-oriented ACL, JA4H bot management, and a control plane with per-user admin
+auth — on top of the vendored pingap reverse proxy, which is kept at upstream paths
+so `git merge upstream/main` stays readable.
 
-![Pingap Logo](./asset/pingap-logo.png)
+> **This fork publishes no binaries, container images, or releases.** Build it from
+> source. Upstream's `install.sh`, the `vicanso/pingap` image, and upstream's release
+> assets all install **upstream pingap**, which contains none of the code described
+> below. Likewise <https://pingap.io/> documents upstream; this fork's own features
+> are documented under [`docs/`](./docs/README.md).
 
-## Overview
+Vendored base: pingap **0.13.10**, commit `51025efca56f342a9a1e5e40559637f32b9140bf`
+(tag `v0.13.10`, 2026-08-29), Apache-2.0. Provenance for every import is recorded in
+[`NOTICE`](./NOTICE).
 
-Pingap is a high-performance reverse proxy powered by the [`Cloudflare Pingora`](https://github.com/cloudflare/pingora) . It simplifies operational management by enabling dynamic, zero-downtime configuration hot-reloading through concise TOML files and an intuitive web admin interface.
+## What this fork adds
 
-Its core strength lies in a powerful plugin system, offering over twenty out-of-the-box features for Authentication (JWT, Key Auth), Security (CSRF, IP/Referer/UA Restrictions), Traffic Control (Rate Limiting, Caching), Content Modification (Redirects, Content Substitution), and Observability (Request ID). This makes `Pingap` not just a proxy, but a flexible and extensible application gateway, engineered to effortlessly handle complex scenarios from API protection to modern web application deployments.
+Five crates under `crates/`. The path prefix is the ownership marker: an unprefixed
+`pingap-*` directory is vendored and carries merge debt, a `crates/`-prefixed one is
+this fork's and carries none.
 
+| Crate | Owns |
+| --- | --- |
+| [`pingap-waf`](./crates/pingap-waf) | Rule engine and detectors. Native Rust, CRS-category parity — no libmodsecurity, no SecLang, no C++ in the request path, which is what keeps the musl static build working |
+| [`pingap-acl`](./crates/pingap-acl) | One rule table per domain plus an optional access list, evaluated top to bottom |
+| [`pingap-bot`](./crates/pingap-bot) | JA4H client fingerprinting and the shipped bot library |
+| [`pingap-controlplane`](./crates/pingap-controlplane) | Users, second factors, sessions and audit trail in a local Turso store; intent → config projection and versioning |
+| [`pingap-admin-api`](./crates/pingap-admin-api) | REST surface over the control plane, served under `/api` on the admin listener |
 
-[中文说明](./README_zh.md) | [Documentation](https://pingap.io/) · [中文文档](https://pingap.io/zh/) | [Examples](./examples/README.md) | [Plugins](./pingap-plugin/README.md) | [Crates](./docs/README.md)
+Three new plugin categories register alongside upstream's: **`waf`**, **`acl`**,
+**`bot`**. Each is attached per Location, so policy is scoped by which Locations name
+it. A plugin name maps to one process-global instance — divergent policy means two
+named entries (`waf:strict`, `waf:relaxed`), not one name listed twice.
 
 ```mermaid
 flowchart LR
-  internet("Internet") -- request --> pingap["Pingap"]
-  pingap -- proxy:pingap.io/api/* --> apiUpstream["10.1.1.1,10.1.1.2"]
-  pingap -- proxy:cdn.pingap.io --> cdnUpstream["10.1.2.1,10.1.2.2"]
-  pingap -- proxy:/* --> upstream["10.1.3.1,10.1.3.2"]
+  client([client]) --> loc
+
+  subgraph data["data plane — pingap on Pingora"]
+    loc["Location"] --> plug["waf / acl / bot plugins"]
+    plug --> up["upstream"]
+    up --> resp["response"]
+  end
+
+  resp --> client
+  plug -. hits and events .-> store
+
+  subgraph control["control plane — off the request path"]
+    api["admin API under /api"] --> store[("Turso store")]
+    store --> proj["intent → config projection"]
+  end
+
+  proj -. pingap config and hot reload .-> loc
 ```
 
-## Key Features
+The seam is one-directional and deliberate: **the gateway starts and serves with the
+store absent, deleted, or unwritable**, because nothing in the store is on the request
+path. See [control-plane store](./docs/control-plane-store.md).
 
-- 🚀 High Performance & Reliability
-  - Built with Rust for memory safety and top-tier performance.
-  - Powered by Cloudflare Pingora, a battle-tested asynchronous networking library.
-  - Supports HTTP/1.1, HTTP/2, and gRPC-web proxying.
+## Boundaries worth knowing before you deploy
 
-- 🔧 Dynamic & Easy to Use
-  - Zero-downtime configuration changes with hot-reloading.
-  - Simple, human-readable TOML configuration files.
-  - Full-featured Web UI for intuitive, real-time management.
-  - Supports both file and etcd as configuration backends.
-  - Supports configuration history record, can restore to the history version with one click.
+These are design decisions, not gaps to be filled quietly.
 
-- 🧩 Powerful Extensibility
-  - A rich plugin system to handle common gateway tasks.
-  - Advanced routing with host, path, and regex matching.
-  - Built-in service discovery via static lists, DNS, or Docker labels.
-  - Automated HTTPS with Let's Encrypt (supporting both HTTP-01 and DNS-01 challenges).
+- **The WAF defaults to `detect`, and should stay there** until you know a category's
+  false-positive rate on *your* traffic. The ported detectors measure 0 false positives
+  over a frozen 560-case benign corpus — but that corpus is a regression fence, not a
+  sample of production.
+- **Enforcement is asymmetric, in the types.** Request-side can deny. Response-side can
+  only log or rewrite bytes: `block` on a response category is rejected at config load
+  rather than silently downgraded, because by the time a body hook runs the status and
+  headers are already downstream, and a `block` that behaved as `redact` would report a
+  leak as prevented when it was only rewritten on the way past.
+- **JA4H is not JA4 and must not be presented as it.** It fingerprints how an HTTP
+  client is written — method, version, which headers in what order — all of which an
+  attacker imitates far more easily than a TLS stack. It is a client-behaviour signal,
+  not an identity. TLS-level JA4/JA4S are deferred; JA4T/JA4TCP are a permanent non-goal
+  because Pingora does not surface raw TCP SYN options. See [JA4 support](./docs/ja4-support.md).
+- **The admin UI is unchanged upstream.** The React app in `web/` has no domain, WAF,
+  ACL or bot pages. The control plane is reachable through the admin API, not through
+  the UI.
+- **Inspection cost lands on the allow path.** Blocking is cheaper, because evaluation
+  stops at the threshold crossing. Numbers below.
 
-- 📊 Modern Observability
-  - Native Prometheus metrics for monitoring (pull & push modes).
-  - Integrated OpenTelemetry support for distributed tracing.
-  - Highly customizable access logs with over 30 variables.
-  - Detailed performance metrics, including upstream connect time, processing time, and more.
+## Latency
 
-## 🚀 Getting Started
+Measured on `x86_64-unknown-linux-gnu`, release profile, with 153 native request rules
+and 40 response rules compiled from the ported detector set. p99 added latency, 2000
+timed calls after a 200-call warmup:
 
-The easiest way to get started with Pingap is by using Docker Compose.
+| Shape | p50 | p99 |
+| --- | --- | --- |
+| request: headers + URI + query | 769 µs | **815 µs** |
+| request: same, plus a 1 KB body | 2.80 ms | **2.87 ms** |
+| response: 1 KB body, one hook | 1.34 ms | **1.39 ms** |
+| response: 1 KB body, both hooks (cache miss) | 2.69 ms | **2.74 ms** |
 
-1. Create a `docker-compose.yml` file:
+Worst realistic request — a `POST` with a 1 KB body to a cacheable Location, on a cache
+miss, paying both the request-body scan and both response scans: **≈ 5.6 ms p99**.
 
-```yaml
-# docker-compose.yml
-version: '3.8'
+The distributions are tight: p99 sits within 6% of p50 on every shape and the maximum
+within 20%. Cost is proportional to rules × fields × bytes, not driven by a backtracking
+tail. Zero budget cuts at the shipped 10 ms budget, so these are the rules' real cost
+rather than the budget's ceiling.
 
-services:
-  pingap:
-    image: vicanso/pingap:latest # For production, use a specific version like vicanso/pingap:0.12.1-full
-    container_name: pingap-instance
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      # Mount a local directory to persist all configurations and data
-      - ./pingap_data:/opt/pingap
-    environment:
-      # Configure using environment variables
-      - PINGAP_CONF=/opt/pingap/conf
-      - PINGAP_ADMIN_ADDR=0.0.0.0:80/pingap
-      - PINGAP_ADMIN_USER=pingap
-      - PINGAP_ADMIN_PASSWORD=<YourSecurePassword> # Change this!
-    command:
-      # Start pingap and enable hot-reloading
-      - pingap
-      - --autoreload
-```
-
-2. Create a data directory and run:
+**Whether the defaults should ship as-is or behind a prefilter is an open decision, not
+a settled one.** Reproduce both tables and read the structural cause in
+[WAF latency](./docs/waf-benchmark.md):
 
 ```bash
-mkdir pingap_data
-docker-compose up -d
+cargo bench -p pingap-waf --bench latency   # per-call p50/p99
+cargo bench -p pingap-waf --bench bench     # criterion A/B against the pre-detector floor
 ```
 
-3. Access the Admin UI:
+For base proxy throughput (147k req/s `wrk` on an M4 Pro, upstream's measurement), see
+[upstream pingap](https://github.com/vicanso/pingap).
 
-Your Pingap instance is now running! You can access the web admin interface at http://localhost/pingap with the credentials you set.
+## Building
 
-The first login with those credentials creates the initial `admin` account in
-the control-plane store (`control-plane.db`, beside the config; it lives in the
-mounted volume above). After that the account is what logs in, not the
-environment variables, and they can be dropped. See
-[control-plane store](./docs/control-plane-store.md) for sessions, 2FA, the
-`store=` / `totp_key=` options, and what happens when the store is missing.
+Prerequisites:
 
-### Install the binary via curl
-
-For Linux and macOS, you can install the latest pre-built binary to `/usr/local/bin/pingap` with one command:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | sh
-```
-
-Optional environment variables:
-
-- `PINGAP_FULL=1` — install the `-full` build (all optional features enabled)
-- `PINGAP_LIBC=gnu` — on Linux, use the glibc build instead of the default musl static build
+- **Rust** — [`rust-toolchain.toml`](./rust-toolchain.toml) pins 1.98.0; the workspace
+  MSRV is 1.88. The pin is deliberate: this is a deployed security product, so the
+  compiler is part of the reproducible build surface.
+- **`protoc`** — `etcd-client` compiles etcd's `.proto` files through prost-build from
+  its build script, and `pingap-config` depends on it unconditionally for the `etcd://`
+  backend. `apt-get install protobuf-compiler`, or set `PROTOC`. CI and the
+  [`Dockerfile`](./Dockerfile) both install it.
+- **Node.js** — only for the admin UI assets. `dist/README.md` is tracked so a fresh
+  clone compiles without them; the binary just embeds an empty admin UI.
 
 ```bash
-# Full-featured build
-curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | PINGAP_FULL=1 sh
-```
-
-Supported targets: `Linux x86_64/arm64`, `Darwin x86_64/arm64`. See the [releases page](https://github.com/vicanso/pingap/releases) for all available assets.
-
-For more detailed instructions, including running from a binary, check out our [Documentation](https://pingap.io/).
-
-### Start a proxy without a config file
-
-A single command is enough to serve a domain over https and forward it to a backend:
-
-```bash
-# certificate requested from let's encrypt
-pingap --domain=pingap.io --upstream=192.168.1.1:3000
-
-# or bring your own certificate
-pingap --domain=pingap.io --upstream=192.168.1.1:3000 --cert=/etc/ssl/pingap.io
-```
-
-Without `--cert`, Pingap asks Let's Encrypt for a certificate through the
-HTTP-01 challenge, so `pingap.io` must resolve to this host and port 80 must be
-reachable from the internet. The issued certificate is kept in
-`~/.pingap/acme/<domains>.toml` and reused on restart — issuing is rate limited,
-so do not delete it. Everything else still comes from the command line: changing
-`--upstream` takes effect on the next start without touching the certificate.
-
-`--cert` accepts the certificate itself or the directory holding it — the common
-`fullchain.pem` / `privkey.pem`, `cert.pem` / `key.pem` and `tls.crt` / `tls.key`
-layouts are detected automatically, use `--key` for anything else. The listener
-defaults to `0.0.0.0:443` when there is a certificate and `0.0.0.0:80` when there
-is neither a certificate nor a domain, and `--addr` overrides it. `--upstream`
-takes a comma separated list of backends, `--domain` a comma separated list of
-hosts (omit it to serve every host over plain http).
-
-The configuration is generated on every start, so it cannot be edited through
-the admin UI: for anything beyond a single server use `--conf`, which cannot be
-combined with these flags.
-
-
-## Dynamic Configuration
-
-Pingap is designed to adapt to configuration changes without downtime.
-
-Hot Reload (--autoreload): For most changes—like updating upstreams, locations, or plugins—Pingap applies the new configuration within 10 seconds without a restart. This is the recommended mode for containerized environments.
-
-Graceful Restart (-a or --autorestart): For fundamental changes (like modifying server listen ports), this mode performs a full, zero-downtime restart, ensuring no requests are dropped.
-
-
-## 🔧 Development
-
-```bash
-make dev
-```
-
-If you need a web admin, you should install nodejs and build web asssets.
-
-```bash
-# generate admin web asset
-cd web
-npm i 
-cd ..
+# admin UI assets, embedded into the binary at compile time by rust-embed
 make build-web
+
+# debug build with hot reload and the admin UI on 127.0.0.1:3018
+make dev
+
+# release builds — see the Makefile for the full matrix
+make release          # default features
+make release-full     # tracing + imageoptim
+make release-perf     # release-perf profile, includes the pyroscope agent
+
+# validate a config and exit
+./target/release/pingap --conf ./examples/grpc-web/grpc-web.toml -t
 ```
 
+### Features
 
-## 📝 Configuration
+| Feature | Enables |
+| --- | --- |
+| `geo` | `pingap-plugin/geo` **and** `pingap-acl/geo` together — enabling only one would give an operator `geo_restriction` while silently refusing every ACL `geo_country` rule, or the reverse |
+| `tracing` | OpenTelemetry, Sentry, Prometheus cache metrics |
+| `imageoptim` | PNG/JPEG → WebP/AVIF |
+| `full` | `tracing` + `imageoptim`; required by `make test` and `make lint` |
+| `pyro`, `perf` | pyroscope agent; `perf` pairs with the `release-perf` profile |
 
-```hcl
-server "test" {
-  addr = "127.0.0.1:6118"
+## Configuration
 
-  location "github-api" {
-    path = "/api"
-    proxy_set_headers = ["Host:api.github.com"]
-    rewrite = "^/api/(?<path>.+)$ /$1"
-
-    upstream "api" {
-      addrs     = ["api.github.com:443"]
-      discovery = "dns"
-      sni       = "api.github.com"
-    }
-  }
-
-  location "static" {
-    plugin "staticServe" {
-      category = "directory"
-      path     = "~/Downloads"
-      step     = "request"
-    }
-  }
-}
-```
+The three fork plugins attach like any other pingap plugin:
 
 ```toml
-[upstreams.api]
-addrs = ["api.github.com:443"]
-discovery = "dns"
-sni = "api.github.com"
+[basic]
+# Required the moment any waf plugin sets `ip_list`: without a trusted-proxy list
+# pingap honours X-Forwarded-For unconditionally, which is fine for logging and not
+# a basis for an access decision, because the address is then one the client chose.
+trusted_proxies = ["10.0.0.0/8"]
 
-[plugins.staticServe]
-category = "directory"
-path = "~/Downloads"
-step = "request"
+[plugins."waf:strict"]
+category            = "waf"
+categories          = { sql_injection = "block", xss = "detect", local_file_inclusion = "block" }
+paranoia            = 2          # 1–4; rules above the level do not participate
+anomaly_threshold   = 5          # accumulated score at which `block` refuses
+budget_ms           = 10         # per-request evaluation budget
+body_inspect_limit  = 131072     # 0 is refused — there is no "inspect nothing" setting
 
-[locations.github-api]
-upstream = "api"
-path = "/api"
-proxy_set_headers = ["Host:api.github.com"]
-rewrite = "^/api/(?<path>.+)$ /$1"
+[plugins."acl:public"]
+category       = "acl"
+default_action = "allow"
+rules = [
+  { field = "user_agent", operator = "regex",   values = ["(?i)(nikto|sqlmap)"], action = "deny" },
+  { field = "method",     operator = "in_list", values = ["TRACE", "TRACK"],     action = "deny" },
+  { field = "ip",         operator = "in_cidr", values = ["10.0.0.0/8"],         action = "log" },
+]
 
-[locations.static]
-plugins = ["staticServe"]
+[plugins."bot:default"]
+category = "bot"
 
-[servers.test]
-addr = "127.0.0.1:6118"
-locations = ["github-api", "static"]
+[locations.app]
+upstream = "app"
+plugins  = ["waf:strict", "acl:public", "bot:default"]
 ```
 
-You can find the relevant instructions here: [https://pingap.io/crates/config](https://pingap.io/crates/config).
+A **domain** is the object operators think in — a hostname, where its traffic goes, and
+what policy applies. Pingap has no such object and this fork does not add one to the
+data plane: a domain is a *projection* that resolves entirely onto config pingap already
+has. Every domain field names the config key it maps to, and a field with no mapping is
+rejected at design time, because the alternative is silently dropping what an operator
+set. See [the domain model](./docs/domain-model.md) and
+[config projection](./docs/config-projection.md).
 
-## 🔄 Proxy step
+Upstream config formats (TOML, HCL, KDL), hot reload, ACME, upstreams, caching and the
+plugin set are unchanged — see [`conf/`](./conf), [`examples/`](./examples/README.md)
+and <https://pingap.io/> for that surface.
 
-```mermaid
-graph TD;
-  server["HTTP Server"];
-  locationA["Location A"];
-  locationB["Location B"];
-  locationPluginListA["Proxy Plugin List A"];
-  locationPluginListB["Proxy Plugin List B"];
-  upstreamA1["Upstream A1"];
-  upstreamA2["Upstream A2"];
-  upstreamB1["Upstream B1"];
-  upstreamB2["Upstream B2"];
-  locationResponsePluginListA["Response Plugin List A"];
-  locationResponsePluginListB["Response Plugin List B"];
-
-  start("New Request") --> server
-
-  server -- "host:HostA, Path:/api/*" --> locationA
-
-  server -- "Path:/rest/*"--> locationB
-
-  locationA -- "Exec Proxy Plugins" --> locationPluginListA
-
-  locationB -- "Exec Proxy Plugins" --> locationPluginListB
-
-  locationPluginListA -- "proxy pass: 10.0.0.1:8001" --> upstreamA1
-
-  locationPluginListA -- "proxy pass: 10.0.0.2:8001" --> upstreamA2
-
-  locationPluginListA -- "done" --> response
-
-  locationPluginListB -- "proxy pass: 10.0.0.1:8002" --> upstreamB1
-
-  locationPluginListB -- "proxy pass: 10.0.0.2:8002" --> upstreamB2
-
-  locationPluginListB -- "done" --> response
-
-  upstreamA1 -- "Exec Response Plugins" --> locationResponsePluginListA
-  upstreamA2 -- "Exec Response Plugins" --> locationResponsePluginListA
-
-  upstreamB1 -- "Exec Response Plugins" --> locationResponsePluginListB
-  upstreamB2 -- "Exec Response Plugins" --> locationResponsePluginListB
-
-  locationResponsePluginListA --> response
-  locationResponsePluginListB --> response
-
-  response["HTTP Response"] --> stop("Logging");
-```
-
-## 📊 Performance
-
-CPU: M4 Pro, Thread: 1
-
-### Ping no access log
+## Development
 
 ```bash
-wrk 'http://127.0.0.1:6118/ping' --latency
-
-Running 10s test @ http://127.0.0.1:6118/ping
-  2 threads and 10 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    66.41us   23.67us   1.11ms   76.54%
-    Req/Sec    73.99k     2.88k   79.77k    68.81%
-  Latency Distribution
-     50%   67.00us
-     75%   80.00us
-     90%   91.00us
-     99%  116.00us
-  1487330 requests in 10.10s, 194.32MB read
-Requests/sec: 147260.15
-Transfer/sec:     19.24MB
+make lint     # typos + clippy under `full` and under `geo`, -D warnings
+make fmt
+make test     # cargo test --workspace --features=full — needs etcd on :2379
+make bench
+make cov
 ```
 
+`make test` needs a real etcd for `pingap-config`'s etcd manager test:
 
-## 📦 Rust version
+```bash
+docker run -d --rm -p 2379:2379 \
+  -e ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379 \
+  -e ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379 \
+  quay.io/coreos/etcd:v3.5.5
+```
 
-Our current MSRV is 1.88
+CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs `cargo fmt --check`,
+clippy under `full` and under `geo`, the test suite against an etcd service container, a
+release link, and two invariants asserted against the tree: exactly one pingora version
+(`0.8.1`) and exactly one `impl ProxyHttp`. A separate
+[Security Audit](./.github/workflows/audit.yml) runs `cargo-audit` on push and nightly;
+every advisory it ignores is listed in [`.cargo/audit.toml`](./.cargo/audit.toml) with
+the reason and what unblocks removing it.
 
-## 📄 License
+Pingora is pinned to `0.8.1` with only `lb`, `openssl` and `cache` enabled. Build the
+pingora `Server` with `Server::new_with_opt_and_conf` — since 0.8.1 the constructor
+snapshots the configuration into a private `Bootstrap`, and that snapshot, not
+`Server::configuration`, is what the receiving half of a hot upgrade reads `upgrade_sock`
+from.
 
-This project is Licensed under [Apache License, Version 2.0](./LICENSE).
+## Documentation
+
+| Topic | |
+| --- | --- |
+| WAF | [plugin reference](./docs/waf-plugin.md) · [category → CRS lineage](./docs/waf-category-mapping.md) · [latency](./docs/waf-benchmark.md) |
+| ACL and domains | [plugin reference](./docs/acl-plugin.md) · [domain model](./docs/domain-model.md) |
+| Bot management | [JA4 support and the `bot` plugin](./docs/ja4-support.md) |
+| Control plane | [store, per-user admin auth, driver constraints](./docs/control-plane-store.md) · [config projection and versioning](./docs/config-projection.md) |
+| Upstream surface | [crate index](./docs/README.md) · [modules](./docs/modules.md) · [plugins](./pingap-plugin/README.md) · [examples](./examples/README.md) |
+
+This fork's own documentation is English-only. [`docs/zh/`](./docs/zh) translates the
+vendored upstream surface and is a maintained translation, not a generated one.
+
+## Licence
+
+Apache-2.0 — see [`LICENSE`](./LICENSE). This fork is a derivative of pingap by
+Tree Xie, vendored and attributed in [`NOTICE`](./NOTICE) together with the exact
+upstream commit each import came from.
