@@ -100,8 +100,9 @@ and `totp_key`.
 
 ## Driver constraints every writer must respect
 
-Turso is pinned to exactly `0.7.2`. Phase 02 measured four behaviours in that
-version, and the store's shape answers to each of them rather than to taste.
+Turso is pinned to exactly `0.7.2`. The Turso spike measured four behaviours in
+that version — [findings](./spikes/turso-finding.md) — and the store's shape answers
+to each of them rather than to taste.
 They are not speculation; three of them fail *silently*, which is why each is
 asserted by a test rather than trusted to review.
 

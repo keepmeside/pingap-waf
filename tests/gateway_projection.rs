@@ -668,7 +668,7 @@ async fn an_upstream_change_applies_within_one_hot_reload_cycle_without_a_restar
 //
 // One deliberate stand-in: `DataPlane`. Post-commit verification asks the *running
 // process* which plugins it holds, and there is no surface for that across a process
-// boundary until Phase 09's API exposes one. That read-back is what
+// boundary today. That read-back is what
 // `src/projection.rs::test_an_apply_the_reload_reaches_is_applied_and_the_plugin_is_running`
 // and its sibling assert, in-process, against the real plugin provider. What these tests
 // add is the half that cannot be asserted in-process: whether the committed config changes
@@ -716,7 +716,8 @@ impl PluginCheck for FactoryCheck {
 /// What a reload of the last committed config brings up.
 ///
 /// The stand-in described above: it models a reload that reached the gateway, because
-/// asking the *other process* which plugins it holds needs the surface Phase 09 adds. Every
+/// asking the *other process* which plugins it holds needs a cross-process surface that
+/// does not exist. Every
 /// test using it then confirms the reload independently, off the socket — so a stub that
 /// lied would not make a test pass.
 #[derive(Default)]

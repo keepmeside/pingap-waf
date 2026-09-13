@@ -1,7 +1,7 @@
-// Phase 02 Spike A — step 0 smoke check.
+// Spike A — step 0 smoke check.
 //
 // The plan says to resolve `#[cfg(ossl111)]` in minutes, not days, because if it
-// does not hold then every other question about JA4 is moot and Phase 16 is cut
+// does not hold then every other question about JA4 is moot and full JA4 is cut
 // immediately. `openssl-sys` emits the version cfgs as build-script output, so a
 // build script is where the answer is cheapest to obtain.
 

@@ -14,8 +14,9 @@ name = "pingap_controlplane"
 path = "src/lib.rs"
 
 [dependencies]
-# Pinned exactly. The plan forbids `0.8.0-pre.*`, and an inexact requirement would
-# drift onto that pre-release line. Phase 02's Spike B measured this exact version.
+# Pinned exactly. An inexact requirement drifts onto the `0.8.0-pre.*` line, which is
+# not acceptable for a store that owns accounts and audit history. The Turso spike
+# measured this exact version — see docs/spikes/turso-finding.md.
 turso = "=0.7.2"
 # argon2id for passwords. `password-hash` ships with it and owns the PHC string
 # format, so a stored hash carries its own parameters and a later parameter change
@@ -33,7 +34,7 @@ async-trait = { workspace = true }
 # The projection compiles control-plane intent into pingap's own config model, so it
 # speaks that model directly rather than re-declaring it and drifting from it.
 pingap-config = { workspace = true }
-# `Notification` is how drift is reported; Phase 12 supplies the channels.
+# `Notification` is how drift is reported, to whatever alerting is wired to consume it.
 pingap-core = { workspace = true }
 # Canonical serialisation for the projection, and the plugin-conf type it emits.
 toml = { workspace = true }

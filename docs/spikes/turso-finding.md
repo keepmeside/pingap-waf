@@ -1,10 +1,11 @@
-# Spike B — Turso 0.7.2 under the Phase 07 schema
+# Spike B — Turso 0.7.2 under the control-plane schema
 
 **Verdict: GO on `turso 0.7.2`. No driver swap needed.** io_uring blocking
 degrades cleanly, `VACUUM INTO` works, plain transactions commit durably.
 
-But three findings change Phase 07, 11, and 13 — and one of them is worse than
-the plan's assumption, not merely different.
+But three findings change the control-plane store, observability and backup/restore —
+and one of them contradicts an assumption the schema was built on, which is worse than
+merely differing from it.
 
 Run 2026-09-02. Harness `spikes/turso-probe/`. Executed three ways: host, Docker
 with the default seccomp profile, and Docker with a profile that returns `EPERM`
@@ -25,7 +26,7 @@ is not needed on this ground, and the repository trait's justification shifts fr
 
 ## `PRAGMA foreign_key_check` is a silent no-op — worse than absent
 
-The plan assumed this pragma was **absent**, so Phase 13 would validate in
+The schema was designed assuming this pragma was **absent**, so backup and restore would validate in
 application code. It is not absent. It parses, executes, returns zero rows, and
 reports nothing — on a database that demonstrably contains orphans.
 
@@ -46,11 +47,11 @@ child|2|parent|0
 
 Two violations, found by sqlite, missed by Turso. An absent pragma would raise an
 error and force the app-level check; a silent no-op returns success and invites an
-implementer to believe validation ran. **Phase 13 must never call
+implementer to believe validation ran. **Backup and restore must never call
 `PRAGMA foreign_key_check` — not even as a belt-and-braces second check** — because
 its zero-row result is indistinguishable from a clean database.
 
-Phase 07's constraint list should be corrected from "`PRAGMA foreign_key_check` /
+The store's constraint list should be corrected from "`PRAGMA foreign_key_check` /
 `defer_foreign_keys` absent" to "present but non-functional, returning no rows on
 a database with known violations".
 
@@ -66,7 +67,7 @@ Four concurrent writers on separate connections, 50 inserts each (200 total):
 
 **~77–83% of concurrent writes fail with BUSY, and no busy handler retries them.**
 This is not a tail case to handle defensively — under any concurrency it is the
-dominant outcome. Phase 07's single process-global writer handle is confirmed
+dominant outcome. The store's single process-global writer handle is confirmed
 mandatory, and a per-connection lock would serialise nothing, exactly as the
 red-team review argued.
 
@@ -78,9 +79,9 @@ red-team review argued.
 | Batched in one transaction | 2000 | 28 ms | **71,330 rows/s** |
 
 330 rows/s cannot absorb per-request WAF events on any real traffic level — a
-single moderately busy site would exceed it. Phase 11's bounded queue plus batch
+single moderately busy site would exceed it. Observability's bounded queue plus batch
 writer is therefore load-bearing, and its transaction batching is the thing that
-makes the store viable at all. Phase 11's verdict-aware sampling stays necessary
+makes the store viable at all. Verdict-aware sampling stays necessary
 as a backstop, but the batch path is what buys the headroom.
 
 ## Transaction behaviour after a failed statement
@@ -102,22 +103,22 @@ simply skipped, and the partial work commits.
 
 For an append-only audit log this is the wrong default: a multi-statement mutation
 where one statement fails would commit an incomplete record while reporting
-success. **Phase 07's repository layer must explicitly `ROLLBACK` on any statement
+success. **The store's repository layer must explicitly `ROLLBACK` on any statement
 error inside a transaction rather than relying on the driver to invalidate it.**
 
 ## Confirmed as expected
 
 - **Plain transactions commit durably.** `BEGIN` / two inserts / `COMMIT` yields
   exactly 2 rows in all three environments. No silent rollback observed without
-  `BEGIN CONCURRENT`, which the plan already forbids.
+  `BEGIN CONCURRENT`, which is already ruled out.
 - **`VACUUM INTO` works**, producing a 106,496-byte snapshot in every environment.
-  Phase 13's backup path is sound.
+  The backup path is sound.
 - **`lag()` is unsupported**: `Parse error: no such function: lag`. Confirms
-  Phase 11's Rust-side aggregation, and the CI `grep` assertion against window
+  Rust-side aggregation, and the CI `grep` assertion against window
   functions.
 - **`turso 0.7.2` resolves as a real published version.** Worth recording because
   `cargo search turso` currently surfaces only `0.8.0-pre.7`, the pre-release line
-  the plan explicitly rejects; an inexact version requirement would drift onto it.
+  this workspace rejects; an inexact version requirement would drift onto it.
   The spike pins `=0.7.2`.
 
 ## Consequences

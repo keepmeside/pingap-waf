@@ -15,10 +15,10 @@ use serde::Deserialize;
 
 /// Which fingerprint a rule matches against.
 ///
-/// One variant today. JA4 arrives in Phase 16 if the ClientHello spike holds up, and it
-/// arrives *here* — as another variant behind the same rule model — rather than as a
-/// parallel mechanism. Values of different types must never be compared against each
-/// other: a JA4H list entry has no meaning as a JA4.
+/// One variant today. JA4 arrives only once the ClientHello spike's open gate items are
+/// closed (`docs/spikes/ja4-finding.md`), and it arrives *here* — as another variant behind
+/// the same rule model — rather than as a parallel mechanism. Values of different types must
+/// never be compared against each other: a JA4H list entry has no meaning as a JA4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FingerprintType {

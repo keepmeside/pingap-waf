@@ -7,9 +7,9 @@
 //! is not using that library rather than that the entry is wrong.
 //!
 //! The reference product ships a larger library. It was treated as behavioural
-//! inspiration only — its licence status was flagged in Phase 01, and more importantly its
-//! values carry no originating request, so they could not have been verified even if
-//! copying them were acceptable.
+//! inspiration only — its licence status was flagged as unresolved at the outset, and more
+//! importantly its values carry no originating request, so they could not have been
+//! verified even if copying them were acceptable.
 //!
 //! ## How an entry was produced, and how to add one
 //!

@@ -22,7 +22,7 @@
 //! test with no listener and no socket, which is what makes the RBAC gate an enumeration
 //! over the real table rather than a sample of it.
 //!
-//! Config-shaped resources go through the Phase 08 projection and never write config
+//! Config-shaped resources go through the config projection and never write config
 //! directly; control-plane-only resources (users, sessions, audit) are read and written
 //! against the store. A handler that writes config outside the projection breaks
 //! determinism, drift detection and rollback at once.

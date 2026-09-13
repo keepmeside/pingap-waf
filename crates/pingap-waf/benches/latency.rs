@@ -3,11 +3,11 @@
 //! Separate from `bench.rs`, which is a criterion A/B against the pre-detector cost
 //! floor. Criterion reports the mean of a *batch* of iterations, and averaging is
 //! exactly what hides a tail: a p99 computed from batch means is not a p99 of calls.
-//! Phase 04 owes an absolute p50/p99, so this times each call individually, sorts, and
-//! reads the quantiles off the sorted samples.
+//! The detector port owes an absolute p50/p99, so this times each call individually,
+//! sorts, and reads the quantiles off the sorted samples.
 //!
 //! **What this measures.** The engine, carrying the full native detector set, on the
-//! three shapes the phase asks about: a headers-only request, a request with a 1 KB
+//! three shapes that matter for it: a headers-only request, a request with a 1 KB
 //! body, and a cacheable response scanned once and then twice — the double scan being
 //! the real cost of registering both response hooks, which is what keeps a body cached
 //! before a rule existed from being served unredacted.
@@ -93,7 +93,7 @@ fn benign_body() -> Vec<u8> {
     body.into_bytes()
 }
 
-/// Sort the samples and report the quantiles the phase asked for.
+/// Sort the samples and report the quantiles this benchmark owes.
 ///
 /// Also the maximum, because with a backtracking engine the worst single call is the
 /// number that decides whether a worker stalls, and it is invisible in a p99.

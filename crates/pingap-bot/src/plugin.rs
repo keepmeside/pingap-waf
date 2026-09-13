@@ -85,11 +85,11 @@ pub struct Bot {
     forbidden: HttpResponse,
     /// Aggregate counters.
     ///
-    /// Shared across every domain that binds this entry, which Phase 05 permits for
-    /// exactly this shape: each observation carries its own domain, so the counts are
-    /// *keyed* by domain rather than merged. What must never live here is anything a
-    /// verdict depends on — a per-domain threshold would then be advanced by another
-    /// domain's traffic.
+    /// Shared across every domain that binds this entry, which the domain policy model
+    /// permits for exactly this shape: each observation carries its own domain, so the
+    /// counts are *keyed* by domain rather than merged. What must never live here is
+    /// anything a verdict depends on — a per-domain threshold would then be advanced by
+    /// another domain's traffic.
     ///
     /// A mutex on the request path is a contention point. It is held for a handful of
     /// map increments, which is cheaper than the fingerprint hash that precedes it.

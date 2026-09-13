@@ -1,6 +1,6 @@
-//! Phase 02 Spike E — request body inspected, and still forwarded?
+//! Spike E — request body inspected, and still forwarded?
 //!
-//! Decision gate blocking Phase 04. The red-team review concluded from source
+//! Decision gate blocking the detector port. The red-team review concluded from source
 //! reading that draining the body inside a `PluginStep::Request` plugin
 //! forwards an EMPTY body upstream on every allowed request, because
 //! `enable_retry_buffering()` runs at `pingora-proxy-0.8.1/src/proxy_h1.rs:103`

@@ -1,9 +1,9 @@
 # Spike A — JA4 ClientHello reachability
 
-**Verdict: CONDITIONAL GO for Phase 16.** The mechanism is reachable and the
+**Verdict: CONDITIONAL GO for full JA4.** The mechanism is reachable and the
 load-bearing unknown — extension order — is confirmed preserved. But three of the
-plan's gate items are **not** satisfied by this spike, and Phase 16's gate requires
-all of them. Phase 16 must not start until they are closed.
+gate items are **not** satisfied by this spike, and the gate for full JA4 requires
+all of them. Full JA4 must not start until they are closed.
 
 Run 2026-09-02. Harness `spikes/ja4-clienthello/`.
 
@@ -15,7 +15,7 @@ openssl_version  OpenSSL 3.0.2 15 Mar 2022
 ```
 
 Resolved in `build.rs` from `DEP_OPENSSL_VERSION_NUMBER`, in seconds rather than
-days, exactly as the plan asked. `set_client_hello_callback` is gated behind this
+days, exactly as required. `set_client_hello_callback` is gated behind this
 cfg and compiles.
 
 ## What the spike proves
@@ -46,9 +46,9 @@ distinguish the two cases; it did not.
 
 Shaped fingerprint produced end to end: `t12d3112h2_e8f1e7e78f70_d46e53a606d8`.
 
-## What the spike does NOT prove — Phase 16's gate is not met
+## What the spike does NOT prove — the gate for full JA4 is not met
 
-Three gate items from `phase-16` remain open. Recording them plainly because a
+Three gate items for full JA4 remain open. Recording them plainly because a
 "GO" that quietly omits them would be the failure mode this spike exists to
 prevent.
 
@@ -64,10 +64,10 @@ validation.
 **2. Session resumption and HTTP/2 connection reuse are untested.** The spike
 performs exactly one full handshake. Whether the callback fires on a resumed
 session, or on a reused h2 connection, is unanswered — and it decides whether
-Phase 16's fail-open default is a rare path or the common one.
+the fail-open default for full JA4 is a rare path or the common one.
 
 **3. The musl static target was not exercised.** No musl target is installed on
-this machine (`rustup target list --installed` shows none), so the plan's fourth
+this machine (`rustup target list --installed` shows none), so the fourth
 unknown is untouched. This is also where the spike's OpenSSL differs from
 production in a way that matters:
 
@@ -80,20 +80,20 @@ Both clear the 1.1.1 gate comfortably, so the cfg result carries over. But the
 spike deliberately did not enable the `vendored` feature — forcing it would have
 answered a different question than "does the cfg hold against what actually links".
 Whether the whole chain works against vendored 3.6.3 **on musl** is precisely the
-combination Phase 16 step 11 must verify, and a glibc-only outcome is a scope
+combination that step 11 of the full JA4 work must verify, and a glibc-only outcome is a scope
 decision for the user rather than something to absorb silently.
 
 ## Consequences
 
-- **Phase 16 stays in the plan, conditionally.** The mechanism is real: callback
+- **Full JA4 stays viable, conditionally.** The mechanism is real: callback
   fires, extensions are readable in wire order, ALPN coexists, one contained
-  `unsafe`. Nothing found here cuts the phase.
-- **Phase 16's gate is not satisfied and its own step 1 must re-confirm.** Its gate
+  `unsafe`. Nothing found here cuts it.
+- **The gate for full JA4 is not satisfied and its own step 1 must re-confirm.** Its gate
   lists six items; this spike closes three (cfg, borrow shapes, extension order)
   and leaves three open (reference cross-check, resumption/h2, musl).
-- **Phase 06 is unaffected.** JA4H needs no TLS access and remains the shipping
+- **Bot management is unaffected.** JA4H needs no TLS access and remains the shipping
   fingerprint story regardless.
-- The `unsafe` block written here is spike code. Phase 16 step 3 rewrites it with
+- The `unsafe` block written here is spike code. Step 3 of the full JA4 work rewrites it with
   a captured-ClientHello fixture corpus rather than promoting this file.
 
 ## Note on the ALPN result
@@ -103,4 +103,4 @@ decision for the user rather than something to absorb silently.
 `enable_h2()` on a `TlsSettings` built through the
 `TlsSettings → SslAcceptorBuilder → SslContextBuilder` deref chain. The
 coexistence result is strong evidence but not identical to pingap's construction
-path, which Phase 16 step 5 exercises directly.
+path, which step 5 of the full JA4 work exercises directly.

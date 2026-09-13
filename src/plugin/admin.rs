@@ -1138,8 +1138,8 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("`authorizations`"), "{msg}");
         assert!(msg.contains("--admin user:password@addr"), "{msg}");
-        // An empty list is the same key and the same refusal — the hole
-        // Phase 01 closed must not reopen by way of "the list was empty".
+        // An empty list is the same key and the same refusal — the fail-open hole
+        // this auth replaced must not reopen by way of "the list was empty".
         let err = AdminServe::try_from(
             &toml::from_str::<PluginConf>(
                 r#"

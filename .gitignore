@@ -65,8 +65,10 @@ web/*.tsbuildinfo
 # `#[folder = "dist/"]` in src/plugin/admin.rs requires the directory to exist.
 # Being already tracked, it stays tracked; the ignore rule no longer applies.
 
-# Phase 02 spikes are throwaway and excluded from the workspace; their build
-# output must never reach history.
+# The programs under `spikes/` are throwaway probes, excluded from the workspace
+# so their dependencies can never reach a product build; their build output must
+# never reach history either. What each one established is written up under
+# `docs/spikes/`, which is tracked.
 spikes/*/target/
 
 # Developer-local working trees, never published. `.xia-src` holds third-party
@@ -78,7 +80,7 @@ spikes/*/target/
 /plans/
 /CLAUDE.md
 
-# Control-plane store (Phase 07) and any local SQLite artifact
+# Control-plane store and any local SQLite artifact
 *.db
 *.db-shm
 *.db-wal
@@ -102,8 +104,10 @@ spikes/*/target/
 
 # libFuzzer's evolved corpus is a coverage cache, not a gate: it is machine
 # generated, it grows on every run, and nothing asserts against its contents.
-# The Phase 03 gate is "both targets run clean with zero artifacts", and the
-# Phase 02 detector corpus — which *is* a gate — is hand-assembled and hashed.
+# The fuzz gate is "both targets run clean with zero artifacts". The detector
+# corpus *is* a gate — hand-assembled and hashed, so editing it silently would
+# change what the false-positive rate is measured against; see
+# docs/spikes/detector-baseline.md.
 # `artifacts/` is deliberately NOT ignored: a crash reproducer is the regression
 # fixture for the bug it found and belongs in history.
 crates/pingap-waf/fuzz/corpus/

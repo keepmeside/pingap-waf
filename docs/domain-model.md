@@ -5,10 +5,10 @@ what policy applies to it. Pingap has no such object, and this fork does not add
 the data plane. A domain is a *projection* — a control-plane view that resolves entirely
 onto config pingap already has.
 
-This file is the contract for that projection. Phases 08, 09 and 10 all depend on it:
-Phase 08 generates config from it, Phase 09 exposes it over the admin API, Phase 10
-renders it. **Every domain field below names the config key it maps to. A field with no
-mapping is rejected at design time**, because the alternative is Phase 08 silently
+This file is the contract for that projection. Config projection, the admin API and the
+admin UI all depend on it: projection generates config from it, the admin API exposes it,
+the admin UI renders it. **Every domain field below names the config key it maps to. A field with no
+mapping is rejected at design time**, because the alternative is projection silently
 dropping it and an operator setting something that does nothing.
 
 ## Shape
@@ -99,7 +99,7 @@ set_headers = ["Strict-Transport-Security:max-age=31536000; includeSubDomains"]
 
 …then `"hsts"` in the domain's plugin list. A dedicated `hsts: bool` was rejected
 precisely because it has no config counterpart: it would have to grow its own header
-writer beside a plugin that already does the job, and Phase 08 would then own two ways
+writer beside a plugin that already does the job, and projection would then own two ways
 to emit one header.
 
 ## Policy bindings
@@ -109,7 +109,7 @@ to emit one header.
 | WAF ruleset | `waf` | `waf:strict`, `waf:audit-only` |
 | ACL rule table | `acl` | `acl:<profile>` |
 | Access list | `acl` (the `access_list` table inside a profile) | shared by attaching the same entry |
-| Bot profile | `bot` | Phase 06 |
+| Bot profile | `bot` | `bot:<profile>` |
 
 ### The one thing that is not free
 

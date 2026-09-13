@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the frozen Phase 02 Spike C corpus.
+"""Generate the frozen Spike C corpus.
 
 Deterministic by construction: no randomness, no timestamps, no network. Running
 this twice produces byte-identical files, which is what makes MANIFEST.sha256 a
 meaningful freeze rather than a snapshot of one lucky run.
 
-Per-category minimums come from the phase file: sqli 50, xss 50, traversal 30,
+Per-category minimums: sqli 50, xss 50, traversal 30,
 cmdi 30, benign 500. The benign set must dominate, because that is the real
 traffic ratio and it is the set that decides whether a false-positive rate is
 tolerable.
@@ -213,7 +213,7 @@ CMDI = [
 def benign() -> list[str]:
     """Realistic traffic that must NOT trip a detector.
 
-    Weighted toward the shapes the plan calls out as known false-positive
+    Weighted toward the shapes known to produce false positives
     sources: hex strings (the `0x[0-9a-f]{2,}` pattern), trailing double
     dashes (`--[^\\r\\n]*$`), and ordinary prose containing SQL keywords.
     """

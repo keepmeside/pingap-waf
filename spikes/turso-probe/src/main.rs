@@ -1,9 +1,9 @@
-//! Phase 02 Spike B — Turso 0.7.2 under the Phase 07 schema shape.
+//! Spike B — Turso 0.7.2 under the control-plane schema shape.
 //!
-//! Fallback probe, not a decision gate: the outcome selects Phase 07's driver
-//! (`turso` vs `rusqlite` on the same file format), not whether Phase 07 runs.
+//! Fallback probe, not a decision gate: the outcome selects the store's driver
+//! (`turso` vs `rusqlite` on the same file format), not whether the control-plane store runs.
 //!
-//! Eight questions, in the order Phase 02 asks them:
+//! Eight questions, in the order the spike set asks them:
 //!
 //!   1. schema  — users + FK children + append-heavy log + time series
 //!   2. seccomp — does it open a database at all under a hardened profile?
@@ -13,10 +13,10 @@
 //!   4. rollback-only transaction state — drop an unfinished write inside BEGIN,
 //!                then COMMIT. Do later statements observe partial changes?
 //!   5. plain-transaction durability — no BEGIN CONCURRENT, no silent rollback
-//!   6. VACUUM INTO — Phase 13's backup path depends on it
-//!   7. PRAGMA foreign_key_check — absent? Phase 13 must validate in app code
+//!   6. VACUUM INTO — the backup path depends on it
+//!   7. PRAGMA foreign_key_check — absent? Backup and restore must validate in app code
 //!   8. audit-log write throughput — can per-request WAF events go to the DB,
-//!                or must Phase 11 sample?
+//!                or must observability sample?
 //!
 //! Prints one `RESULT <key> <value>` line per finding so the wrapper script can
 //! diff outcomes across seccomp profiles without parsing prose.
@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let conn = db.connect()?;
 
-    // ---- Q1: schema resembling the Phase 07 target -------------------------
+    // ---- Q1: schema resembling the control-plane target -------------------------------
     // users with FK children (sessions), an append-heavy log (activity_log),
     // and a time series (performance_metrics).
     conn.execute("PRAGMA foreign_keys = ON", ()).await.ok();
@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     // ---- Q7: is PRAGMA foreign_key_check available? -----------------------
-    // Phase 13's restore validation depends on the answer. Insert a deliberate
+    // Restore validation depends on the answer. Insert a deliberate
     // orphan first so a working check would have something to report.
     conn.execute("PRAGMA foreign_keys = OFF", ()).await.ok();
     let orphan = conn
@@ -220,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     result!("tx.partial_visible", "rb.* rows persisted = {n}");
 
     // ---- Q3: write contention across concurrent tasks ---------------------
-    // Phase 07 must know whether a per-connection lock is sufficient. Spawn
+    // The control-plane store must know whether a per-connection lock is sufficient. Spawn
     // concurrent writers on separate connections and count SQLITE_BUSY.
     let mut set = tokio::task::JoinSet::new();
     for w in 0..4u32 {
@@ -290,7 +290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         written as f64 / el.as_secs_f64()
     );
 
-    // Batched inside one transaction, which is how Phase 11's batch writer works.
+    // Batched inside one transaction, which is how the batch writer works.
     conn.execute("BEGIN", ()).await.ok();
     let t = Instant::now();
     let mut batched = 0u32;
@@ -315,7 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         batched as f64 / el.as_secs_f64()
     );
 
-    // ---- Q6: VACUUM INTO, which Phase 13's backup depends on -------------
+    // ---- Q6: VACUUM INTO, which the backup path depends on ---------------------
     let snap = format!("{path}.snapshot");
     let _ = std::fs::remove_file(&snap);
     match conn
@@ -329,7 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => result!("vacuum_into", "UNSUPPORTED: {}", first_line(&e.to_string())),
     }
 
-    // ---- window functions Phase 11 must not rely on ----------------------
+    // ---- window functions observability must not rely on ----------------------
     match conn
         .query(
             "SELECT metric, value, lag(value) OVER (ORDER BY bucket_start)

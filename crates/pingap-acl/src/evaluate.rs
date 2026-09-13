@@ -92,7 +92,7 @@ impl RuleSet {
     /// A **stable** sort by `order`, so rules sharing an `order` — which is all of them
     /// by default — keep their written positions. That is what makes "read it top to
     /// bottom" true for a hand-written TOML array while still giving the admin UI and
-    /// the Phase 07 database a field to reorder by.
+    /// the control-plane store a field to reorder by.
     pub fn new(
         mut rules: Vec<ValidatedRule>,
         default_action: DefaultAction,

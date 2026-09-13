@@ -2,9 +2,10 @@
 //!
 //! JA4H only. It is computed entirely from the HTTP request head — no TLS access, so it
 //! works on plain HTTP — and it is what the reference product's shipped deny library
-//! actually keys on: every blocking entry there is a JA4H, not a JA4. Full JA4 is gated
-//! on the Phase 02 ClientHello spike and arrives, if at all, as another fingerprint type
-//! behind the same rule model.
+//! actually keys on: every blocking entry there is a JA4H, not a JA4. Full JA4 is gated on
+//! the ClientHello spike — reachable, but with three gate items still open; see
+//! `docs/spikes/ja4-finding.md`. It arrives, if at all, as another fingerprint type behind
+//! the same rule model.
 //!
 //! Two surfaces, mirroring `pingap-waf` and `pingap-acl`:
 //!

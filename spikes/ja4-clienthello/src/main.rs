@@ -1,9 +1,9 @@
-//! Phase 02 Spike A — is a JA4 ClientHello fingerprint reachable from
+//! Spike A — is a JA4 ClientHello fingerprint reachable from
 //! Pingora 0.8.1 + OpenSSL without patching Pingora?
 //!
-//! **Decision gate.** A no-go cuts Phase 16 and Phase 06 ships JA4H alone.
+//! **Decision gate.** A no-go cuts full JA4 and bot management ships JA4H alone.
 //!
-//! Step 0 first, per the plan: confirm `#[cfg(ossl111)]` resolves. Everything
+//! Step 0 first: confirm `#[cfg(ossl111)]` resolves. Everything
 //! below is moot if it does not, so it is checked in `build.rs` and asserted here
 //! before any handshake runs.
 //!
@@ -89,7 +89,7 @@ fn ja4_hash(parts: &[String]) -> String {
 
 /// Compute a JA4-shaped string. Not claimed to be spec-exact — the spike's job is
 /// to establish *reachability and ordering*, and any value here must be
-/// cross-checked against a reference implementation before Phase 16 trusts it.
+/// cross-checked against a reference implementation before full JA4 trusts it.
 fn ja4_like(o: &Observed, alpn: &str) -> String {
     let ciphers: Vec<u16> = o.ciphers.iter().copied().filter(|c| !is_grease(*c)).collect();
     let exts: Vec<u16> = o
@@ -124,7 +124,7 @@ fn main() {
     #[cfg(not(ossl111))]
     {
         println!("RESULT ossl111                 NOT SATISFIED");
-        println!("RESULT verdict                 NO-GO: cut Phase 16, ship JA4H only");
+        println!("RESULT verdict                 NO-GO: cut full JA4, ship JA4H only");
         return;
     }
 

@@ -1,10 +1,10 @@
 # Spike D — Out-of-process config validation
 
-**Status: CONDITIONAL GO for Phase 08's two-phase apply. `pingap-waf -t` is usable as
+**Status: CONDITIONAL GO for the projection's two-phase apply. `pingap-waf -t` is usable as
 a subprocess gate, but it is porous on plugin validity and it mutates
 process-global state — so it must never be called in-process.**
 
-Decision gate for Phase 08. Run 2026-09-02 against the vendored binary at
+Decision gate for config projection. Run 2026-09-02 against the vendored binary at
 `vendor/pingap-0.13.10`.
 
 ## Q1 — Does `pingap-waf -t -c <dir>` validate a candidate directory?
@@ -30,7 +30,7 @@ simply not in this build's feature set, so a config authored against a `geo`
 build validates clean against a stock build and then silently has no geo
 enforcement at runtime.
 
-The fourth case is worse than the plan predicted. The red-team review anticipated
+The fourth case is worse than predicted in advance. The red-team review anticipated
 the unknown-category hole; it did not anticipate that a **known** category with
 invalid parameters also passes. The plugin is never constructed during `-t` for a
 Location-attached plugin in this configuration, so parameter-level errors are not
@@ -65,17 +65,17 @@ config that is then *rejected* would leave live traffic resolving client IPs
 under the rejected config's rules — silently corrupting every XFF-based ACL and
 rate-limit decision.
 
-## Consequences for Phase 08
+## Consequences for config projection
 
 1. **Validation runs as a subprocess against a staged copy. Not negotiable, and
    not merely a preference** — the global-state mutation above is the reason.
-2. **Exit 0 from `pingap-waf -t` does not mean the config will load.** Phase 08's
+2. **Exit 0 from `pingap-waf -t` does not mean the config will load.** Config projection's
    step 6b post-commit verification is therefore not redundant with pre-commit
    validation; it is the only thing that catches a plugin which validates and
    then fails to construct. Keep both.
 3. **The control plane must validate plugin categories itself.** It knows which
    categories the running build supports (they are registered in the
-   `PluginFactory` at startup); `-t` will not tell it. Phase 08 should compare
+   `PluginFactory` at startup); `-t` will not tell it. Config projection should compare
    every projected plugin's `category` against the live registry and reject
    unknown ones, rather than trusting the exit code.
 4. Parameter-level plugin validation is also not covered. The control plane
@@ -85,17 +85,17 @@ rate-limit decision.
 
 ## Deferred
 
-Q4 from the phase file — enumerating every class of failure that passes `-t` but
+Q4 — enumerating every class of failure that passes `-t` but
 is rejected on reload — is not fully answerable without exercising the reload
-path, which belongs to Phase 08. What is established here is that the class is
+path, which belongs to config projection. What is established here is that the class is
 **non-empty** and includes at least: unknown category, feature-gated category
 absent from the build, and invalid plugin parameters. That is enough to justify
 post-commit verification, which was the decision this spike gated.
 
-## Re-measured during Phase 08 — 2026-09-03
+## Re-measured during config projection — 2026-09-03
 
 The gate was re-run against the current binary while building the projection, because
-Phase 08 depends on knowing exactly what `-t` catches. Two of the conclusions above need
+config projection depends on knowing exactly what `-t` catches. Two of the conclusions above need
 correcting, and a third side effect was found that changes *why* the staged copy is
 mandatory.
 
@@ -132,7 +132,7 @@ implemented as `projection::PluginCheck`; conclusion 4 is downgraded from "not c
 Worth flagging separately, because it is a live defect rather than a gate limitation: a
 typo'd `limit` `tag` silently changes the rate-limit key from cookie or header to client
 IP. Nothing reports it. The projection cannot generate that shape from typed intent, so
-Phase 08 is not exposed to it, but an operator-authored config is.
+config projection is not exposed to it, but an operator-authored config is.
 
 ### New finding: `-t` rewrites the directory passed to `-c`
 

@@ -263,8 +263,8 @@ async fn the_access_list_gates_before_the_rule_table() {
 #[tokio::test]
 async fn one_access_list_gates_every_domain_that_attaches_it_and_no_others() {
     // Two domains attaching the same list: both gated. A third that does not attach it:
-    // not gated. Attachment is what enforces — the criterion Phase 05 exists to prove,
-    // expressed at the level a plugin can be observed at.
+    // not gated. Attachment is what enforces — the criterion the domain policy model
+    // exists to prove, expressed at the level a plugin can be observed at.
     let shared = access_list_conf("any");
     let tenant_a = plugin(&shared);
     let tenant_b = plugin(&shared);

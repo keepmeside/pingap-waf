@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# Throwaway. Phase 02 Spike E only — answers which hook can inspect a request
+# Throwaway. Spike E only — answers which hook can inspect a request
 # body and still forward it byte-identically upstream. Not in the workspace
 # `members`; see the root Cargo.toml `exclude`.
 

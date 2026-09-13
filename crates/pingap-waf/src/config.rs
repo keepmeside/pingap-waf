@@ -639,8 +639,8 @@ mod tests {
 
     #[test]
     fn block_on_a_response_category_is_rejected_with_the_key_named() {
-        // This is the contradiction the red-team review found: the phase's
-        // success criterion asked for a `block` gate response-side while its
+        // This is the contradiction the red-team review found: the
+        // success criterion asked for a `block` gate response-side while the
         // requirements explained why `block` cannot exist there. Rejecting the
         // value is how the impossibility gets enforced rather than documented.
         for c in [Category::DataLeakage, Category::WebShell] {

@@ -1,9 +1,10 @@
 //! `docs/domain-model.md` is a contract, so it is checked rather than trusted.
 //!
-//! Phases 08, 09 and 10 all generate or render against that document's mapping table. A
-//! table entry naming a config key that no longer exists does not fail loudly — Phase 08
-//! writes a key pingap ignores, and the operator sets something that does nothing. The
-//! same drift the WAF category mapping is guarded against, for the same reason.
+//! Config projection, the admin API and the admin UI all generate or render against that
+//! document's mapping table. A table entry naming a config key that no longer exists does
+//! not fail loudly — projection writes a key pingap ignores, and the operator sets
+//! something that does nothing. The same drift the WAF category mapping is guarded
+//! against, for the same reason.
 //!
 //! Deliberately not a markdown parser. The test asserts that each key the document
 //! promises is present both in the document and in the source that has to implement it,
@@ -100,7 +101,7 @@ fn the_document_states_the_constraints_that_cannot_be_designed_around() {
         ),
         (
             "distinct named entries",
-            "shared plugin instances are the cross-domain state leak this phase \
+            "shared plugin instances are the cross-domain state leak the domain model \
              exists to prevent",
         ),
         (

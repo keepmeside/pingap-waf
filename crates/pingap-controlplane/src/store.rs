@@ -1,7 +1,7 @@
 //! The Turso backend behind [`ControlPlaneStore`].
 //!
-//! Everything here answers to one of Phase 02's measurements rather than to taste, so the
-//! shape is worth stating before the code:
+//! Everything here answers to a measurement taken against the real driver rather than to
+//! taste — see docs/spikes/turso-finding.md — so the shape is worth stating before the code:
 //!
 //! - **One writer for the whole process.** With four tasks writing on their own
 //!   connections, the spike lost 153–166 of 200 inserts to `SQLITE_BUSY`, and the busy
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_statement_failing_mid_transaction_rolls_the_earlier_work_back() {
-        // The direct falsification of Phase 02's measurement. On this driver a failed
+        // The direct falsification of what the Turso spike measured. On this driver a failed
         // statement inside `BEGIN` is *skipped*: the transaction is neither aborted nor
         // poisoned, the next statement is accepted, and `COMMIT` succeeds. Without the
         // explicit `ROLLBACK` in `Writer::transaction` the first insert below would

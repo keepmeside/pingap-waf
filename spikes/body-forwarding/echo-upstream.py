@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Echo upstream for Phase 02 Spike E.
+"""Echo upstream for Spike E.
 
 Reports the request body byte count it actually read, plus a SHA-256 of those
 bytes. The point of the spike is that this number comes from the far side of the

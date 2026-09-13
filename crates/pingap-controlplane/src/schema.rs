@@ -5,8 +5,8 @@
 //! recreatable from scratch — losing it costs history, not the gateway — so the machinery
 //! a framework buys is machinery nobody here needs.
 //!
-//! Three constraints from Phase 02's Spike B shape every statement below, and none of
-//! them is speculation:
+//! Three constraints measured against the real driver shape every statement below, and
+//! none of them is speculation — see docs/spikes/turso-finding.md:
 //!
 //! - **No `CREATE TRIGGER ... INSTEAD OF`.** Unsupported. Append-only for `activity_log`
 //!   and `alert_history` is enforced by the repository exposing no update or delete path,
@@ -89,8 +89,8 @@ pub const MIGRATIONS: &[Migration] = &[
             // ---- audit ----------------------------------------------------------------
             //
             // Append-only. No `updated_at`, because there is no update. `config_version` ties
-            // a mutation to the projected config it produced, which is what makes Phase 08's
-            // rollback explainable after the fact.
+            // a mutation to the projected config it produced, which is what makes the
+            // projection's rollback explainable after the fact.
             "CREATE TABLE IF NOT EXISTS activity_log (
             id TEXT NOT NULL PRIMARY KEY,
             actor_id TEXT,
@@ -179,9 +179,9 @@ pub const MIGRATIONS: &[Migration] = &[
             created_at INTEGER NOT NULL,
             FOREIGN KEY (schedule_id) REFERENCES backup_schedules(id)
         )",
-            // `last_seen_at` rather than a lease: Phase 14 decides liveness by timestamp
-            // threshold, because `pingap-config` has no lease API and adding one was not
-            // worth a vendored file.
+            // `last_seen_at` rather than a lease: cluster peer liveness is decided by
+            // timestamp threshold, because `pingap-config` has no lease API and adding one
+            // was not worth a vendored file.
             "CREATE TABLE IF NOT EXISTS node_status (
             node TEXT NOT NULL PRIMARY KEY,
             version TEXT,
@@ -298,8 +298,8 @@ mod tests {
 
     #[test]
     fn no_statement_uses_a_mechanism_turso_cannot_honour() {
-        // Each of these was measured in Phase 02, and each fails *silently* — which is
-        // why the absence is asserted rather than trusted to review.
+        // Each of these was measured against the real driver, and each fails *silently* —
+        // which is why the absence is asserted rather than trusted to review.
         let sql = MIGRATIONS
             .iter()
             .flat_map(|m| m.statements.iter())

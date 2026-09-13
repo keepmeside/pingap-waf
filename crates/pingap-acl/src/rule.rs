@@ -201,10 +201,10 @@ pub struct AclRule {
     ///
     /// Rules are written as a TOML array, so their written order already *is* the
     /// evaluation order and this defaults to 0 for every rule — meaning the default
-    /// behaviour is exactly "top to bottom as written". It exists because Phase 07
-    /// puts rules in a database, where row order is not a promise, and the admin UI
-    /// needs a field to reorder by. Sorting is stable, so `order` breaks ties between
-    /// groups and written position breaks ties within one.
+    /// behaviour is exactly "top to bottom as written". It exists because the
+    /// control-plane store puts rules in a database, where row order is not a promise,
+    /// and the admin UI needs a field to reorder by. Sorting is stable, so `order`
+    /// breaks ties between groups and written position breaks ties within one.
     #[serde(default)]
     pub order: i32,
     /// A disabled rule is skipped, not deleted. Operators turn rules off to test.

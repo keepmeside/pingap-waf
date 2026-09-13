@@ -1,7 +1,7 @@
 //! Bot analytics: counts per fingerprint, per verdict, per domain.
 //!
-//! Aggregated in Rust rather than in SQL, and not as a style preference. Phase 07's store
-//! is Turso, whose window-function support lacks `lag`/`lead` and custom frames — the
+//! Aggregated in Rust rather than in SQL, and not as a style preference. The control-plane
+//! store is Turso, whose window-function support lacks `lag`/`lead` and custom frames — the
 //! shape a "top fingerprints over the last hour, ranked" query wants. Computing here keeps
 //! the store to inserts and simple selects, which is the subset it is reliable at.
 //!

@@ -444,9 +444,9 @@ async fn validating_never_touches_a_directory_the_caller_owns() {
     // assertions below.
     //
     // So the staged copy is not merely hygiene about process-global state, which is what
-    // Phase 02's spike established. Validating against the live directory would rewrite an
-    // operator's config file as a side effect of checking it. This test exists so nobody
-    // later "optimises away" the staging.
+    // the config-validation spike established. Validating against the live directory
+    // would rewrite an operator's config file as a side effect of checking it. This test
+    // exists so nobody later "optimises away" the staging.
     let Some(binary) = pingap_binary() else {
         eprintln!("skipping: no pingap binary built in target/debug");
         return;

@@ -243,8 +243,8 @@ fn bench_engine_build(c: &mut Criterion) {
 /// The same three request shapes with the native detectors loaded.
 ///
 /// Reported next to the engine-only numbers rather than replacing them, because the
-/// question Phase 04 has to answer is not "is the WAF fast" but "what did the
-/// detectors cost". One number cannot answer that.
+/// question the detector port had to answer is not "is the WAF fast" but "what did
+/// the detectors cost". One number cannot answer that.
 fn bench_with_detectors(c: &mut Criterion) {
     let engine = engine_with_detectors();
     let body = benign_body();

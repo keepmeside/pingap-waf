@@ -2,7 +2,7 @@
 //!
 //! These are integration tests on purpose: the interesting failures in this driver are
 //! not logic errors, they are semantics that only appear when statements actually run.
-//! Phase 02's spike measured three of them — writes failing with `SQLITE_BUSY` under any
+//! The Turso spike measured three of them — writes failing with `SQLITE_BUSY` under any
 //! concurrency, a failed statement inside `BEGIN` being *skipped* rather than aborting the
 //! transaction, and `PRAGMA foreign_key_check` returning zero rows on a database with real
 //! orphans. A mock store would pass every test below while the real one lost audit rows.
@@ -130,7 +130,7 @@ async fn an_unknown_username_is_absent_rather_than_an_error() {
 #[tokio::test]
 async fn a_duplicate_username_is_a_conflict_and_leaves_no_half_written_user() {
     // Creating a user writes two tables, so a rejected create is the one place where
-    // Phase 02's measured transaction behaviour bites: a failed statement inside `BEGIN`
+    // the driver's measured transaction behaviour bites: a failed statement inside `BEGIN`
     // is skipped rather than aborting, so without an explicit `ROLLBACK` the surrounding
     // work commits and the store keeps a profile row for a user that does not exist.
     let (store, _dir) = store().await;
@@ -465,7 +465,7 @@ async fn an_activity_range_excludes_what_falls_outside_it() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writers_all_land_because_they_share_one_writer() {
-    // Phase 02's spike measured 153-166 of 200 writes failing with `SQLITE_BUSY` when four
+    // The Turso spike measured 153-166 of 200 writes failing with `SQLITE_BUSY` when four
     // tasks wrote on their own connections, with no busy handler to make them wait. This
     // is that experiment re-run through the store under the real schema, and it is the
     // reason the writer is one process-global handle: the audit log is a security control,
@@ -607,7 +607,7 @@ async fn an_open_store_reports_itself_healthy() {
 
 #[tokio::test]
 async fn a_store_that_cannot_be_opened_is_unavailable_rather_than_a_panic() {
-    // The load-bearing boundary of this phase: the gateway serves from config alone and
+    // The load-bearing boundary: the gateway serves from config alone and
     // must survive the store being absent, unreadable, or on a path that does not exist.
     // `Unavailable` is a distinct variant so the admin API can answer "the store is down"
     // instead of a 500 that reads like a crash.
@@ -818,7 +818,7 @@ async fn moving_a_version_that_does_not_exist_is_reported() {
 
 #[tokio::test]
 async fn an_activity_row_can_name_the_config_version_it_produced() {
-    // What makes Phase 08's rollback explainable after the fact: the audit entry and the
+    // What makes the projection's rollback explainable after the fact: the audit entry and
     // config it generated are joined, so "who changed what, and what did the gateway
     // actually run" is one question.
     let (store, _dir) = store().await;

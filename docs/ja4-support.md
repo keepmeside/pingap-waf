@@ -140,14 +140,14 @@ that.
 
 One surface. The WAF used to match User-Agents too, and while both did, a scraper could be
 refused by the WAF with an anomaly score attached — a score is a thing an injection payload
-has and a scraper does not. Those patterns moved here in Phase 06 (`use_signatures`), and a
+has and a scraper does not. Those patterns moved here (`use_signatures`), and a
 test asserts no WAF category carries a client-fingerprint rule. The WAF still inspects the
 `User-Agent` header for real payloads: a SQL injection carried there is still a WAF hit.
 
 ## Analytics
 
 Counts per fingerprint, per verdict, per domain, plus the miss breakdown — aggregated in
-Rust rather than SQL, because Phase 07's store lacks the window functions a ranked top-N
+Rust rather than SQL, because the control-plane store lacks the window functions a ranked top-N
 would otherwise use.
 
 **Aggregate only.** A fingerprint is a weak tracking identifier, so there is deliberately

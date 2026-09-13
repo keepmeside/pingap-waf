@@ -1,6 +1,6 @@
 # Spike C — Detector false-positive baseline
 
-**Baseline capture. Gates nothing, but produces the number Phase 04 must beat.**
+**Baseline capture. Gates nothing, but produces the number the detector port must beat.**
 The headline: **35.4% of benign traffic trips a detector**. Blocking mode on these
 patterns as inherited would break roughly one request in three.
 
@@ -23,7 +23,7 @@ freeze meaningful.
 
 **Frozen tree hash:** `ea65120d61d1b7b727944697c53df0ed9e6ae61975e8f3e6fc69d45fc88e1822`
 
-Phase 04 must assert this hash before scoring. A corpus that can be edited to
+The detector port must assert this hash before scoring. A corpus that can be edited to
 pass is not a regression gate, and shrinking the benign set is the easiest way to
 make an absolute false-positive count fall without improving anything.
 
@@ -51,7 +51,7 @@ False positives on the benign set (a hit is a false positive):
 
 The union is lower than the sum because some benign cases trip both sqli and cmdi.
 
-**Phase 04's target: `fp_rate < 0.3536` on this exact corpus, with the tree hash
+**The detector port's target: `fp_rate < 0.3536` on this exact corpus, with the tree hash
 asserted unchanged.** The TP rate of 0.9277 is the floor to hold while doing it —
 a triage that improves precision by dropping recall is not an improvement.
 
@@ -79,10 +79,10 @@ Same bytes, opposite verdict, decided only by which field carried them. User-Age
 is a standard injection vector, so this is a bypass rather than a tuning choice.
 All four detectors ship an identical private copy of the set
 (`sql_injection.rs:36`, `xss_detector.rs:31`, `command_injection.rs:63`,
-`path_traversal.rs:75`) — Phase 04 consolidates them, and fixing one copy would
+`path_traversal.rs:75`) — the port consolidates them, and fixing one copy would
 leave three families blind.
 
-## Two further FP sources the plan did not name
+## Two further FP sources not named in advance
 
 Attributing the sqli and cmdi false positives to individual patterns turned up two
 more that are as bad as the three predicted:
@@ -117,15 +117,15 @@ set against 64 KiB of adversarial input:
 | `<img ` + 20k `on` repeats | 4.81 ms |
 
 Measured with Python's `re` as a proxy for cost *shape*, not absolute speed —
-these patterns are all linear-time in this engine. Phase 03's time budget is still
+these patterns are all linear-time in this engine. The rule engine's time budget is still
 required, because custom operator-authored patterns will not be, and `fancy-regex`
 backtracks where `regex` does not. But no inherited pattern needs rewriting on
 cost grounds.
 
-## Consequences for Phase 04
+## Consequences for the detector port
 
 1. **`detect` is the mandatory default.** A 35.4% FP rate in blocking mode is not
-   a tuning problem, it is an outage. This was already the plan's position; the
+   a tuning problem, it is an outage. This was already the position taken in advance; the
    number makes it non-negotiable.
 2. **Blocking is opt-in per category, and only after that category's FP rate is
    acceptable.** On this baseline, xss and traversal are already at 0.0000 and
@@ -136,7 +136,7 @@ cost grounds.
 4. The keyword-pair patterns need a SQL-context requirement (adjacent punctuation,
    a quote, or a statement boundary) rather than bare `.*` between English words.
 
-## Post-port measurement — Phase 04
+## Post-port measurement
 
 Same frozen corpus, same scoring, after the port and the five pattern fixes. The
 corpus is hash-verified before it is scored (tree hash `ea65120d…`, 726 files in

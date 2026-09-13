@@ -4,8 +4,8 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# Throwaway. Phase 02 Spike A only — the decision gate for Phase 16 (full JA4
-# over the TLS ClientHello). A no-go cuts Phase 16 entirely and Phase 06 ships
+# Throwaway. Spike A only — the decision gate for full JA4, i.e. fingerprinting
+# over the TLS ClientHello. A no-go cuts it entirely and bot management ships
 # JA4H alone. Not in the workspace `members`.
 
 [dependencies]

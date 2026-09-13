@@ -254,8 +254,8 @@ fn narrowing_those_patterns_did_not_cost_their_true_positives() {
 
 #[test]
 fn no_category_carries_a_client_fingerprint_rule() {
-    // Bot verdicts moved to `pingap-bot` in Phase 06, and this is what keeps them from
-    // drifting back. While both subsystems matched User-Agents, a scraper could be
+    // Bot verdicts moved out of the WAF into `pingap-bot`, and this is what keeps them
+    // from drifting back. While both subsystems matched User-Agents, a scraper could be
     // refused by the WAF with an anomaly score attached — a score is a thing an
     // injection payload has and a scraper does not, so the two answers were not even
     // comparable. One bot-policy surface, and the WAF is not it.
@@ -291,7 +291,7 @@ fn no_category_carries_a_client_fingerprint_rule() {
     }
 
     // And the header is still inspected for real payloads, so removing the fingerprint
-    // rules did not also close the blindspot Phase 04 opened up.
+    // rules did not also close the header blindspot the detector port was meant to fix.
     assert!(
         hit_as_user_agent(
             &engine,

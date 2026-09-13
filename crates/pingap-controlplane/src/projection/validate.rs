@@ -1,7 +1,8 @@
 //! The validation gate: does this generated config actually load?
 //!
-//! Two checks, because neither alone is enough. Phase 02's Spike D measured `pingap-waf -t`
-//! against four classes of invalid config and it **exited 0 on three of them**:
+//! Two checks, because neither alone is enough. The config-validation spike measured
+//! `pingap-waf -t` against four classes of invalid config and it **exited 0 on three of
+//! them** — see docs/spikes/config-validate-finding.md:
 //!
 //! | Invalid config | `pingap-waf -t` |
 //! | --- | --- |

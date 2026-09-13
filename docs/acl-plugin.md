@@ -82,10 +82,10 @@ written; use `(?i)` when you do not want that.
 thing would make the list less predictable, which is the property this plugin is built
 around.
 
-`order` exists for the admin UI and for the Phase 07 database, where row order is not a
-promise. Sorting is **stable** and every rule defaults to `0`, so the default behaviour
-is exactly written order, and setting `order` moves a rule between groups without
-disturbing relative position inside one.
+`order` exists for the admin UI and for the control-plane store's database, where row
+order is not a promise. Sorting is **stable** and every rule defaults to `0`, so the
+default behaviour is exactly written order, and setting `order` moves a rule between
+groups without disturbing relative position inside one.
 
 ### GeoIP
 

@@ -1,6 +1,6 @@
 # WAF latency
 
-What the WAF adds to a request, measured after the detector port. Phase 04 owes an
+What the WAF adds to a request, measured after the detector port. The port owes an
 absolute number here rather than a pass/fail, because nobody can predict this from
 reading the code — and the number turned out to matter.
 
@@ -29,9 +29,9 @@ Not criterion means — a p99 computed from batch means is not a p99 of calls.
 
 The distributions are tight — p99 sits within 6% of p50 on every shape, and the maximum
 within 20%. That is the useful part of the result: cost here is proportional to
-rules × fields × bytes, not driven by a backtracking tail. Phase 03's `cost_check` gate
-on lookaround shapes is what keeps it that way, and no inherited pattern needed
-rewriting on cost grounds.
+rules × fields × bytes, not driven by a backtracking tail. The rule engine's
+`cost_check` gate on lookaround shapes is what keeps it that way, and no inherited
+pattern needed rewriting on cost grounds.
 
 Zero budget cuts at the shipped 10 ms budget, so these are the rules' real cost rather
 than the budget's ceiling.
@@ -45,10 +45,10 @@ request-body scan and both response scans:
 
 ## 2. Against the pre-detector floor
 
-Phase 03 recorded the engine's cost with eight operator-authored patterns and no
-detectors. Same criterion benchmarks, same fixtures, so the columns are comparable.
+Before the port, the engine's cost was recorded with eight operator-authored patterns
+and no detectors. Same criterion benchmarks, same fixtures, so the columns are comparable.
 
-| Shape | 8 patterns (Phase 03) | Detectors loaded | Factor |
+| Shape | 8 patterns (pre-detector) | Detectors loaded | Factor |
 |---|---|---|---|
 | request: headers only | 23.7 µs | 815 µs | 34× |
 | request: 1 KB body | 28.5 µs | 3.05 ms | 107× |
@@ -72,9 +72,9 @@ someone builds a feature that rebuilds an engine per request.
 **This is above what a reverse proxy should add, and it is a per-request cost on the
 allow path.** For a gateway whose own overhead is tens of microseconds, 815 µs on a
 headers-only request and 5.6 ms on a `POST` to a cacheable Location is a large multiple
-of the traffic it is protecting. Phase 04's risk register named this outcome in advance
-("Latency is worse than expected… signal: step 12 shows p99 growth an operator would
-reject") and its prescribed response is a **defaults change**: headers-only inspection
+of the traffic it is protecting. The risk was named before the port — that p99 growth
+would reach a level an operator rejects — and the prescribed response is a **defaults
+change**: headers-only inspection
 by default, body inspection opt-in per Location, and the cache-hit response
 registration disablable per domain with the exposure documented.
 
@@ -88,7 +88,7 @@ The structural cause is worth stating because it bounds what tuning can achieve.
 fields, so ~2300 regex executions at ~330 ns each. Nothing prefilters. A literal
 prescan (Aho-Corasick over each pattern's required substrings, skipping patterns that
 cannot match) is the standard fix and typically removes most of that work, but it is an
-engine change and outside this phase.
+engine change and out of scope here.
 
 Options, cheapest first:
 

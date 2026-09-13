@@ -19,7 +19,7 @@
 //!   something an operator can set and no request will ever consult.
 //!
 //! What this module deliberately does **not** do is decide that a generated config is
-//! safe. `pingap -t` passes three of four invalid-config classes (Phase 02's Spike D),
+//! safe. `pingap-waf -t` passes three of four invalid-config classes (Spike D,
 //! and it mutates process-global state before returning, so validation is a subprocess
 //! against a staged copy and lives in `validate.rs`.
 

@@ -1,21 +1,21 @@
-//! Phase 02 Spike C — detector false-positive baseline.
+//! Spike C — detector false-positive baseline.
 //!
 //! Runs pingora-waf's detector patterns, transcribed verbatim from
 //! `.xia-src/pingora-waf/src/waf/*.rs`, against the frozen corpus and reports
 //! per-category true-positive and false-positive counts **and rates**.
 //!
-//! Rates, not counts, are the deliverable: Phase 04 must beat this baseline, and
+//! Rates, not counts, are the deliverable: the detector port must beat this baseline, and
 //! an absolute count falls simply by shrinking the corpus. The runner therefore
 //! asserts the corpus hash before scoring.
 //!
-//! Also confirms the three specific defects the plan predicted:
+//! Also confirms the three specific defects predicted in advance:
 //!   1. `(?i)0x[0-9a-f]{2,}`  fires on hex strings — git SHAs, ETags, colours
 //!   2. `--[^\r\n]*$`          fires on any trailing double dash
 //!   3. `SAFE_HEADERS`         skips user-agent/content-type, hiding injection
 //!
 //! Patterns are transcribed rather than imported because pingora-waf pins
 //! pingora 0.6.0 and depending on it would drag a second Pingora into the build
-//! graph, which the plan forbids. Transcription is verified by the pattern-count
+//! graph, which is ruled out. Transcription is verified by the pattern-count
 //! assertion in `main`.
 
 use once_cell::sync::Lazy;
@@ -110,7 +110,7 @@ static CMDI: Lazy<Vec<regex::Regex>> = Lazy::new(|| {
 });
 
 /// Verbatim from `sql_injection.rs:36-52`. All four detectors ship an identical
-/// private copy; Phase 04 consolidates them into one shared set.
+/// private copy; the port consolidates them into one shared set.
 const SAFE_HEADERS: &[&str] = &[
     "accept",
     "accept-encoding",

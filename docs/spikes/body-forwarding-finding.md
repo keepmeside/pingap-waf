@@ -2,7 +2,7 @@
 
 **Status: GO for the `request_body_filter` hook. NO-GO for both drain-in-request-filter variants.**
 
-Decision gate for Phase 04. Run 2026-09-02 against vendored `pingora 0.8.1`,
+Decision gate for the detector port. Run 2026-09-02 against vendored `pingora 0.8.1`,
 `pingora-core 0.8.1`, `pingora-proxy 0.8.1`.
 
 Harness: `spikes/body-forwarding/` — a minimal `ProxyHttp` with three selectable
@@ -74,26 +74,26 @@ appears as an upstream timeout rather than an error.
 ## Mode 3 — `request_body_filter`: the answer
 
 Inspecting per chunk in `request_body_filter` and leaving the buffer untouched
-forwards every byte at both sizes. Phase 04 must dispatch its body hook from
+forwards every byte at both sizes. The detector port must dispatch its body hook from
 here — pingap already implements this callback at
 `pingap-proxy/src/server.rs:1233-1258`, where it accumulates
 `ctx.state.payload_size` and 413s past `client_body_size_limit`.
 
-## Unverified — carried to Phase 04
+## Unverified — carried to the detector port
 
 **HTTP/2 downstream was not exercised.** The spike listener uses a bare
 `add_tcp`, so h2c was never negotiated and `--http2-prior-knowledge` failed to
 connect (`http_code=000`). This is a gap in the spike harness, not a result:
 pingap enables h2 on its own listeners via `enable_h2()`, and
 `request_body_filter` is dispatched from `proxy_h2.rs` as well as `proxy_h1.rs`,
-so the mechanism is expected to hold. **Phase 04 must assert byte-identical body
+so the mechanism is expected to hold. **The detector port must assert byte-identical body
 delivery over HTTP/2 explicitly** rather than inheriting this spike's h1-only
 evidence. Recorded as an open item rather than an assumed pass.
 
-## Consequences for Phase 04
+## Consequences for the detector port
 
 - Body inspection lands in `handle_request_body`, dispatched from the existing
-  `request_body_filter`. This is already the phase's chosen design; the spike
+  `request_body_filter`. This is already the chosen design; the spike
   removes the last reason to reconsider.
 - The success criterion "benign body arrives byte-identical, including above
   64 KiB" is the one that catches this defect class. Keep it, and keep the
