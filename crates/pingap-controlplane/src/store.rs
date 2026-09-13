@@ -1081,6 +1081,29 @@ impl ControlPlaneStore for TursoStore {
         .await
     }
 
+    async fn prune_waf_events(&self, older_than: i64) -> Result<u64> {
+        // One statement, no transaction: a `DELETE` bounded by an indexed column is atomic on
+        // its own, and wrapping it would hold the process's single writer longer for nothing.
+        self.writer()
+            .execute(
+                "DELETE FROM waf_events WHERE created_at < ?1",
+                vec![Value::Integer(older_than)],
+            )
+            .await
+    }
+
+    async fn prune_performance_metrics(&self, older_than: i64) -> Result<u64> {
+        // `bucket_start`, not `created_at`: a rollup row's age is the bucket it summarises,
+        // and pruning by insertion time would keep an old bucket that was recomputed recently
+        // and drop a current one written once.
+        self.writer()
+            .execute(
+                "DELETE FROM performance_metrics WHERE bucket_start < ?1",
+                vec![Value::Integer(older_than)],
+            )
+            .await
+    }
+
     async fn set_config_version_status(
         &self,
         version_id: &str,

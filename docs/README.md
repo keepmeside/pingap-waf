@@ -10,7 +10,8 @@
 - **Bot management** (this fork) — [JA4 support and the `bot` plugin](./ja4-support.md)
 - **Control plane** (this fork) — [store, per-user admin auth, driver constraints](./control-plane-store.md),
   [config projection and versioning](./config-projection.md),
-  [admin API and its parity with the reference product](./api-parity.md)
+  [admin API and its parity with the reference product](./api-parity.md),
+  [observability: what pingap already instruments and what this adds](./observability.md)
 - **Documentation site** (VitePress, English only) — assembled by
   [`scripts/build-website.sh`](../scripts/build-website.sh) and built under
   [`website/`](../website/). This fork does not vendor upstream's

@@ -364,6 +364,25 @@ pub trait ControlPlaneStore: Send + Sync {
         range: TimeRange,
     ) -> Result<Vec<WafEventRecord>>;
 
+    // ---- retention ---------------------------------------------------------------------
+    /// Removes findings older than a cutoff. Returns how many went.
+    ///
+    /// A cutoff rather than a window, so the arithmetic lives in one place
+    /// ([`crate::metrics::Retention::cutoffs`]) and cannot be done two ways. Strictly older:
+    /// a row exactly at the cutoff stays, which is what makes a sweep idempotent when run
+    /// twice against the same `now`.
+    ///
+    /// Deliberately absent for `activity_log` and `alert_history`. Those are append-only and
+    /// the trait exposes no delete for them at all; see `crate::metrics::retention`.
+    async fn prune_waf_events(&self, older_than: i64) -> Result<u64>;
+
+    /// Removes rollup buckets older than a cutoff. Returns how many went.
+    ///
+    /// A rollup is derived data, so pruning it loses less than pruning the findings it
+    /// summarised — but it is kept far longer for the same reason: once the findings are
+    /// gone it is the only record left.
+    async fn prune_performance_metrics(&self, older_than: i64) -> Result<u64>;
+
     // ---- config versions -----------------------------------------------------------
     //
     // Not append-only: a version's `status` is the one thing that legitimately changes
@@ -447,6 +466,13 @@ mod tests {
             "purge_activity",
             "update_alert_history",
             "delete_alert_history",
+            // Retention is a prune, and a prune is a delete by another name. These are here
+            // because bounded growth is a real requirement and the obvious way to meet it is
+            // to add a window to the audit trail — which would quietly undo the append-only
+            // decision. The reclaim path for those two tables is `VACUUM INTO` at backup
+            // time, not a sweep; see `crate::metrics::retention`.
+            "prune_activity",
+            "prune_alert_history",
             // A config version's intent and hash are the record of what was generated.
             // Only its `status` may move, which is why that method is named for the one
             // field it touches rather than being a general update.

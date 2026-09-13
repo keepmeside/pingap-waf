@@ -11,6 +11,7 @@
 
 pub mod auth;
 pub mod events;
+pub mod metrics;
 pub mod projection;
 pub mod rbac;
 pub mod repository;

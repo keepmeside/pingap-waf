@@ -618,6 +618,18 @@ impl ControlPlaneStore for UnavailableStore {
     > {
         self.refuse()
     }
+    async fn prune_waf_events(
+        &self,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<u64> {
+        self.refuse()
+    }
+    async fn prune_performance_metrics(
+        &self,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<u64> {
+        self.refuse()
+    }
     async fn set_totp_secret(
         &self,
         _: &str,
