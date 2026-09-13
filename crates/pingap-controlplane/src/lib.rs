@@ -10,6 +10,7 @@
 //! store owns identity and history. Nothing here is on the request path.
 
 pub mod auth;
+pub mod events;
 pub mod projection;
 pub mod rbac;
 pub mod repository;
