@@ -5102,6 +5102,7 @@ dependencies = [
  "http",
  "pingap-config",
  "pingap-core",
+ "pingap-logger",
  "pingap-plugin",
  "pingap-util",
  "pingora",
