@@ -24,7 +24,7 @@
 use super::{audit, caller, now_sec};
 use crate::{ApiError, ApiRequest, ApiResponse, AppState, Result};
 use pingap_controlplane::{AuthLevel, Role};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The caller, as they are entitled to see themselves.
 ///
@@ -150,4 +150,209 @@ pub async fn revoke_session(
     state.store.revoke_session(id, now).await?;
     audit(state, caller, "session.revoke", id, now).await?;
     Ok(ApiResponse::no_content())
+}
+
+/// What the caller's second factor looks like from outside.
+///
+/// Two booleans and no secret. `enrolled` and `enabled` are separate because enrolment is a
+/// two-step handshake — a secret is stored pending, then a code confirms it — and a UI that
+/// could not tell the two apart would show a half-finished enrolment as a protected account.
+#[derive(Debug, Serialize)]
+struct SecondFactorStatus {
+    /// A secret is stored. It may not be confirmed yet.
+    enrolled: bool,
+    /// The secret is confirmed, so a login is challenged.
+    enabled: bool,
+}
+
+/// The secret, returned exactly once.
+///
+/// Nothing else can produce it: the store holds the ciphertext, and `second_factor_status`
+/// deliberately reports only that one exists. Losing this response means re-enrolling, which
+/// is the intended cost rather than a recoverable one.
+#[derive(Debug, Serialize)]
+struct SecondFactorSetup {
+    /// Base32, for an app that takes the secret directly.
+    secret: String,
+    /// The same secret as an `otpauth://` URI, for one that scans.
+    otpauth_uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecondFactorCode {
+    code: String,
+}
+
+pub async fn second_factor_status(
+    state: &AppState,
+    request: &ApiRequest,
+    _params: &[String],
+) -> Result<ApiResponse> {
+    let caller = caller(request)?;
+    let stored = state.store.totp_secret_for(&caller.user_id).await?;
+    // An empty secret is absence, not a third state: clearing writes "" rather than deleting
+    // the row, and reading that as enrolled would show a protection that cannot be satisfied.
+    let enrolled = stored
+        .as_ref()
+        .is_some_and(|(secret, _)| !secret.is_empty());
+    let enabled = stored.is_some_and(|(_, enabled)| enabled) && enrolled;
+    ApiResponse::json(&SecondFactorStatus { enrolled, enabled })
+}
+
+/// Begin enrolment: generate a secret, store it unconfirmed, and hand it over once.
+///
+/// Refuses an account whose second factor is already enabled. Overwriting a live secret would
+/// disarm it without a code — the exact thing `second_factor_disable` requires one for — so
+/// the caller has to disable first and prove they can still produce a code.
+pub async fn second_factor_setup(
+    state: &AppState,
+    request: &ApiRequest,
+    _params: &[String],
+) -> Result<ApiResponse> {
+    let caller = caller(request)?;
+    if let Some((secret, enabled)) =
+        state.store.totp_secret_for(&caller.user_id).await?
+        && enabled
+        && !secret.is_empty()
+    {
+        return Err(ApiError::Conflict {
+            reason: "a second factor is already enabled; disable it first, which needs a \
+                     code from the device that has it"
+                .to_string(),
+        });
+    }
+    let (secret, otpauth_uri) =
+        pingap_controlplane::enrol_totp(&caller.username).map_err(|e| {
+            ApiError::Internal {
+                reason: format!("no second factor could be generated: {e}"),
+            }
+        })?;
+    // Sealed before it is stored, and the failure is a 409 naming the missing setting rather
+    // than a 500: sealing with a default key would be storing the secret in plaintext with
+    // extra steps, and the store could not tell the difference later.
+    let encrypted = state.seal_totp_secret(&secret)?;
+    let now = now_sec();
+    state
+        .store
+        .set_totp_secret(&caller.user_id, &encrypted, false, now)
+        .await?;
+    audit(state, caller, "account.2fa.setup", &caller.user_id, now).await?;
+    ApiResponse::json(&SecondFactorSetup {
+        secret,
+        otpauth_uri,
+    })
+}
+
+/// Confirm a pending enrolment with a code from the device that just scanned it.
+///
+/// The stored ciphertext is kept rather than re-sealed: the secret has not changed, only
+/// whether a login is challenged by it, and re-encrypting would produce a different ciphertext
+/// for the same secret with nothing gained.
+pub async fn second_factor_enable(
+    state: &AppState,
+    request: &ApiRequest,
+    _params: &[String],
+) -> Result<ApiResponse> {
+    let caller = caller(request)?;
+    let body: SecondFactorCode = request.json()?;
+    let (encrypted, _) = second_factor_secret(state, caller).await?;
+    confirm_code(state, caller, &encrypted, &body.code).await?;
+    let now = now_sec();
+    state
+        .store
+        .set_totp_secret(&caller.user_id, &encrypted, true, now)
+        .await?;
+    audit(state, caller, "account.2fa.enable", &caller.user_id, now).await?;
+    Ok(ApiResponse::no_content())
+}
+
+/// Remove the caller's second factor, which takes a code from the device that has it.
+///
+/// The reference product's equivalent takes none, and that is a posture this fork does not
+/// copy: a stolen session could then silently disarm the second factor, leaving the password
+/// as the only thing between the attacker and the account. Requiring a code makes that
+/// useless, and the lockout it creates for someone who genuinely lost their device is what
+/// `POST /users/:id/2fa/reset` exists to end — an administrator clears the secret, and the
+/// account can be enrolled again.
+///
+/// Clears rather than disables. Leaving a disabled secret in place would keep key material
+/// that nothing can use, and "disable then re-enable without a code" would be a second way
+/// around the check above.
+pub async fn second_factor_disable(
+    state: &AppState,
+    request: &ApiRequest,
+    _params: &[String],
+) -> Result<ApiResponse> {
+    let caller = caller(request)?;
+    let body: SecondFactorCode = request.json()?;
+    let (encrypted, enabled) = second_factor_secret(state, caller).await?;
+    if !enabled {
+        return Err(ApiError::Conflict {
+            reason: "no second factor is enabled on this account".to_string(),
+        });
+    }
+    confirm_code(state, caller, &encrypted, &body.code).await?;
+    let now = now_sec();
+    state
+        .store
+        .set_totp_secret(&caller.user_id, "", false, now)
+        .await?;
+    audit(state, caller, "account.2fa.disable", &caller.user_id, now).await?;
+    Ok(ApiResponse::no_content())
+}
+
+/// The caller's stored secret, or a refusal that says what is missing.
+async fn second_factor_secret(
+    state: &AppState,
+    caller: &crate::Caller,
+) -> Result<(String, bool)> {
+    let (encrypted, enabled) = state
+        .store
+        .totp_secret_for(&caller.user_id)
+        .await?
+        .filter(|(secret, _)| !secret.is_empty())
+        .ok_or_else(|| ApiError::Conflict {
+            reason: "no second factor is enrolled; call setup first"
+                .to_string(),
+        })?;
+    Ok((encrypted, enabled))
+}
+
+/// Spend a code against a stored secret.
+///
+/// `401` for a wrong code and for a replayed one, and the guard deliberately does not
+/// distinguish them: telling a caller that a captured code was genuine but already used turns
+/// the endpoint into an oracle for codes an attacker has collected.
+async fn confirm_code(
+    state: &AppState,
+    caller: &crate::Caller,
+    encrypted: &str,
+    code: &str,
+) -> Result<()> {
+    let secret = state.open_totp_secret(encrypted)?;
+    let now = now_sec();
+    let accepted = state
+        .totp()
+        .verify_once(
+            // The user id, and it has to be the same value the login path passes. The guard
+            // keys its spent-code set by `(identifier, step)`, so a second spelling of the
+            // same account is a second set — and a code that completed a login would still be
+            // good for a disable inside the same step. The identifier is not an input to the
+            // code itself, only to the replay window, which is why the mismatch is invisible
+            // to every test that mints its own code.
+            &caller.user_id,
+            &secret,
+            code,
+            u64::try_from(now).unwrap_or_default(),
+        )
+        .map_err(|e| ApiError::Internal {
+            reason: format!("the second factor could not be checked: {e}"),
+        })?;
+    if accepted {
+        return Ok(());
+    }
+    // Not counted against the login rate limiter: this route is already behind a session, and
+    // the limiter exists to slow credential guessing from outside.
+    Err(ApiError::Unauthenticated)
 }

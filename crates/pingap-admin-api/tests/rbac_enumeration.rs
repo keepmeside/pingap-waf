@@ -32,10 +32,16 @@ use pingap_controlplane::projection::{
     Applier, ConfigSink, DataPlane, NoPluginCheck, Validator,
 };
 use pingap_controlplane::{
-    AuthLevel, Capability, ControlPlaneStore, Role, TursoStore,
+    AuthLevel, Capability, ControlPlaneStore, Role, TotpGuard, TursoStore,
 };
 use std::sync::Arc;
 use std::time::Duration;
+
+/// A throwaway AES key in the shape `pingap-util` expects.
+///
+/// Real rather than absent: second-factor enrolment seals the secret with it, and a fixture
+/// that passed `None` would make every enrolment test a test of the missing-key refusal.
+const TOTP_KEY: &str = "PLpKJqvfkjTcYTDpauJf+2JnEayP+bm+0Oe60Jk=";
 
 /// A sink that accepts everything and remembers nothing.
 ///
@@ -112,7 +118,12 @@ async fn fixture() -> Fixture {
         Duration::from_millis(0),
     );
     Fixture {
-        state: AppState::new(store, Arc::new(applier)),
+        state: AppState::new(
+            store,
+            Arc::new(applier),
+            Arc::new(TotpGuard::default()),
+            Some(TOTP_KEY.to_string()),
+        ),
         ids,
         _dir: dir,
     }
@@ -226,30 +237,47 @@ async fn a_route_that_is_not_public_is_401_without_a_session() {
     }
 }
 
-/// The criterion: a viewer is refused every mutating route, per route — with one exception,
+/// The criterion: a viewer is refused every mutating route, per route — with the exceptions
 /// named.
 ///
-/// `DELETE /account/sessions/:id` is a mutation every role holds, because the alternative to a
-/// user cutting off their own lost laptop is an administrator doing it for them. So the
-/// criterion this asserts is "a viewer can change nothing except their own sessions", and that
-/// is only true for as long as the exception list has one entry in it. Pinned by name and in
-/// full, the way the public-route list is: a second exception is a failure here rather than a
-/// quiet widening of what a viewer may do.
+/// The exceptions are the mutations that act only on the caller's own account: cutting off a
+/// lost laptop, and enrolling or removing one's own second factor. The alternative to a viewer
+/// holding those is an administrator doing them on the viewer's behalf, and for the second
+/// factor that is how 2FA does not get turned on. So the criterion this asserts is "a viewer
+/// can change nothing except their own account", and that is only true for as long as the list
+/// below is exactly those routes. Pinned by name and in full, the way the public-route list
+/// is: a third exception is a failure here rather than a quiet widening of what a viewer may
+/// do.
 #[tokio::test]
 async fn a_viewer_is_403_on_every_mutating_route() {
     let f = fixture().await;
-    let own_sessions_only = |route: &pingap_admin_api::Route| {
-        matches!(route.access, Access::Needs(Capability::RevokeOwnSession))
+    let own_account_only = |route: &pingap_admin_api::Route| {
+        matches!(
+            route.access,
+            Access::Needs(
+                Capability::RevokeOwnSession
+                    | Capability::ManageOwnSecondFactor
+            )
+        )
     };
 
-    let exceptions: Vec<String> = table()
+    let mut exceptions: Vec<String> = table()
         .iter()
-        .filter(|route| route.access.is_mutating() && own_sessions_only(route))
+        .filter(|route| route.access.is_mutating() && own_account_only(route))
         .map(|route| format!("{} {}", route.method, route.path))
         .collect();
+    // Sorted, so the assertion pins the set and not the order the table happens to list it
+    // in. A route moved within `build()` is not a change to what a viewer may do.
+    exceptions.sort();
+    let mut expected = vec![
+        "DELETE /account/sessions/:id".to_string(),
+        "POST /account/2fa/disable".to_string(),
+        "POST /account/2fa/enable".to_string(),
+        "POST /account/2fa/setup".to_string(),
+    ];
+    expected.sort();
     assert_eq!(
-        exceptions,
-        vec!["DELETE /account/sessions/:id".to_string()],
+        exceptions, expected,
         "the set of mutating routes a viewer may reach changed"
     );
 
@@ -261,8 +289,8 @@ async fn a_viewer_is_403_on_every_mutating_route() {
         let viewer = caller(&f, Role::Viewer, AuthLevel::TwoFactor);
         let response =
             dispatch(&f.state, &request_for(route, Some(viewer))).await;
-        if own_sessions_only(route) {
-            // The exception, asserted from both sides. Only the refusal is checked above; if
+        if own_account_only(route) {
+            // The exceptions, asserted from both sides. Only the refusal is checked above; if
             // this one were dropped the list could name a route that is in fact denied, and
             // the test would pass while the criterion quietly narrowed.
             assert_ne!(

@@ -192,6 +192,13 @@ impl TotpGuard {
     /// `Ok(false)` for a wrong code, `Ok(false)` for a replayed one — the caller must not
     /// be able to distinguish them, or the difference becomes an oracle telling an
     /// attacker their captured code was genuine.
+    ///
+    /// `user` is the replay window's key, and **every path that spends a code for one account
+    /// must pass the same value** — the user id, not a username or a session id. Two
+    /// spellings of one account are two spent-code sets, so a code that completed a login
+    /// would still be good for a second-factor removal inside the same step. The mismatch is
+    /// invisible to a test that mints its own code, because `user` labels the TOTP and is not
+    /// an input to the code it generates.
     pub fn verify_once(
         &self,
         user: &str,

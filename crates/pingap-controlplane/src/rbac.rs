@@ -105,6 +105,16 @@ pub enum Capability {
     /// mutation and so needs a completed second factor, which the blanket "a password-only
     /// session may look but not touch" rule already requires of every non-`GET`.
     RevokeOwnSession,
+    /// Enrol, confirm or remove one's *own* second factor.
+    ///
+    /// Every role has it, for the same reason as [`Self::RevokeOwnSession`]: an account's
+    /// second factor is that account's to manage, and making a viewer ask an administrator to
+    /// turn on their own 2FA is how 2FA does not get turned on.
+    ///
+    /// Mutating, so it needs a completed second factor. That is not circular: a session that
+    /// has not completed the challenge is exactly the session that must not be able to remove
+    /// the challenge, and an account with none enrolled authenticates at `TwoFactor` already.
+    ManageOwnSecondFactor,
     /// Revoke someone else's session.
     RevokeAnySession,
     EnrolNode,
@@ -119,7 +129,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 23] = [
+    pub const ALL: [Capability; 24] = [
         Capability::ViewConfig,
         Capability::ViewLogs,
         Capability::ViewMetrics,
@@ -139,6 +149,7 @@ impl Capability {
         Capability::RestoreBackup,
         Capability::ManageUsers,
         Capability::RevokeOwnSession,
+        Capability::ManageOwnSecondFactor,
         Capability::RevokeAnySession,
         Capability::EnrolNode,
         Capability::RestartProcess,
@@ -192,6 +203,7 @@ impl Role {
                     | ViewNodes
                     | ViewOwnSessions
                     | RevokeOwnSession
+                    | ManageOwnSecondFactor
                     | EditDomain
                     | EditUpstream
                     | EditPolicy
@@ -210,6 +222,7 @@ impl Role {
                     | ViewNodes
                     | ViewOwnSessions
                     | RevokeOwnSession
+                    | ManageOwnSecondFactor
             ),
         }
     }
@@ -286,12 +299,14 @@ mod tests {
         // Enumerated over the capability list rather than asserted on a middleware, so a
         // capability added later is covered whether or not anyone remembers this test.
         //
-        // One exception, named and pinned: revoking your own session is a mutation every
-        // role holds, because the alternative to a user cutting off their own lost laptop is
-        // an administrator doing it for them. Asserted as a complete list rather than a
-        // predicate, so a second exception fails here instead of quietly widening what a
-        // viewer may change. `every_role_can_manage_its_own_sessions` asserts the other side
-        // of it — that the one exception is really held, not merely excused.
+        // The exceptions, named and pinned: the mutations every role holds are the ones that
+        // act only on the caller's own account, because the alternative to a user cutting off
+        // their own lost laptop or enrolling their own second factor is an administrator doing
+        // it for them. Asserted as a complete list rather than a predicate, so a third one
+        // fails here instead of quietly widening what a viewer may change — and each entry is
+        // a deliberate re-deciding of the criterion, not an accident of a new route.
+        // `every_role_can_manage_its_own_account` asserts the other side: that these are
+        // really held, not merely excused.
         let mutating_and_viewer_visible: Vec<Capability> = Capability::ALL
             .into_iter()
             .filter(|capability| {
@@ -300,7 +315,10 @@ mod tests {
             .collect();
         assert_eq!(
             mutating_and_viewer_visible,
-            vec![Capability::RevokeOwnSession],
+            vec![
+                Capability::RevokeOwnSession,
+                Capability::ManageOwnSecondFactor
+            ],
             "the set of mutating capabilities a viewer holds changed"
         );
 
@@ -492,30 +510,33 @@ mod tests {
         );
         assert_eq!(
             Capability::ALL.iter().filter(|c| c.is_mutating()).count(),
-            13,
+            14,
             "the mutating/read split moved; check both the viewer gate and the \
              second-factor requirement, which are derived from it"
         );
     }
 
     #[test]
-    fn every_role_can_manage_its_own_sessions() {
+    fn every_role_can_manage_its_own_account() {
         // How a user sees the laptop they lost, and then cuts it off. Withholding either
         // from a viewer would mean an administrator has to do it for them.
         for role in Role::ALL {
-            for capability in
-                [Capability::ViewOwnSessions, Capability::RevokeOwnSession]
-            {
+            for capability in [
+                Capability::ViewOwnSessions,
+                Capability::RevokeOwnSession,
+                Capability::ManageOwnSecondFactor,
+            ] {
                 assert_eq!(
                     authorize(role, AuthLevel::TwoFactor, capability),
                     Ok(()),
                     "{role:?} was refused {capability:?}"
                 );
             }
-            // The listing is a read and the revocation is not, so only the revocation waits
-            // on the second factor. That split is why these are two capabilities rather than
+            // The listing is a read and the two writes are not, so only the writes wait on
+            // the second factor. That split is why these are separate capabilities rather than
             // one: a single capability would have to be non-mutating to keep the listing
-            // reachable, and would then let a password-only session cut one off.
+            // reachable, and would then let a password-only session cut one off — or, worse,
+            // remove the second factor from a session that never completed it.
             assert_eq!(
                 authorize(
                     role,
@@ -524,14 +545,16 @@ mod tests {
                 ),
                 Ok(())
             );
-            assert_eq!(
-                authorize(
-                    role,
-                    AuthLevel::PasswordOnly,
-                    Capability::RevokeOwnSession
-                ),
-                Err(Denial::SecondFactorRequired)
-            );
+            for capability in [
+                Capability::RevokeOwnSession,
+                Capability::ManageOwnSecondFactor,
+            ] {
+                assert_eq!(
+                    authorize(role, AuthLevel::PasswordOnly, capability),
+                    Err(Denial::SecondFactorRequired),
+                    "{capability:?} did not wait on the second factor"
+                );
+            }
         }
     }
 

@@ -163,6 +163,35 @@ fn build() -> Vec<Route> {
             access: Access::Needs(Capability::RevokeOwnSession),
             handler: handler!(routes::account::revoke_session),
         },
+        // ---- the caller's own second factor -------------------------------------------
+        //
+        // The status read is `Authenticated` rather than a capability of its own: it reports
+        // two booleans about the caller and every role may see their own. The three writes
+        // carry a capability because the router refuses a non-`GET` route that names none.
+        Route {
+            method: Method::GET,
+            path: "/account/2fa",
+            access: Access::Authenticated,
+            handler: handler!(routes::account::second_factor_status),
+        },
+        Route {
+            method: Method::POST,
+            path: "/account/2fa/setup",
+            access: Access::Needs(Capability::ManageOwnSecondFactor),
+            handler: handler!(routes::account::second_factor_setup),
+        },
+        Route {
+            method: Method::POST,
+            path: "/account/2fa/enable",
+            access: Access::Needs(Capability::ManageOwnSecondFactor),
+            handler: handler!(routes::account::second_factor_enable),
+        },
+        Route {
+            method: Method::POST,
+            path: "/account/2fa/disable",
+            access: Access::Needs(Capability::ManageOwnSecondFactor),
+            handler: handler!(routes::account::second_factor_disable),
+        },
         // ---- users -------------------------------------------------------------------
         Route {
             method: Method::GET,
@@ -181,6 +210,14 @@ fn build() -> Vec<Route> {
             path: "/users/:id",
             access: Access::Needs(Capability::ManageUsers),
             handler: handler!(routes::users::update),
+        },
+        // The lockout escape for the self-service disable above, and the reason that one can
+        // require a code.
+        Route {
+            method: Method::POST,
+            path: "/users/:id/2fa/reset",
+            access: Access::Needs(Capability::ManageUsers),
+            handler: handler!(routes::users::reset_second_factor),
         },
         // ---- config versions, drift, rollback ----------------------------------------
         Route {

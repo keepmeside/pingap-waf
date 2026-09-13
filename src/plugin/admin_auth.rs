@@ -197,7 +197,7 @@ pub struct AdminAuth {
     /// reload — so the rule is instead that it is *never consulted* once any
     /// user exists.
     bootstrap: Option<(String, String)>,
-    totp_guard: TotpGuard,
+    totp_guard: Arc<TotpGuard>,
     /// The TOTP encryption key, from configuration. Absent means 2FA enrolment
     /// is refused rather than stored in the clear.
     totp_key: Option<String>,
@@ -247,7 +247,7 @@ impl AdminAuth {
         Self {
             store,
             bootstrap,
-            totp_guard: TotpGuard::default(),
+            totp_guard: Arc::new(TotpGuard::default()),
             totp_key,
         }
     }
@@ -263,7 +263,7 @@ impl AdminAuth {
         Self {
             store,
             bootstrap,
-            totp_guard: TotpGuard::default(),
+            totp_guard: Arc::new(TotpGuard::default()),
             totp_key,
         }
     }
@@ -275,6 +275,22 @@ impl AdminAuth {
     /// second path, so a second handle is not merely wasteful — it would not open.
     pub fn store(&self) -> &Arc<dyn ControlPlaneStore> {
         &self.store
+    }
+
+    /// The guard that spends second-factor codes, shared with the admin API.
+    ///
+    /// Shared rather than duplicated: a `TotpGuard` keeps the set of codes it has already
+    /// spent, so a second instance would keep a second set and a code consumed at login would
+    /// still be good for a disable. The replay protection would look present and be
+    /// per-call-site.
+    pub fn totp_guard(&self) -> Arc<TotpGuard> {
+        self.totp_guard.clone()
+    }
+
+    /// The key stored second-factor secrets are sealed with. `None` when the deployment
+    /// configured none, which enrolment refuses rather than defaults.
+    pub fn totp_key(&self) -> Option<String> {
+        self.totp_key.clone()
     }
 
     /// Whether the store can be reached right now.

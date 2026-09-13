@@ -153,3 +153,31 @@ pub async fn update(
         })?,
     ))
 }
+
+/// Clear another account's second factor.
+///
+/// The lockout escape, and what makes it safe for `second_factor_disable` to demand a code.
+/// Someone who lost their device cannot produce one, and without this route the only outcomes
+/// would be a permanent lockout or a self-service disable that a stolen session could also
+/// use. An administrator cannot produce a code from a device they do not hold either, so this
+/// takes none — which is why it is `ManageUsers` and not reachable on one's own behalf.
+///
+/// Clears rather than disables, so the account is enrolled from scratch next time and no key
+/// material is left behind that nothing can use. Does not touch the account's sessions: they
+/// keep the auth level they were opened with, which is the restrictive direction.
+pub async fn reset_second_factor(
+    state: &AppState,
+    request: &ApiRequest,
+    params: &[String],
+) -> Result<ApiResponse> {
+    let actor = caller(request)?;
+    let id = params.first().ok_or_else(|| ApiError::BadRequest {
+        reason: "no user id in the path".to_string(),
+    })?;
+    let now = now_sec();
+    // `set_totp_secret` reports a missing user itself, so a 204 here means an account that
+    // exists had its secret cleared and not that nothing matched.
+    state.store.set_totp_secret(id, "", false, now).await?;
+    audit(state, actor, "user.2fa.reset", id, now).await?;
+    Ok(ApiResponse::no_content())
+}

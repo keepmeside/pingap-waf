@@ -29,11 +29,17 @@ use pingap_controlplane::projection::{
 };
 use pingap_controlplane::repository::TimeRange;
 use pingap_controlplane::{
-    AuthLevel, ConfigStatus, ControlPlaneStore, Role, TursoStore,
+    AuthLevel, ConfigStatus, ControlPlaneStore, Role, TotpGuard, TursoStore,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// A throwaway AES key in the shape `pingap-util` expects.
+///
+/// Real rather than absent: second-factor enrolment seals the secret with it, and a fixture
+/// that passed `None` would make every enrolment test a test of the missing-key refusal.
+const TOTP_KEY: &str = "PLpKJqvfkjTcYTDpauJf+2JnEayP+bm+0Oe60Jk=";
 
 /// What a reload of the last committed config would bring up.
 ///
@@ -122,7 +128,12 @@ async fn api() -> Api {
             role: Role::Admin,
             auth_level: AuthLevel::TwoFactor,
         },
-        state: AppState::new(store.clone(), Arc::new(applier)),
+        state: AppState::new(
+            store.clone(),
+            Arc::new(applier),
+            Arc::new(TotpGuard::default()),
+            Some(TOTP_KEY.to_string()),
+        ),
         store,
         _dir: dir,
     }

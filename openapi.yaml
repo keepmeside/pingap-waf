@@ -164,6 +164,125 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /account/2fa:
+    get:
+      tags: [account]
+      operationId: getSecondFactorStatus
+      summary: Whether the caller has a second factor, and whether it is live
+      description: >
+        Two booleans and no secret. `enrolled` and `enabled` are separate because enrolment is
+        a two-step handshake — a secret is stored pending, then a code confirms it — and a UI
+        that could not tell the two apart would show a half-finished enrolment as a protected
+        account.
+      x-required-capability: authenticated
+      responses:
+        '200':
+          description: The caller's second-factor state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecondFactorStatus'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /account/2fa/setup:
+    post:
+      tags: [account]
+      operationId: setupSecondFactor
+      summary: Begin enrolment and receive the secret, once
+      description: |
+        Generates a secret, stores it sealed and unconfirmed, and returns it with an
+        `otpauth://` URI to scan. This response is the only thing that can produce the secret:
+        the store holds the ciphertext and `GET /account/2fa` reports only that one exists.
+        Losing it means enrolling again.
+
+        Refused with `409` when a second factor is already enabled. Overwriting a live secret
+        would disarm it without a code, which is exactly what `disable` requires one for, so
+        the caller has to disable first and prove they can still produce a code.
+
+        `409` rather than `500` when the deployment has no encryption key configured: sealing
+        with a default key would store the secret in plaintext with extra steps, and the store
+        could not tell the difference later.
+      x-required-capability: manage_own_second_factor
+      responses:
+        '200':
+          description: The secret, which will not be shown again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecondFactorSetup'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A second factor is already enabled, or no encryption key is configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /account/2fa/enable:
+    post:
+      tags: [account]
+      operationId: enableSecondFactor
+      summary: Confirm a pending enrolment with a code
+      description: >
+        The stored ciphertext is kept rather than re-sealed: the secret has not changed, only
+        whether a login is challenged by it. A wrong code and a replayed one are the same
+        `401`, because distinguishing them would make this an oracle for codes an attacker has
+        collected.
+      x-required-capability: manage_own_second_factor
+      requestBody:
+        $ref: '#/components/requestBodies/SecondFactorCode'
+      responses:
+        '204':
+          description: Confirmed. A login is now challenged.
+        '401':
+          description: The code was wrong, or already spent.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Nothing is pending — call setup first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /account/2fa/disable:
+    post:
+      tags: [account]
+      operationId: disableSecondFactor
+      summary: Remove the caller's second factor, which takes a code
+      description: |
+        The reference product's equivalent takes no code, and that is a posture this fork does
+        not copy: a stolen session could then silently disarm the second factor, leaving the
+        password as the only thing between an attacker and the account. Requiring a code makes
+        that useless.
+
+        The lockout it creates for someone who genuinely lost their device is what
+        `POST /users/{id}/2fa/reset` exists to end.
+
+        Clears rather than disables: leaving a disabled secret behind would keep key material
+        nothing can use, and "disable then re-enable without a code" would be a second way
+        around the check on `setup`.
+      x-required-capability: manage_own_second_factor
+      requestBody:
+        $ref: '#/components/requestBodies/SecondFactorCode'
+      responses:
+        '204':
+          description: Removed.
+        '401':
+          description: The code was wrong, or already spent.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: No second factor is enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /users:
     get:
       tags: [users]
@@ -691,6 +810,35 @@ paths:
         '409':
           $ref: '#/components/responses/NotApplied'
 
+  /users/{id}/2fa/reset:
+    post:
+      tags: [users]
+      operationId: resetSecondFactor
+      summary: Clear another account's second factor
+      description: |
+        The lockout escape, and what makes it safe for `disableSecondFactor` to demand a code.
+        Someone who lost their device cannot produce one, and without this the only outcomes
+        would be a permanent lockout or a self-service disable that a stolen session could also
+        use. An administrator cannot produce a code from a device they do not hold either, so
+        this takes none — which is why it is `manage_users` and not reachable on one's own
+        behalf.
+
+        Clears rather than disables, so the account is enrolled from scratch next time. Does
+        not touch the account's sessions: they keep the auth level they were opened with, which
+        is the restrictive direction.
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      x-required-capability: manage_users
+      responses:
+        '204':
+          description: Cleared.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /config-versions:
     get:
       tags: [versions]
@@ -1167,6 +1315,12 @@ components:
         minimum: 1
 
   requestBodies:
+    SecondFactorCode:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SecondFactorCode'
     Domain:
       required: true
       content:
@@ -1830,6 +1984,39 @@ components:
         created_at:
           type: integer
           format: int64
+
+    SecondFactorStatus:
+      type: object
+      required: [enrolled, enabled]
+      properties:
+        enrolled:
+          type: boolean
+          description: A secret is stored. It may not be confirmed yet.
+        enabled:
+          type: boolean
+          description: The secret is confirmed, so a login is challenged.
+
+    SecondFactorSetup:
+      type: object
+      required: [secret, otpauth_uri]
+      description: Returned once, by `setupSecondFactor` and by nothing else.
+      properties:
+        secret:
+          type: string
+          description: Base32, for an app that takes the secret directly.
+        otpauth_uri:
+          type: string
+          description: The same secret as an `otpauth://` URI, for one that scans.
+
+    SecondFactorCode:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: >
+            Six digits from the device. A wrong code and a replayed one are the same answer.
 
     Profile:
       type: object

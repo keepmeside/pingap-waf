@@ -28,10 +28,17 @@ use pingap_controlplane::projection::{
 };
 use pingap_controlplane::repository::TimeRange;
 use pingap_controlplane::{
-    AuthLevel, ControlPlaneStore, NewSession, NewUser, Role, TursoStore,
+    AuthLevel, ControlPlaneStore, NewSession, NewUser, Role, TotpGuard,
+    TursoStore,
 };
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
+
+/// A throwaway AES key in the shape `pingap-util` expects.
+///
+/// Real rather than absent: second-factor enrolment seals the secret with it, and a fixture
+/// that passed `None` would make every enrolment test a test of the missing-key refusal.
+const TOTP_KEY: &str = "PLpKJqvfkjTcYTDpauJf+2JnEayP+bm+0Oe60Jk=";
 
 /// Neither is consulted: nothing here writes config. They exist because `AppState` holds an
 /// `Applier` and an `Applier` is built from them.
@@ -53,10 +60,22 @@ impl DataPlane for Unused {
 struct Api {
     state: AppState,
     store: Arc<dyn ControlPlaneStore>,
+    /// The same guard the routes spend codes against, held so a test can play the part of the
+    /// login path — which is in the binary, not in this crate, and shares the guard by `Arc`.
+    totp: Arc<TotpGuard>,
     _dir: tempfile::TempDir,
 }
 
 async fn api() -> Api {
+    api_with_totp_key(Some(TOTP_KEY.to_string())).await
+}
+
+/// The same store and routes, with the deployment's second-factor key absent.
+///
+/// A separate constructor rather than a flag on `api()`: only one test wants it, and a
+/// parameter every other caller has to pass `Some(..)` to is a parameter that hides what the
+/// fixture is really doing.
+async fn api_with_totp_key(totp_key: Option<String>) -> Api {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = TursoStore::open(
         dir.path().join("cp.db").to_str().expect("utf-8 path"),
@@ -65,6 +84,7 @@ async fn api() -> Api {
     .expect("the store opens");
     store.migrate().await.expect("migrations apply");
     let store: Arc<dyn ControlPlaneStore> = Arc::new(store);
+    let totp = Arc::new(TotpGuard::default());
     let shared = Arc::new(Unused);
     let applier = Applier::new(
         store.clone(),
@@ -75,8 +95,14 @@ async fn api() -> Api {
         Duration::from_millis(0),
     );
     Api {
-        state: AppState::new(store.clone(), Arc::new(applier)),
+        state: AppState::new(
+            store.clone(),
+            Arc::new(applier),
+            totp.clone(),
+            totp_key,
+        ),
         store,
+        totp,
         _dir: dir,
     }
 }
@@ -341,5 +367,509 @@ async fn revoking_twice_or_nothing_is_404_and_writes_one_row_at_most() {
         log.len(),
         1,
         "the second request wrote a row for a revocation it did not perform: {log:?}"
+    );
+}
+
+/// A request with a JSON body, for the routes that take one.
+async fn send_json(
+    api: &Api,
+    caller: &Caller,
+    method: Method,
+    path: &str,
+    body: &str,
+) -> pingap_admin_api::ApiResponse {
+    dispatch(
+        &api.state,
+        &ApiRequest {
+            method,
+            path: path.to_string(),
+            query: String::new(),
+            body: Bytes::copy_from_slice(body.as_bytes()),
+            caller: Some(caller.clone()),
+        },
+    )
+    .await
+}
+
+/// A timestamp in the middle of the current TOTP step.
+///
+/// Mid-step rather than "now", so a handler whose clock has ticked on by the time the request
+/// arrives still accepts the code. The verifier's skew window is one step either side, and a
+/// code minted at the very start of a step is outside it once a slow test crosses the boundary
+/// — which is a flake that looks like a broken second factor.
+fn step_now() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs();
+    (now / 30) * 30 + 15
+}
+
+/// The code a device holding `secret` would show.
+fn code_for(secret: &str, username: &str, at: u64) -> String {
+    pingap_controlplane::auth::totp_code_for(secret, username, at)
+        .expect("the secret is the one setup just returned")
+}
+
+async fn second_factor(api: &Api, caller: &Caller) -> serde_json::Value {
+    let response = send(api, caller, Method::GET, "/account/2fa").await;
+    assert_eq!(response.status, StatusCode::OK);
+    serde_json::from_slice(&response.body).expect("json")
+}
+
+/// Enrol, confirm, and see the account become one a login challenges.
+///
+/// The status route is read at each step because `enrolled` and `enabled` being separate is
+/// the point of it: a half-finished enrolment must not read as a protected account. And the
+/// secret is asserted absent from every response but the one that hands it over, because a
+/// status route that echoed it would be a second place to leak a credential that is stored
+/// sealed precisely so it cannot be read back.
+#[tokio::test]
+async fn a_second_factor_is_enrolled_and_then_confirmed_by_a_code() {
+    let api = api().await;
+    let (caller, _) =
+        user_with_session(&api, "admin", Role::Admin, "token-admin").await;
+
+    let before = second_factor(&api, &caller).await;
+    assert_eq!(before["enrolled"], false, "{before}");
+    assert_eq!(before["enabled"], false, "{before}");
+
+    let setup = send(&api, &caller, Method::POST, "/account/2fa/setup").await;
+    assert_eq!(
+        setup.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&setup.body)
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&setup.body).expect("json");
+    let secret = body["secret"].as_str().expect("a secret").to_string();
+    assert!(!secret.is_empty());
+    assert!(
+        body["otpauth_uri"]
+            .as_str()
+            .is_some_and(|uri| uri.starts_with("otpauth://")),
+        "an app cannot scan this: {body}"
+    );
+
+    let pending = second_factor(&api, &caller).await;
+    assert_eq!(pending["enrolled"], true, "{pending}");
+    assert_eq!(
+        pending["enabled"], false,
+        "an unconfirmed enrolment reads as a protected account: {pending}"
+    );
+    assert!(
+        !pending.to_string().contains(&secret),
+        "the status route carried the secret: {pending}"
+    );
+
+    let confirmed = send_json(
+        &api,
+        &caller,
+        Method::POST,
+        "/account/2fa/enable",
+        &format!(
+            r#"{{"code":"{}"}}"#,
+            code_for(&secret, &caller.username, step_now())
+        ),
+    )
+    .await;
+    assert_eq!(
+        confirmed.status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&confirmed.body)
+    );
+
+    let enabled = second_factor(&api, &caller).await;
+    assert_eq!(enabled["enabled"], true, "{enabled}");
+
+    // The store holds the ciphertext, and only that.
+    let (stored, is_enabled) = api
+        .store
+        .totp_secret_for(&caller.user_id)
+        .await
+        .expect("readable")
+        .expect("a secret is stored");
+    assert!(is_enabled);
+    assert_ne!(stored, secret, "the secret is stored unsealed");
+    assert!(
+        !stored.contains(&secret),
+        "the stored value carries the secret in the clear"
+    );
+
+    let log = api
+        .store
+        .read_activity(TimeRange::default())
+        .await
+        .expect("readable");
+    let actions: Vec<&str> =
+        log.iter().map(|row| row.action.as_str()).collect();
+    assert!(actions.contains(&"account.2fa.setup"), "{actions:?}");
+    assert!(actions.contains(&"account.2fa.enable"), "{actions:?}");
+}
+
+/// Enrolling over a live second factor is refused.
+///
+/// `setup` replaces the stored secret, so allowing it would let anyone holding a session
+/// disarm the second factor without producing a code — which is the whole thing
+/// `second_factor_disable` requires one for. The refusal has to name the way out, or an
+/// operator reads it as a broken endpoint.
+#[tokio::test]
+async fn enrolling_over_an_enabled_second_factor_is_refused() {
+    let api = api().await;
+    let (caller, _) =
+        user_with_session(&api, "admin", Role::Admin, "token-admin").await;
+
+    let setup = send(&api, &caller, Method::POST, "/account/2fa/setup").await;
+    let secret = serde_json::from_slice::<serde_json::Value>(&setup.body)
+        .expect("json")["secret"]
+        .as_str()
+        .expect("a secret")
+        .to_string();
+    assert_eq!(
+        send_json(
+            &api,
+            &caller,
+            Method::POST,
+            "/account/2fa/enable",
+            &format!(
+                r#"{{"code":"{}"}}"#,
+                code_for(&secret, &caller.username, step_now())
+            ),
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+
+    let again = send(&api, &caller, Method::POST, "/account/2fa/setup").await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    let body = String::from_utf8_lossy(&again.body).to_string();
+    assert!(
+        body.contains("disable it first"),
+        "the refusal did not say how to proceed: {body}"
+    );
+    // And the live secret survived, so the refusal was not a disable by another name.
+    assert_eq!(second_factor(&api, &caller).await["enabled"], true);
+}
+
+/// A wrong code and a spent one are the same answer, and neither changes anything.
+///
+/// Distinguishing them would make the endpoint an oracle: an attacker who has collected codes
+/// learns which were genuine. Asserted on both routes that take one, because they share the
+/// check and a future edit to either could separate them.
+#[tokio::test]
+async fn a_wrong_or_replayed_code_neither_confirms_nor_removes() {
+    let api = api().await;
+    let (caller, _) =
+        user_with_session(&api, "admin", Role::Admin, "token-admin").await;
+
+    let setup = send(&api, &caller, Method::POST, "/account/2fa/setup").await;
+    let secret = serde_json::from_slice::<serde_json::Value>(&setup.body)
+        .expect("json")["secret"]
+        .as_str()
+        .expect("a secret")
+        .to_string();
+
+    let wrong = send_json(
+        &api,
+        &caller,
+        Method::POST,
+        "/account/2fa/enable",
+        r#"{"code":"000000"}"#,
+    )
+    .await;
+    // `000000` is a possible code, so a wrong answer is not guaranteed by the digits — assert
+    // on the outcome rather than assuming the value cannot collide.
+    if wrong.status == StatusCode::NO_CONTENT {
+        panic!("every code was accepted; the second factor verifies nothing");
+    }
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(second_factor(&api, &caller).await["enabled"], false);
+
+    let at = step_now();
+    let good = code_for(&secret, &caller.username, at);
+    assert_eq!(
+        send_json(
+            &api,
+            &caller,
+            Method::POST,
+            "/account/2fa/enable",
+            &format!(r#"{{"code":"{good}"}}"#)
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+    // Same step, same code, already spent.
+    let replayed = send_json(
+        &api,
+        &caller,
+        Method::POST,
+        "/account/2fa/disable",
+        &format!(r#"{{"code":"{good}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        replayed.status,
+        StatusCode::UNAUTHORIZED,
+        "a spent code was accepted again"
+    );
+    assert_eq!(
+        second_factor(&api, &caller).await["enabled"],
+        true,
+        "the replayed code removed the second factor"
+    );
+
+    // A fresh code from the next step does remove it, which is what makes the assertion above
+    // about the replay and not about `disable` being broken.
+    assert_eq!(
+        send_json(
+            &api,
+            &caller,
+            Method::POST,
+            "/account/2fa/disable",
+            &format!(
+                r#"{{"code":"{}"}}"#,
+                code_for(&secret, &caller.username, at + 30)
+            ),
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+    let after = second_factor(&api, &caller).await;
+    assert_eq!(
+        after["enrolled"], false,
+        "disabled left a secret behind: {after}"
+    );
+    assert_eq!(after["enabled"], false, "{after}");
+
+    let log = api
+        .store
+        .read_activity(TimeRange::default())
+        .await
+        .expect("readable");
+    let actions: Vec<&str> =
+        log.iter().map(|row| row.action.as_str()).collect();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|a| **a == "account.2fa.disable")
+            .count(),
+        1,
+        "a refused removal wrote a row saying it removed something: {actions:?}"
+    );
+}
+
+/// An administrator clears a second factor no code can be produced for.
+///
+/// The lockout escape, and the reason `disable` can demand a code. Without this the choice is
+/// between a permanent lockout for someone who lost their device and a self-service disable a
+/// stolen session could also use. Asserted across two roles, because the point is that the
+/// account owner cannot reach it and an administrator can.
+#[tokio::test]
+async fn an_admin_clears_a_second_factor_the_owner_cannot_produce_a_code_for() {
+    let api = api().await;
+    let (admin, _) =
+        user_with_session(&api, "root", Role::Admin, "token-root").await;
+    let (locked, _) =
+        user_with_session(&api, "watcher", Role::Viewer, "token-watcher").await;
+    let locked_id = locked.user_id.clone();
+
+    let setup = send(&api, &locked, Method::POST, "/account/2fa/setup").await;
+    let secret = serde_json::from_slice::<serde_json::Value>(&setup.body)
+        .expect("json")["secret"]
+        .as_str()
+        .expect("a secret")
+        .to_string();
+    assert_eq!(
+        send_json(
+            &api,
+            &locked,
+            Method::POST,
+            "/account/2fa/enable",
+            &format!(
+                r#"{{"code":"{}"}}"#,
+                code_for(&secret, &locked.username, step_now())
+            ),
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+
+    // The owner cannot clear it without the device. `disable` needs a code, and the code this
+    // test could mint is the one the device would have — a real lockout has neither.
+    let reset_by_owner = send_json(
+        &api,
+        &locked,
+        Method::POST,
+        &format!("/users/{locked_id}/2fa/reset"),
+        "",
+    )
+    .await;
+    assert_eq!(
+        reset_by_owner.status,
+        StatusCode::FORBIDDEN,
+        "an account reached the administrative reset"
+    );
+    assert_eq!(second_factor(&api, &locked).await["enabled"], true);
+
+    let reset = send_json(
+        &api,
+        &admin,
+        Method::POST,
+        &format!("/users/{locked_id}/2fa/reset"),
+        "",
+    )
+    .await;
+    assert_eq!(
+        reset.status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&reset.body)
+    );
+
+    let after = second_factor(&api, &locked).await;
+    assert_eq!(after["enrolled"], false, "the reset left a secret: {after}");
+    assert_eq!(after["enabled"], false, "{after}");
+    assert_eq!(
+        api.store
+            .totp_secret_for(&locked_id)
+            .await
+            .expect("readable")
+            .map(|(secret, _)| secret)
+            .unwrap_or_default(),
+        "",
+        "the reset disabled the secret rather than clearing it"
+    );
+
+    let log = api
+        .store
+        .read_activity(TimeRange::default())
+        .await
+        .expect("readable");
+    let reset_row = log
+        .iter()
+        .find(|row| row.action == "user.2fa.reset")
+        .expect("the reset was audited");
+    assert_eq!(reset_row.target, locked_id);
+    assert_eq!(
+        reset_row.actor_username, "root",
+        "the row named the wrong actor"
+    );
+}
+
+/// Enrolment with no encryption key configured names the missing setting.
+///
+/// `409` and not `500`: this is a deployment an operator can fix, and a crash-shaped answer
+/// hides that. Sealing with a default key is not the alternative, because a literal default is
+/// indistinguishable from no encryption once the row is written.
+#[tokio::test]
+async fn enrolment_without_an_encryption_key_names_the_missing_setting() {
+    let api = api_with_totp_key(None).await;
+    let (caller, _) =
+        user_with_session(&api, "admin", Role::Admin, "token-admin").await;
+
+    let setup = send(&api, &caller, Method::POST, "/account/2fa/setup").await;
+    assert_eq!(setup.status, StatusCode::CONFLICT);
+    let body = String::from_utf8_lossy(&setup.body).to_string();
+    assert!(
+        body.contains("encryption key"),
+        "the refusal did not say what is missing: {body}"
+    );
+    assert!(
+        api.store
+            .totp_secret_for(&caller.user_id)
+            .await
+            .expect("readable")
+            .is_none(),
+        "a refused enrolment stored something"
+    );
+    assert!(
+        api.store
+            .read_activity(TimeRange::default())
+            .await
+            .expect("readable")
+            .iter()
+            .all(|row| row.action != "account.2fa.setup"),
+        "a refused enrolment wrote an audit row"
+    );
+}
+
+/// A code already spent by the login path cannot remove the second factor.
+///
+/// `complete_totp` in the binary calls `verify_once(&principal.user_id, ..)`, and the guard
+/// keys its spent-code set by `(identifier, step)`. If this crate passed the username instead,
+/// the two paths would keep separate windows and one code would be good for both inside the
+/// same step — a captured login code would disarm the second factor. The guard is shared by
+/// `Arc` precisely so there is one window, and this test plays the login side to prove it.
+///
+/// The last assertion is what stops the first two passing vacuously: the same code under a
+/// *different* identifier is accepted, so the refusal above is about the identifier matching
+/// and not about the guard rejecting everything it is given twice.
+#[tokio::test]
+async fn a_code_spent_by_the_login_path_cannot_remove_the_second_factor() {
+    let api = api().await;
+    let (caller, _) =
+        user_with_session(&api, "admin", Role::Admin, "token-admin").await;
+
+    let setup = send(&api, &caller, Method::POST, "/account/2fa/setup").await;
+    let secret = serde_json::from_slice::<serde_json::Value>(&setup.body)
+        .expect("json")["secret"]
+        .as_str()
+        .expect("a secret")
+        .to_string();
+    let confirmed_at = step_now();
+    assert_eq!(
+        send_json(
+            &api,
+            &caller,
+            Method::POST,
+            "/account/2fa/enable",
+            &format!(
+                r#"{{"code":"{}"}}"#,
+                code_for(&secret, &caller.username, confirmed_at)
+            ),
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+
+    // A later step, so this code is not the one `enable` already spent.
+    let at = confirmed_at + 30;
+    let code = code_for(&secret, &caller.username, at);
+
+    // The login path, reproduced: spend the code under the user id.
+    assert!(
+        api.totp
+            .verify_once(&caller.user_id, &secret, &code, at)
+            .expect("the secret is the one setup returned"),
+        "the code the login path was given did not verify"
+    );
+
+    let response = send_json(
+        &api,
+        &caller,
+        Method::POST,
+        "/account/2fa/disable",
+        &format!(r#"{{"code":"{code}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "a code already spent at login removed the second factor"
+    );
+    assert_eq!(second_factor(&api, &caller).await["enabled"], true);
+
+    assert!(
+        api.totp
+            .verify_once(&caller.username, &secret, &code, at)
+            .expect("checks"),
+        "the guard is not keying by identifier, so the refusal above proved nothing"
     );
 }

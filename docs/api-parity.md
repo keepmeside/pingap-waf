@@ -22,7 +22,7 @@ Everything below is served by the admin listener from the one process, under `/a
 | `/domains` | `GET /api/domains`, `GET/PUT/DELETE /api/domains/:name` | The domain is intent, not a data-plane object: see [the domain model](./domain-model.md). `PUT` replaces rather than patches |
 | `/system` | `GET /api/basic`, `POST /api/restart` | Retained from pingap. `/basic` is process and system introspection; `restart` needs `RestartProcess` |
 | `/ssl` | `GET /api/ssl`, `GET/PUT/DELETE /api/ssl/:name` | Certificate *definitions*, written through the projection. Live issuer and expiry status is the retained `GET /api/certificates`, which answers from the running provider |
-| `/users` | `GET/POST /api/users`, `PATCH /api/users/:id` | `PATCH` sets activation only — the store has no method that writes `role`, so the field is absent rather than accepted and ignored |
+| `/users` | `GET/POST /api/users`, `PATCH /api/users/:id`, `POST /api/users/:id/2fa/reset` | `PATCH` sets activation only — the store has no method that writes `role`, so the field is absent rather than accepted and ignored. The reset has no reference counterpart; see Partial |
 | `/modsec` | `GET/PUT/DELETE /api/policies[/:name]`, `GET /api/waf/categories` | Mapped differently, see below |
 | `/acl` | `GET/PUT/DELETE /api/policies[/:name]` | Mapped differently, see below |
 | `/access-lists` | `GET/PUT/DELETE /api/policies[/:name]` | A named access list is a key in the `acl` profile's own config table, not a separate resource |
@@ -67,7 +67,7 @@ What the reference does per-category and this does not offer:
 | Reference | Ours | Missing |
 | --- | --- | --- |
 | `/auth` — `login`, `verify-2fa`, `logout`, `refresh`, `first-login/change-password` | `POST /api/auth/login`, `POST /api/auth/totp`, `POST /api/auth/logout`, `GET /api/auth/me` | `refresh` is waived, below. A forced password change on first login is not implemented |
-| `/account` — `profile` GET/PUT, `password`, `2fa` GET/setup/enable/disable, `activity`, `sessions` GET, `sessions/:id` DELETE | `GET /api/account`, `GET/DELETE /api/account/sessions[/:id]`, `GET /api/activity` | Profile edit, password change, and 2FA enrolment and disable |
+| `/account` — `profile` GET/PUT, `password`, `2fa` GET/setup/enable/disable, `activity`, `sessions` GET, `sessions/:id` DELETE | `GET /api/account`, `GET/DELETE /api/account/sessions[/:id]`, `GET /api/account/2fa`, `POST /api/account/2fa/{setup,enable,disable}`, `GET /api/activity` | Profile edit and password change |
 
 Sessions are opaque bearer tokens held in the store, hashed. There is no refresh token and
 no JWT to renew, so `/auth/refresh` has nothing to act on: a session that has expired is
@@ -84,18 +84,34 @@ let a viewer revoke an administrator's session. Someone else's session, an unkno
 one already revoked all answer 404, which is one status for what is, from where the caller
 stands, one fact.
 
-The three remaining `/account` gaps are not all the same kind of missing:
+### Removing a second factor takes a code here, and did not there
+
+`POST /api/account/2fa/disable` requires a code from the device that has it. The reference's
+equivalent takes none — a session is enough — and that is a posture this fork does not copy: a
+stolen session could silently disarm the second factor, leaving the password as the only thing
+between an attacker and the account.
+
+Requiring a code creates a lockout for someone who genuinely lost their device, so
+`POST /api/users/:id/2fa/reset` exists beside it: `manage_users`, no code, clears the secret so
+the account can be enrolled again. An administrator cannot produce a code from a device they do
+not hold either, which is exactly why the route is theirs and not the account owner's.
+
+Enrolment is refused while a second factor is enabled, for the same reason `disable` needs a
+code — `setup` replaces the stored secret, so allowing it would be a second way to disarm the
+factor without one. A wrong code and a replayed one are the same `401`, because distinguishing
+them makes the endpoint an oracle for codes an attacker has collected. The replay window is
+shared with the login path rather than a second one beside it: both spend a code against the
+user id, so a code presented at `POST /api/auth/totp` cannot then be presented to `disable`.
+Enrolment with no encryption key configured is a `409` naming the missing setting rather than a
+`500`, and sealing with a default key is not the alternative: a literal default is
+indistinguishable from no encryption once the row is written.
+
+### The two remaining `/account` gaps are the same kind of missing
 
 - **Profile edit and password change** need store methods that do not exist.
   `ControlPlaneStore` exposes `password_hash_for` and `set_user_active` and nothing that
   writes `email` or a password hash. Adding them is a repository and driver change, not a
   route.
-- **2FA enrolment and disable** have their store side ready — `set_totp_secret`,
-  `totp_secret_for`, and the encrypt/decrypt helpers that keep the secret opaque at rest. What
-  is missing is plumbing and a decision: the encryption key lives in the admin plugin's auth
-  state and this crate holds no secret at all, so enrolment means threading it in, and an
-  enrolment attempt made with no key configured needs an answer an operator can act on rather
-  than a 500.
 
 ## Deferred to the phase that owns the data
 

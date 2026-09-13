@@ -38,6 +38,9 @@ urlencoding = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `test-support` exposes the code generator, so a second-factor test can confirm an enrolment
+# with a real code instead of asserting that every code is refused.
+pingap-controlplane = { workspace = true, features = ["test-support"] }
 pretty_assertions = "1.4.1"
 
 [lints]

@@ -326,13 +326,23 @@ impl AdminServe {
     async fn api(&self) -> std::result::Result<&AppState, String> {
         self.api
             .get_or_try_init(|| async {
-                let store = self.auth.get().await.store().clone();
+                // One handle to the auth state, read for all three things the API needs from
+                // it. The guard and the key are not re-created here: a second `TotpGuard`
+                // would keep its own spent-code set, and a code consumed at login would still
+                // be good for a second-factor disable.
+                let auth = self.auth.get().await;
+                let store = auth.store().clone();
                 let applier = crate::projection::new_applier(
                     store.clone(),
                     self.manager.clone(),
                     crate::projection::DEFAULT_RELOAD_WINDOW,
                 )?;
-                Ok(AppState::new(store, Arc::new(applier)))
+                Ok(AppState::new(
+                    store,
+                    Arc::new(applier),
+                    auth.totp_guard(),
+                    auth.totp_key(),
+                ))
             })
             .await
     }
