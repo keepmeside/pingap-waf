@@ -648,6 +648,40 @@ impl ControlPlaneStore for TursoStore {
         Ok(())
     }
 
+    async fn set_user_email(
+        &self,
+        user_id: &str,
+        email: &str,
+        now: i64,
+    ) -> Result<()> {
+        if !self.exists("users", user_id).await? {
+            return Err(StoreError::NotFound {
+                kind: "user".to_string(),
+                id: user_id.to_string(),
+            });
+        }
+        self.writer()
+            .transaction(
+                vec![(
+                    "UPDATE users SET email = ?2, updated_at = ?3 WHERE id = ?1",
+                    vec![
+                        Value::Text(user_id.to_string()),
+                        Value::Text(email.to_string()),
+                        Value::Integer(now),
+                    ],
+                )],
+                || StoreError::Conflict {
+                    kind: "user".to_string(),
+                    // The username is not changing, so the address being written is the only
+                    // thing that can clash. Named here rather than resolved by asking, which
+                    // is what `create_user` has to do because either of its two identities
+                    // could be the one that was taken.
+                    value: email.to_string(),
+                },
+            )
+            .await
+    }
+
     async fn set_password_hash(
         &self,
         user_id: &str,

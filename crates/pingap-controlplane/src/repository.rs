@@ -249,6 +249,18 @@ pub trait ControlPlaneStore: Send + Sync {
         active: bool,
         now: i64,
     ) -> Result<()>;
+    /// Replaces an account's contact address.
+    ///
+    /// The email alone, and not the rest of what `user_profiles` holds: `username` is the
+    /// identity every session and audit row names, so changing it would rewrite the meaning of
+    /// rows already written, and `full_name`, `timezone` and `locale` have a table and no
+    /// reader. A duplicate address is a `Conflict` naming it.
+    async fn set_user_email(
+        &self,
+        user_id: &str,
+        email: &str,
+        now: i64,
+    ) -> Result<()>;
     /// Replaces the stored hash. Takes a hash and not a password, so the repository never
     /// sees a credential in the clear — the caller derives it with [`crate::hash_password`],
     /// whose output carries its own parameters, so a later parameter change does not

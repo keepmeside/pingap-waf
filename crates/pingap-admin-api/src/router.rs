@@ -163,6 +163,15 @@ fn build() -> Vec<Route> {
             access: Access::Needs(Capability::RevokeOwnSession),
             handler: handler!(routes::account::revoke_session),
         },
+        // The contact address. Beside the profile read rather than under `/users`, because it
+        // is the caller's own and every role holds it — an administrator is not a typo-fixing
+        // service.
+        Route {
+            method: Method::PATCH,
+            path: "/account",
+            access: Access::Needs(Capability::EditOwnProfile),
+            handler: handler!(routes::account::update_profile),
+        },
         // ---- the caller's own second factor -------------------------------------------
         //
         // The status read is `Authenticated` rather than a capability of its own: it reports

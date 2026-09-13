@@ -114,6 +114,50 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthenticated'
 
+    patch:
+      tags: [account]
+      operationId: updateOwnProfile
+      summary: Change the caller's own contact address
+      description: |
+        Email only. A `PATCH` rather than a `PUT`, and one field rather than the whole
+        profile, because this resource has exactly one editable field: the username is the
+        identity every session and every audit row names, so changing it would rewrite the
+        meaning of rows already written.
+
+        Scoped to the caller by the handler, never by anything the request carries — there is
+        no id in the path or the body. A body naming another account would be an unknown
+        field and a `400`.
+
+        A duplicate is a `409` naming the address. `users.email` is `UNIQUE`, and the clash is
+        resolved by asking which value is taken rather than by parsing the driver's message,
+        so the refusal names the address and not the account.
+      x-required-capability: edit_own_profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfile'
+      responses:
+        '200':
+          description: The caller's profile, as it now stands.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: The address belongs to another account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /account/sessions:
     get:
       tags: [account]
@@ -2184,6 +2228,19 @@ components:
       properties:
         is_active:
           type: boolean
+
+    UpdateProfile:
+      type: object
+      required: [email]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          description: >
+            Trimmed, and refused empty before it reaches the store — the column is
+            `NOT NULL UNIQUE`, so an empty address would be accepted and would collide with
+            the next empty one.
 
     LoginRequest:
       type: object

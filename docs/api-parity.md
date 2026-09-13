@@ -67,7 +67,7 @@ What the reference does per-category and this does not offer:
 | Reference | Ours | Missing |
 | --- | --- | --- |
 | `/auth` — `login`, `verify-2fa`, `logout`, `refresh`, `first-login/change-password` | `POST /api/auth/login`, `POST /api/auth/totp`, `POST /api/auth/logout`, `GET /api/auth/me` | `refresh` is waived, below. A forced password change on first login is not implemented |
-| `/account` — `profile` GET/PUT, `password`, `2fa` GET/setup/enable/disable, `activity`, `sessions` GET, `sessions/:id` DELETE | `GET /api/account`, `POST /api/account/password`, `GET/DELETE /api/account/sessions[/:id]`, `GET /api/account/2fa`, `POST /api/account/2fa/{setup,enable,disable}`, `GET /api/activity` | Profile edit |
+| `/account` — `profile` GET/PUT, `password`, `2fa` GET/setup/enable/disable, `activity`, `sessions` GET, `sessions/:id` DELETE | `GET/PATCH /api/account`, `POST /api/account/password`, `GET/DELETE /api/account/sessions[/:id]`, `GET /api/account/2fa`, `POST /api/account/2fa/{setup,enable,disable}`, `GET /api/activity` | Four of the reference's five profile fields, waived below |
 
 Sessions are opaque bearer tokens held in the store, hashed. There is no refresh token and
 no JWT to renew, so `/auth/refresh` has nothing to act on: a session that has expired is
@@ -120,11 +120,30 @@ itself the interesting fact — it says how many other devices were signed in.
 
 A wrong current password is a `401` and changes nothing, including the sessions.
 
-### The one remaining `/account` gap
+### The profile is one field, not five
 
-**Profile edit** needs a store method that does not exist. `ControlPlaneStore` writes
-`is_active`, the password hash and the second-factor secret, and nothing that writes `email`.
-Adding it is a repository and driver change, not a route.
+`PATCH /api/account` changes the email address and nothing else. The reference's `PUT /profile`
+takes `fullName`, `email`, `phone`, `timezone` and `language`; four of those are waived rather
+than deferred, for two different reasons.
+
+- **`fullName` and `phone`** have no column and no consumer. `user_profiles` holds
+  `full_name`, `timezone` and `locale` and is written with three NULLs at account creation,
+  and nothing reads it — the gateway does not send mail to a display name or dial a number.
+  A route that wrote them would be a form that saves to nowhere, which is the same failure as
+  accepting a field and ignoring it, one step earlier.
+- **`timezone` and `locale`** have columns but the same problem. Per-user localisation is a
+  browser decision here: the admin UI's catalogue is client-side, and every timestamp the API
+  returns is Unix seconds, which need no timezone to render correctly.
+
+`username` is not editable either, and that one is a rule rather than an absence: it is the
+identity every session and every audit row names, so changing it would rewrite the meaning of
+rows already written. An audit entry saying `admin did X` would stop pointing at whoever holds
+the name.
+
+The email is the one field that is both stored and used, and it is scoped to the caller by the
+handler rather than by anything the request carries — there is no id in the path or the body,
+which is what keeps a capability every role holds from becoming a way to rewrite another
+account's contact address.
 
 ## Deferred to the phase that owns the data
 

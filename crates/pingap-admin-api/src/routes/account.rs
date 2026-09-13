@@ -457,3 +457,45 @@ pub async fn change_password(
         "sessions_revoked": others.len(),
     }))
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateProfile {
+    email: String,
+}
+
+/// Correct the caller's contact address.
+///
+/// The email and nothing else, which is a narrower route than the reference's profile edit and
+/// deliberately so. `username` is the identity every session and audit row names, so changing
+/// it would rewrite the meaning of rows already written — an audit entry saying `admin did X`
+/// would no longer point at whoever holds the name. `full_name`, `timezone` and `locale` have
+/// a `user_profiles` table and no reader: nothing in the gateway localises per user or sends
+/// mail to a display name, so a route that wrote them would be a form that saves to nowhere.
+///
+/// A duplicate address is a 409 naming it, resolved by the store rather than by parsing the
+/// driver's message — the same reason account creation does it that way.
+pub async fn update_profile(
+    state: &AppState,
+    request: &ApiRequest,
+    params: &[String],
+) -> Result<ApiResponse> {
+    let caller = caller(request)?;
+    let body: UpdateProfile = request.json()?;
+    let email = body.email.trim();
+    if email.is_empty() {
+        return Err(ApiError::BadRequest {
+            reason: "the email address is empty".to_string(),
+        });
+    }
+    let now = now_sec();
+    state
+        .store
+        .set_user_email(&caller.user_id, email, now)
+        .await?;
+    audit(state, caller, "account.profile", &caller.user_id, now).await?;
+    // The resource back rather than a bare 204, so a client does not have to re-read to learn
+    // what the server normalised — the address is stored trimmed, and a UI showing the
+    // untrimmed value it sent would disagree with the next `GET`.
+    profile(state, request, params).await
+}

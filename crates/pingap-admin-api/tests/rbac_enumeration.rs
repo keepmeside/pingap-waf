@@ -259,6 +259,7 @@ async fn a_viewer_is_403_on_every_mutating_route() {
                 Capability::RevokeOwnSession
                     | Capability::ManageOwnSecondFactor
                     | Capability::ChangeOwnPassword
+                    | Capability::EditOwnProfile
             )
         )
     };
@@ -276,6 +277,7 @@ async fn a_viewer_is_403_on_every_mutating_route() {
         "POST /account/2fa/disable".to_string(),
         "POST /account/2fa/enable".to_string(),
         "POST /account/2fa/setup".to_string(),
+        "PATCH /account".to_string(),
         "POST /account/password".to_string(),
     ];
     expected.sort();

@@ -105,6 +105,13 @@ pub enum Capability {
     /// mutation and so needs a completed second factor, which the blanket "a password-only
     /// session may look but not touch" rule already requires of every non-`GET`.
     RevokeOwnSession,
+    /// Edit one's *own* profile.
+    ///
+    /// Every role has it, for the same reason as the other own-account capabilities: an
+    /// account's contact address is that account's to correct, and requiring an administrator
+    /// to fix a typo is how a wrong address stays wrong. Mutating, so it needs a completed
+    /// second factor.
+    EditOwnProfile,
     /// Change one's *own* password.
     ///
     /// Every role has it, for the same reason as [`Self::RevokeOwnSession`]: an account's
@@ -138,7 +145,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 25] = [
+    pub const ALL: [Capability; 26] = [
         Capability::ViewConfig,
         Capability::ViewLogs,
         Capability::ViewMetrics,
@@ -158,6 +165,7 @@ impl Capability {
         Capability::RestoreBackup,
         Capability::ManageUsers,
         Capability::RevokeOwnSession,
+        Capability::EditOwnProfile,
         Capability::ChangeOwnPassword,
         Capability::ManageOwnSecondFactor,
         Capability::RevokeAnySession,
@@ -213,6 +221,7 @@ impl Role {
                     | ViewNodes
                     | ViewOwnSessions
                     | RevokeOwnSession
+                    | EditOwnProfile
                     | ChangeOwnPassword
                     | ManageOwnSecondFactor
                     | EditDomain
@@ -233,6 +242,7 @@ impl Role {
                     | ViewNodes
                     | ViewOwnSessions
                     | RevokeOwnSession
+                    | EditOwnProfile
                     | ChangeOwnPassword
                     | ManageOwnSecondFactor
             ),
@@ -329,6 +339,7 @@ mod tests {
             mutating_and_viewer_visible,
             vec![
                 Capability::RevokeOwnSession,
+                Capability::EditOwnProfile,
                 Capability::ChangeOwnPassword,
                 Capability::ManageOwnSecondFactor
             ],
@@ -523,7 +534,7 @@ mod tests {
         );
         assert_eq!(
             Capability::ALL.iter().filter(|c| c.is_mutating()).count(),
-            15,
+            16,
             "the mutating/read split moved; check both the viewer gate and the \
              second-factor requirement, which are derived from it"
         );
@@ -537,6 +548,7 @@ mod tests {
             for capability in [
                 Capability::ViewOwnSessions,
                 Capability::RevokeOwnSession,
+                Capability::EditOwnProfile,
                 Capability::ChangeOwnPassword,
                 Capability::ManageOwnSecondFactor,
             ] {
@@ -561,6 +573,7 @@ mod tests {
             );
             for capability in [
                 Capability::RevokeOwnSession,
+                Capability::EditOwnProfile,
                 Capability::ChangeOwnPassword,
                 Capability::ManageOwnSecondFactor,
             ] {

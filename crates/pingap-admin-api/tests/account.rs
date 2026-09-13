@@ -1182,3 +1182,155 @@ async fn the_profile_publishes_what_this_session_may_do() {
          prompt that lets it finish"
     );
 }
+
+#[tokio::test]
+async fn changing_the_email_returns_the_profile_and_is_audited() {
+    let api = api().await;
+    let (caller, _) =
+        user_with_session(&api, "admin", Role::Admin, "token-admin").await;
+
+    let response = send_json(
+        &api,
+        &caller,
+        Method::PATCH,
+        "/account",
+        r#"{"email":"  corrected@example.test  "}"#,
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    // Trimmed, and the response says so — a client that showed the value it sent would
+    // disagree with the next read.
+    assert_eq!(body["email"], "corrected@example.test", "{body}");
+    assert_eq!(
+        body["username"], "admin",
+        "the identity moved with the address"
+    );
+
+    let stored = api
+        .store
+        .find_user_by_id(&caller.user_id)
+        .await
+        .expect("readable")
+        .expect("present");
+    assert_eq!(stored.email, "corrected@example.test");
+
+    let log = api
+        .store
+        .read_activity(TimeRange::default())
+        .await
+        .expect("readable");
+    assert_eq!(
+        log.iter()
+            .filter(|row| row.action == "account.profile")
+            .count(),
+        1,
+        "{log:?}"
+    );
+}
+
+/// The route is keyed on the session, so it cannot reach another account.
+///
+/// Same property the session revocation asserts, and for the same reason: `EditOwnProfile` is
+/// held by every role, so the only thing between a viewer and rewriting an administrator's
+/// contact address is the handler taking the id from the caller rather than from the request.
+/// A body field or a path segment here would be an account-takeover primitive.
+#[tokio::test]
+async fn a_profile_edit_reaches_only_the_callers_own_account() {
+    let api = api().await;
+    let (viewer, _) =
+        user_with_session(&api, "watcher", Role::Viewer, "token-viewer").await;
+    let (admin, _) =
+        user_with_session(&api, "root", Role::Admin, "token-root").await;
+
+    let response = send_json(
+        &api,
+        &viewer,
+        Method::PATCH,
+        "/account",
+        r#"{"email":"taken-over@example.test"}"#,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+
+    assert_eq!(
+        api.store
+            .find_user_by_id(&admin.user_id)
+            .await
+            .expect("readable")
+            .expect("present")
+            .email,
+        "root@example.test",
+        "another account's address was rewritten"
+    );
+    assert_eq!(
+        api.store
+            .find_user_by_id(&viewer.user_id)
+            .await
+            .expect("readable")
+            .expect("present")
+            .email,
+        "taken-over@example.test"
+    );
+}
+
+#[tokio::test]
+async fn an_email_someone_else_holds_is_refused_and_names_the_address() {
+    let api = api().await;
+    let (first, _) =
+        user_with_session(&api, "one", Role::Viewer, "token-one").await;
+    let (second, _) =
+        user_with_session(&api, "two", Role::Viewer, "token-two").await;
+
+    let response = send_json(
+        &api,
+        &second,
+        Method::PATCH,
+        "/account",
+        r#"{"email":"one@example.test"}"#,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    let body = String::from_utf8_lossy(&response.body).to_string();
+    assert!(
+        body.contains("one@example.test"),
+        "the refusal did not name the address that was taken: {body}"
+    );
+    // And the first account kept its own, so the refusal was not a partial write.
+    assert_eq!(
+        api.store
+            .find_user_by_id(&first.user_id)
+            .await
+            .expect("readable")
+            .expect("present")
+            .email,
+        "one@example.test"
+    );
+    assert!(
+        api.store
+            .read_activity(TimeRange::default())
+            .await
+            .expect("readable")
+            .iter()
+            .all(|row| row.action != "account.profile"),
+        "a refused edit was recorded as though it happened"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_email_is_refused() {
+    let api = api().await;
+    let (caller, _) =
+        user_with_session(&api, "admin", Role::Admin, "token-admin").await;
+    for body in [r#"{"email":""}"#, r#"{"email":"   "}"#] {
+        let response =
+            send_json(&api, &caller, Method::PATCH, "/account", body).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}
