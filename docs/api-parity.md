@@ -202,8 +202,23 @@ happened, so a 500 would misreport what the caller did.
 intent, and returns expiry, issuer, domains and ACME state only. It previously serialised
 the provider's certificate struct, which carries the PEM private key.
 
-## The machine-readable spec
+## What a caller may do
 
+`GET /api/account` returns a `capabilities` list alongside the role: every capability
+`authorize` would grant this session right now, in the matrix's own spelling.
+
+It exists so no client has to hold a copy of the matrix. A UI that hardcodes "viewer can read,
+operator can edit domains" is a second list that drifts from the first, and the drift arrives
+as a control that always answers 403 — which reads as a server bug rather than as a permission
+the caller does not have. It is filtered by the authorisation decision rather than by role
+alone, so a session that has not completed its second factor is told only the reads it
+actually has: the list can be too short, which hides a control until the caller confirms, and
+never too long.
+
+This is advisory. The router is the enforcement point and decides every request independently;
+a client that ignores `capabilities` gets a 403 with the reason, not a silent wrong answer.
+
+## The machine-readable spec
 [`openapi.yaml`](../openapi.yaml) describes both halves of the surface: the router's paths
 and the retained ones. It is checked against the router rather than trusted, by
 `crates/pingap-admin-api/tests/openapi.rs`:

@@ -23,7 +23,7 @@
 
 use super::{audit, caller, now_sec};
 use crate::{ApiError, ApiRequest, ApiResponse, AppState, Result};
-use pingap_controlplane::{AuthLevel, Role};
+use pingap_controlplane::{AuthLevel, Capability, Role, authorize};
 use serde::{Deserialize, Serialize};
 
 /// The caller, as they are entitled to see themselves.
@@ -39,6 +39,17 @@ struct Profile {
     auth_level: AuthLevel,
     is_active: bool,
     created_at: i64,
+    /// What this session may do right now, from the server's own matrix.
+    ///
+    /// Derived rather than mirrored. A UI that hardcodes the matrix keeps a second copy that
+    /// drifts, and the drift arrives as a control that always answers 403 — which is worse
+    /// than no control, because it looks like a bug in the server.
+    ///
+    /// Filtered by `authorize` and not by role alone, so a session that has not completed its
+    /// second factor is told the read capabilities it actually has. The list can therefore be
+    /// too short, which hides a control the caller could use once they confirm; it can never
+    /// be too long, which would show one that cannot be used at all.
+    capabilities: Vec<Capability>,
 }
 
 pub async fn profile(
@@ -62,6 +73,12 @@ pub async fn profile(
         auth_level: caller.auth_level,
         is_active: user.is_active,
         created_at: user.created_at,
+        capabilities: Capability::ALL
+            .into_iter()
+            .filter(|capability| {
+                authorize(caller.role, caller.auth_level, *capability).is_ok()
+            })
+            .collect(),
     })
 }
 

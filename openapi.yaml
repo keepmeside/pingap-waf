@@ -2068,10 +2068,23 @@ components:
 
     Profile:
       type: object
-      required: [username, email, role, auth_level, is_active, created_at]
+      required:
+        [username, email, role, auth_level, is_active, created_at, capabilities]
       properties:
         username:
           type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+          description: >
+            What this session may do right now, in the role matrix's own spelling. Derived
+            server-side from the caller's role and auth level rather than published as an
+            enum here, which is the point: a client that hardcoded the matrix would hold a
+            second copy that could drift, and the drift shows up as a control that always
+            answers 403. Empty for a caller whose session has not completed its second
+            factor and who holds no read capability, never longer than what `authorize`
+            would allow.
         email:
           type: string
         role:

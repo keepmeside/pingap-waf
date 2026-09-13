@@ -28,8 +28,8 @@ use pingap_controlplane::projection::{
 };
 use pingap_controlplane::repository::TimeRange;
 use pingap_controlplane::{
-    AuthLevel, ControlPlaneStore, NewSession, NewUser, Role, TotpGuard,
-    TursoStore,
+    AuthLevel, Capability, ControlPlaneStore, NewSession, NewUser, Role,
+    TotpGuard, TursoStore, authorize,
 };
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -1080,5 +1080,105 @@ async fn an_empty_new_password_is_refused_before_the_old_one_is_checked() {
         String::from_utf8_lossy(&response.body).contains("empty"),
         "{}",
         String::from_utf8_lossy(&response.body)
+    );
+}
+
+/// The same list, computed from the matrix rather than read out of a response.
+///
+/// Lives beside the test that uses it so the expectation is derived and not typed: a hardcoded
+/// list of capability names would pass while the matrix changed underneath it, which is the
+/// exact drift the field exists to prevent.
+fn allowed(role: Role, level: AuthLevel) -> Vec<String> {
+    Capability::ALL
+        .into_iter()
+        .filter(|capability| authorize(role, level, *capability).is_ok())
+        .map(|capability| match serde_json::to_value(capability) {
+            Ok(serde_json::Value::String(name)) => name,
+            other => panic!("{other:?} is not a capability name"),
+        })
+        .collect()
+}
+
+async fn capabilities(api: &Api, caller: &Caller) -> Vec<String> {
+    let response = send(api, caller, Method::GET, "/account").await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    body["capabilities"]
+        .as_array()
+        .expect("the profile carries a capability list")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("a capability is a string")
+                .to_string()
+        })
+        .collect()
+}
+
+/// The profile publishes what this session may do, so no client has to hold a copy of the
+/// matrix.
+///
+/// Three shapes, because the field's whole value is that it is derived. An admin gets every
+/// capability; a viewer gets the reads and the mutations on their own account; and a session
+/// that has not completed its second factor gets no mutation at all. That last one is the
+/// fail-safe direction — a list that is too short hides a control, a list that is too long
+/// shows one that answers 403 — and it is only reachable by asking the same `authorize` the
+/// router asks, which is what the handler does.
+#[tokio::test]
+async fn the_profile_publishes_what_this_session_may_do() {
+    let api = api().await;
+    let (admin, _) =
+        user_with_session(&api, "admin", Role::Admin, "token-admin").await;
+
+    let held = capabilities(&api, &admin).await;
+    assert_eq!(held, allowed(Role::Admin, AuthLevel::TwoFactor));
+    assert_eq!(
+        held.len(),
+        Capability::ALL.len(),
+        "an admin was not given every capability: {held:?}"
+    );
+
+    let (viewer, _) =
+        user_with_session(&api, "watcher", Role::Viewer, "token-viewer").await;
+    let held = capabilities(&api, &viewer).await;
+    assert_eq!(held, allowed(Role::Viewer, AuthLevel::TwoFactor));
+    for expected in ["view_config", "view_own_sessions", "change_own_password"]
+    {
+        assert!(
+            held.contains(&expected.to_string()),
+            "a viewer was not told it holds {expected}: {held:?}"
+        );
+    }
+    for refused in ["manage_users", "edit_domain", "write_raw_config"] {
+        assert!(
+            !held.contains(&refused.to_string()),
+            "a viewer was told it holds {refused}: {held:?}"
+        );
+    }
+
+    // The same viewer one step short of a second factor: every mutation drops out and every
+    // read stays, which is what tells a UI to prompt rather than to hide the page.
+    let unconfirmed = Caller {
+        auth_level: AuthLevel::PasswordOnly,
+        ..viewer.clone()
+    };
+    let partial = capabilities(&api, &unconfirmed).await;
+    assert_eq!(partial, allowed(Role::Viewer, AuthLevel::PasswordOnly));
+    assert!(
+        partial.iter().all(|name| name.starts_with("view_")),
+        "a session that has not completed its second factor was offered a mutation: \
+         {partial:?}"
+    );
+    assert!(
+        !partial.is_empty(),
+        "a password-only session was told it can do nothing at all, which would hide the \
+         prompt that lets it finish"
     );
 }
