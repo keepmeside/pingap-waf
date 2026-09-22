@@ -43,6 +43,8 @@ use pingap_logger::parse_access_log_directive;
 // `category = "waf"` with the plugin factory, and an rlib nothing references can be
 // dropped at link time, taking the constructor with it. Same reason as the
 // `ImageOptim` import above.
+#[allow(unused_imports)]
+use pingap_intel as _;
 use pingap_logger::{
     AsyncLoggerTask, LogCompressParams, new_async_logger,
     new_log_compress_service,
@@ -63,6 +65,13 @@ use pingap_waf::plugin::Waf;
 use pingap_acl::plugin::Acl;
 #[allow(unused_imports)]
 use pingap_bot::plugin::Bot;
+// Keep the challenge crate linked so its constructor registers the security category.
+#[allow(unused_imports)]
+use pingap_adaptive as _;
+#[allow(unused_imports)]
+use pingap_behaviour as _;
+#[allow(unused_imports)]
+use pingap_challenge as _;
 use pingora::server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
@@ -885,6 +894,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         simple_background_service.add_task("storage_clear", task);
     }
 
+    // Feed refresh shares the existing 60-second background interval. The task is a no-op
+    // when no WAF policy selected a feed, so a feed-free deployment pays no work or request
+    // path cost while the daemon still owns one refresh lifecycle.
+    simple_background_service.add_task(
+        "intel_feed_refresh",
+        pingap_intel::task::new_feed_refresh_task(),
+    );
+    simple_background_service.add_task(
+        "adaptive_calibration",
+        pingap_adaptive::task::new_calibration_task(),
+    );
+
     // Drift detection: has the running config diverged from the version the control
     // plane last confirmed enforcing? Reported, never corrected — a hand edit is
     // either a deliberate emergency change or evidence somebody bypassed the control
@@ -897,7 +918,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             projection::new_drift_detection_task(
                 store_path.clone(),
                 config_manager.clone(),
-                webhook::get_webhook_sender(),
+                None,
             ),
         );
         // A version left `pending` is one nobody confirmed enforcing: the process that
@@ -907,10 +928,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         simple_background_service.add_task(
             "config_verify",
             projection::new_pending_verification_task(
-                store_path,
+                store_path.clone(),
                 config_manager.clone(),
                 projection::DEFAULT_RELOAD_WINDOW,
             ),
+        );
+        simple_background_service.add_task(
+            "waf_metrics_rollup",
+            projection::new_waf_metrics_task(store_path.clone()),
+        );
+        simple_background_service.add_task(
+            "alert_evaluation",
+            projection::new_alert_evaluation_task(store_path),
         );
     }
 

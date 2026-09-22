@@ -30,11 +30,15 @@ use crate::plugin::new_plugin_provider;
 use pingap_config::{
     ConfigManager, PingapConfig, PingapTomlConfig, PluginConf,
 };
+use pingap_controlplane::alerts::{self, Suppression};
+use pingap_controlplane::metrics::{self, Retention};
 use pingap_controlplane::projection::{
     Applier, ConfigSink, ConfigSource, DataPlane, Drift, DriftDetector,
     PluginCheck, Validator,
 };
-use pingap_controlplane::repository::ControlPlaneStore;
+use pingap_controlplane::repository::{
+    ControlPlaneStore, TimeRange, WafEventFilter,
+};
 use pingap_core::{
     BackgroundTask, Notification, NotificationData, NotificationSender,
     PluginProvider,
@@ -45,6 +49,128 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 const LOG_TARGET: &str = "projection";
+const ROLLUP_EVENT_WINDOW_SECS: i64 = 24 * 60 * 60;
+const ROLLUP_READ_LIMIT: u32 = 10_000;
+
+fn rollup_window(now: i64) -> TimeRange {
+    let until = metrics::bucket_start(now, metrics::DEFAULT_BUCKET_SECS) - 1;
+    TimeRange {
+        since: Some(metrics::bucket_start(
+            until.saturating_sub(ROLLUP_EVENT_WINDOW_SECS - 1),
+            metrics::DEFAULT_BUCKET_SECS,
+        )),
+        until: Some(until),
+        limit: Some(ROLLUP_READ_LIMIT),
+    }
+}
+
+pub struct WafMetricsTask {
+    store: LazyStore,
+}
+
+#[async_trait::async_trait]
+impl BackgroundTask for WafMetricsTask {
+    async fn execute(&self, _count: u32) -> Result<bool, pingap_core::Error> {
+        let invalid = |message: String| pingap_core::Error::Invalid { message };
+        let store = self.store.get().await.map_err(invalid)?.clone();
+        let now = pingap_core::now_sec() as i64;
+        let existing = store
+            .read_performance_metrics(
+                None,
+                TimeRange {
+                    since: Some(now.saturating_sub(
+                        Retention::DEFAULT_PERFORMANCE_METRICS,
+                    )),
+                    until: None,
+                    limit: Some(ROLLUP_READ_LIMIT),
+                },
+            )
+            .await
+            .map_err(|e| invalid(e.to_string()))?;
+        let mut latest = std::collections::HashMap::<String, i64>::new();
+        for row in existing {
+            latest
+                .entry(row.node)
+                .and_modify(|bucket| *bucket = (*bucket).max(row.bucket_start))
+                .or_insert(row.bucket_start);
+        }
+        let events = store
+            .read_waf_events(WafEventFilter {
+                range: rollup_window(now),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| invalid(e.to_string()))?;
+        let mut by_node = std::collections::HashMap::<String, Vec<_>>::new();
+        for event in events {
+            by_node.entry(event.node.clone()).or_default().push(event);
+        }
+        let mut rows = Vec::new();
+        for (node, events) in by_node {
+            let node_latest = latest.get(&node).copied();
+            let filtered = events
+                .into_iter()
+                .filter(|event| {
+                    node_latest
+                        .map(|bucket| {
+                            event.created_at
+                                >= bucket + metrics::DEFAULT_BUCKET_SECS
+                        })
+                        .unwrap_or(true)
+                })
+                .collect::<Vec<_>>();
+            rows.extend(metrics::rollup(
+                &filtered,
+                metrics::DEFAULT_BUCKET_SECS,
+                &node,
+            ));
+        }
+        if !rows.is_empty() {
+            store
+                .record_performance_metrics(&rows)
+                .await
+                .map_err(|e| invalid(e.to_string()))?;
+        }
+        let pruned = metrics::sweep(&*store, &Retention::default(), now)
+            .await
+            .map_err(|e| invalid(e.to_string()))?;
+        Ok(!rows.is_empty() || pruned.total() > 0)
+    }
+}
+
+pub fn new_waf_metrics_task(store_path: String) -> Box<dyn BackgroundTask> {
+    Box::new(WafMetricsTask {
+        store: LazyStore::at(store_path),
+    })
+}
+
+pub struct AlertEvaluationTask {
+    store: LazyStore,
+    suppression: tokio::sync::Mutex<Suppression>,
+}
+
+#[async_trait::async_trait]
+impl BackgroundTask for AlertEvaluationTask {
+    async fn execute(&self, _count: u32) -> Result<bool, pingap_core::Error> {
+        let invalid = |message: String| pingap_core::Error::Invalid { message };
+        let store = self.store.get().await.map_err(invalid)?.clone();
+        let now = pingap_core::now_sec() as i64;
+        let mut suppression = self.suppression.lock().await;
+        let attempts = alerts::evaluate_once(&*store, &mut suppression, now)
+            .await
+            .map_err(|error| invalid(error.to_string()))?;
+        Ok(attempts > 0)
+    }
+}
+
+pub fn new_alert_evaluation_task(
+    store_path: String,
+) -> Box<dyn BackgroundTask> {
+    Box::new(AlertEvaluationTask {
+        store: LazyStore::at(store_path),
+        suppression: tokio::sync::Mutex::new(Suppression::new(300)),
+    })
+}
 
 /// How long after a commit to wait before reading the data plane back.
 ///
@@ -160,6 +286,22 @@ impl PluginCheck for FactoryPluginCheck {
 /// wants an `Arc<dyn Notification>`. One newtype rather than widening the vendored alias.
 struct SenderNotifier(Arc<NotificationSender>);
 
+struct PersistedAlertNotifier {
+    store: Arc<dyn ControlPlaneStore>,
+}
+
+#[async_trait::async_trait]
+impl Notification for PersistedAlertNotifier {
+    async fn notify(&self, data: NotificationData) {
+        let _ = pingap_controlplane::alerts::dispatch_persisted_channels(
+            &*self.store,
+            data,
+            pingap_core::now_sec() as i64,
+        )
+        .await;
+    }
+}
+
 #[async_trait::async_trait]
 impl Notification for SenderNotifier {
     async fn notify(&self, data: NotificationData) {
@@ -228,10 +370,16 @@ pub struct DriftTask {
 impl BackgroundTask for DriftTask {
     async fn execute(&self, _count: u32) -> Result<bool, pingap_core::Error> {
         let invalid = |message: String| pingap_core::Error::Invalid { message };
+        let store = self.store.get().await.map_err(invalid)?.clone();
+        let notifier = self.notifier.clone().or_else(|| {
+            Some(Arc::new(PersistedAlertNotifier {
+                store: store.clone(),
+            }) as Arc<dyn Notification + Send + Sync>)
+        });
         let detector = DriftDetector::new(
-            self.store.get().await.map_err(invalid)?.clone(),
+            store,
             Arc::new(ConfigManagerSource::new(self.manager.clone())),
-            self.notifier.clone(),
+            notifier,
         );
         match detector.check().await {
             // `true` means "did meaningful work", which is what a divergence is. A clean

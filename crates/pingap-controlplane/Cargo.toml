@@ -14,6 +14,7 @@ name = "pingap_controlplane"
 path = "src/lib.rs"
 
 [dependencies]
+pingap-events = { path = "../pingap-events" }
 # Pinned exactly. An inexact requirement drifts onto the `0.8.0-pre.*` line, which is
 # not acceptable for a store that owns accounts and audit history. The Turso spike
 # measured this exact version — see docs/spikes/turso-finding.md.
@@ -31,6 +32,7 @@ argon2 = "0.5.3"
 # will accept.
 totp-rs = { version = "5.7.2", features = ["otpauth", "gen_secret"] }
 async-trait = { workspace = true }
+reqwest = { workspace = true }
 # The projection compiles control-plane intent into pingap's own config model, so it
 # speaks that model directly rather than re-declaring it and drifting from it.
 pingap-config = { workspace = true }
@@ -59,6 +61,7 @@ pingap-util = { workspace = true }
 # Primary keys. v7 rather than v4 so an append-heavy table's key index stays
 # append-friendly and rows sort by creation without consulting a timestamp column.
 uuid = { workspace = true }
+lettre = { version = "0.11.19", default-features = false, features = ["builder", "smtp-transport", "tokio1-native-tls"] }
 
 [features]
 # Exposes `totp_code_for`, which generates the code an authenticator would show.

@@ -246,6 +246,54 @@ fn build() -> Vec<Route> {
             access: Access::Needs(Capability::ViewLogs),
             handler: handler!(routes::logs::waf_events),
         },
+        Route {
+            method: Method::GET,
+            path: "/performance",
+            access: Access::Needs(Capability::ViewMetrics),
+            handler: handler!(routes::metrics::performance),
+        },
+        Route {
+            method: Method::GET,
+            path: "/dashboard",
+            access: Access::Needs(Capability::ViewMetrics),
+            handler: handler!(routes::metrics::dashboard),
+        },
+        Route {
+            method: Method::GET,
+            path: "/alerts/channels",
+            access: Access::Needs(Capability::ViewAlerts),
+            handler: handler!(routes::alerts::list_channels),
+        },
+        Route {
+            method: Method::POST,
+            path: "/alerts/channels",
+            access: Access::Needs(Capability::EditAlert),
+            handler: handler!(routes::alerts::create_channel),
+        },
+        Route {
+            method: Method::GET,
+            path: "/alerts/rules",
+            access: Access::Needs(Capability::ViewAlerts),
+            handler: handler!(routes::alerts::list_rules),
+        },
+        Route {
+            method: Method::POST,
+            path: "/alerts/rules",
+            access: Access::Needs(Capability::EditAlert),
+            handler: handler!(routes::alerts::create_rule),
+        },
+        Route {
+            method: Method::GET,
+            path: "/alerts/history",
+            access: Access::Needs(Capability::ViewAlerts),
+            handler: handler!(routes::alerts::history),
+        },
+        Route {
+            method: Method::POST,
+            path: "/alerts/channels/:id/test-send",
+            access: Access::Needs(Capability::EditAlert),
+            handler: handler!(routes::alerts::test_send),
+        },
         // ---- config versions, drift, rollback ----------------------------------------
         Route {
             method: Method::GET,

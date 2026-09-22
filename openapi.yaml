@@ -989,7 +989,201 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
+  /performance:
+    get:
+      tags: [metrics]
+      operationId: listPerformanceMetrics
+      summary: Stored rollup rows, oldest bucket first
+      description: |
+        Reads precomputed metrics, never raw findings. An empty array means no stored rows,
+        not measured zero traffic. Rows retain their node and bucket width; do not merge
+        different nodes or widths as one series.
+
+        Empty filters are absent. Malformed numeric filters, reversed ranges, and limits
+        outside 1–1000 return 400. The default limit is 100; this is a bounded window,
+        not a completeness guarantee or a cursor-paginated export.
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+        - $ref: '#/components/parameters/MetricLimit'
+        - $ref: '#/components/parameters/MetricName'
+      x-required-capability: view_metrics
+      responses:
+        '200':
+          description: Stored rows, ordered by bucket_start then id ascending.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PerformanceMetric'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+
+  /dashboard:
+    get:
+      tags: [metrics]
+      operationId: getDashboard
+      summary: Stored rollups and current config drift
+      description: |
+        Uses the same bounded window and validation as GET /performance. Drift compares
+        the current config on storage to the last applied version, without notifying or
+        correcting it. Missing or unreadable config sources are unavailable, never in_sync.
+        Parser diagnostics and config contents are not returned.
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+        - $ref: '#/components/parameters/MetricLimit'
+        - $ref: '#/components/parameters/MetricName'
+      x-required-capability: view_metrics
+      responses:
+        '200':
+          description: Rollup window and drift observation.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [metrics, drift]
+                properties:
+                  metrics:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PerformanceMetric'
+                  drift:
+                    $ref: '#/components/schemas/ConfigDrift'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+
+  /alerts/channels:
+    get:
+      tags: [alerts]
+      operationId: listAlertChannels
+      summary: Notification channels without credentials
+      x-required-capability: view_alerts
+      responses:
+        '200':
+          description: Configured channels with redacted config.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/NotificationChannel'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [alerts]
+      operationId: createAlertChannel
+      summary: Create a notification channel
+      x-required-capability: edit_alert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NewNotificationChannel'}
+      responses:
+        '200':
+          description: Created channel with redacted config.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationChannel'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
+  /alerts/rules:
+    get:
+      tags: [alerts]
+      operationId: listAlertRules
+      summary: Alert rules
+      x-required-capability: view_alerts
+      responses:
+        '200':
+          description: Alert rules and channel bindings.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/AlertRule'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [alerts]
+      operationId: createAlertRule
+      summary: Create an alert rule
+      x-required-capability: edit_alert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NewAlertRule'}
+      responses:
+        '200':
+          description: Created alert rule.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertRule'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
+  /alerts/channels/{id}/test-send:
+    post:
+      operationId: testAlertChannel
+      security:
+        - bearerAuth: []
+      x-required-capability: edit_alert
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delivery succeeded
+          content:
+            application/json:
+              schema: { type: object }
+        '401': { description: Unauthenticated }
+        '403': { description: Forbidden }
+        '404': { description: Channel not found }
+        '409': { description: Rate limited }
+        '503': { description: Delivery unavailable }
+  /alerts/history:
+    get:
+      tags: [alerts]
+      operationId: listAlertHistory
+      summary: Alert delivery history
+      x-required-capability: view_alerts
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Delivery attempts, including failures.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/AlertHistory'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
   /config-versions:
+
     get:
       tags: [versions]
       operationId: listConfigVersions
@@ -1463,6 +1657,23 @@ components:
         type: integer
         format: int32
         minimum: 1
+    MetricLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum 1000 rows; defaults to 100.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 1000
+    MetricName:
+      name: metric
+      in: query
+      required: false
+      description: Exact rollup metric name, such as `waf.blocks`.
+      schema:
+        type: string
 
   requestBodies:
     SecondFactorCode:
@@ -1644,6 +1855,101 @@ components:
         A plugin's own configuration table. Interpreted by the plugin that owns it and by
         nothing else; the projection only checks that every binding names an entry that
         exists, and the gate asks the plugin factory whether the table constructs.
+
+    NotificationChannel:
+      type: object
+      required: [id, name, kind, config, enabled, created_at]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        kind: {type: string}
+        config: {type: string, description: Always redacted in API responses.}
+        enabled: {type: boolean}
+        created_at: {type: integer, format: int64}
+
+    NewNotificationChannel:
+      type: object
+      required: [name, kind, config, enabled]
+      additionalProperties: false
+      properties:
+        name: {type: string}
+        kind: {type: string, enum: [email, telegram, webhook]}
+        config: {type: string, description: Stored as an opaque secret-bearing value and never returned.}
+        enabled: {type: boolean}
+
+    AlertRule:
+      type: object
+      required: [rule, created_at]
+      properties:
+        rule:
+          type: object
+          additionalProperties: false
+          required: [name, metric, comparator, threshold, window_secs, severity, enabled, channel_ids]
+          properties:
+            name: {type: string}
+            metric: {type: string}
+            comparator: {type: string, enum: [greater_than, greater_or_equal, less_than, less_or_equal]}
+            threshold: {type: number}
+            window_secs: {type: integer, format: int64, minimum: 1}
+            severity: {type: string}
+            enabled: {type: boolean}
+            channel_ids: {type: array, items: {type: string}}
+        created_at: {type: integer, format: int64}
+
+    NewAlertRule:
+      type: object
+      required: [name, metric, comparator, threshold, window_secs, severity, enabled, channel_ids]
+      additionalProperties: false
+      properties:
+        name: {type: string}
+        metric: {type: string}
+        comparator: {type: string, enum: [greater_than, greater_or_equal, less_than, less_or_equal]}
+        threshold: {type: number}
+        window_secs: {type: integer, format: int64, minimum: 1}
+        severity: {type: string}
+        enabled: {type: boolean}
+        channel_ids: {type: array, items: {type: string}}
+
+    AlertHistory:
+      type: object
+      required: [id, rule_id, rule_name, severity, observed, threshold, delivered, delivery_error, created_at]
+      properties:
+        id: {type: string}
+        rule_id: {type: string, nullable: true}
+        rule_name: {type: string}
+        severity: {type: string}
+        observed: {type: number}
+        threshold: {type: number}
+        delivered: {type: boolean}
+        delivery_error: {type: string, nullable: true}
+        created_at: {type: integer, format: int64}
+
+    PerformanceMetric:
+      type: object
+      additionalProperties: false
+      required: [id, node, metric, value, bucket_start, bucket_secs]
+      properties:
+        id: {type: string}
+        node: {type: string}
+        metric: {type: string}
+        value: {type: number, format: double}
+        bucket_start: {type: integer, format: int64}
+        bucket_secs: {type: integer, format: int64, minimum: 1}
+
+    ConfigDrift:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [unavailable, no_baseline, in_sync, detected]
+        version_id: {type: string}
+        expected_hash: {type: string}
+        actual_hash: {type: string}
+        differing:
+          type: array
+          items: {type: string}
 
     WafCategory:
       type: object

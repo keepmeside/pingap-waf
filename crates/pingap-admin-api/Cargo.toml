@@ -21,6 +21,7 @@ bytes = { workspace = true }
 # Roles, capabilities and the one authorisation decision. The router never re-implements
 # the matrix; it names a capability per route and asks.
 pingap-controlplane = { workspace = true }
+pingap-core = { workspace = true }
 # Config-shaped resources are stored as intent and projected, never written directly.
 pingap-config = { workspace = true }
 # The WAF's category table and its CRS lineage, for the read that tells a UI what a

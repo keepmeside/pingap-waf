@@ -25,34 +25,23 @@ pub trait DispatchSender: Send + Sync {
         data: &'a pingap_core::NotificationData,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 }
-impl<T: pingap_core::Notification + Send + Sync> DispatchSender for T {
+/// Explicit failure for channels whose transport is unavailable or cannot report a result.
+pub struct UnavailableSender {
+    pub reason: String,
+}
+
+impl DispatchSender for UnavailableSender {
     fn send<'a>(
         &'a self,
-        data: &'a pingap_core::NotificationData,
+        _data: &'a pingap_core::NotificationData,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>
     {
-        Box::pin(async move {
-            self.notify(pingap_core::NotificationData {
-                category: data.category.clone(),
-                level: match data.level {
-                    pingap_core::NotificationLevel::Error => {
-                        pingap_core::NotificationLevel::Error
-                    },
-                    pingap_core::NotificationLevel::Warn => {
-                        pingap_core::NotificationLevel::Warn
-                    },
-                    pingap_core::NotificationLevel::Info => {
-                        pingap_core::NotificationLevel::Info
-                    },
-                },
-                title: data.title.clone(),
-                message: data.message.clone(),
-            })
-            .await;
-            Ok(())
-        })
+        let reason = self.reason.clone();
+        Box::pin(async move { Err(reason) })
     }
 }
+
+// Do not blanket-implement this trait for Notification: notify() cannot report delivery errors.
 pub struct Dispatch {
     max_attempts: u8,
     base_backoff: Duration,
@@ -110,4 +99,55 @@ fn error_class(error: &str) -> String {
         .chars()
         .take(64)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pingap_core::{NotificationData, NotificationLevel};
+
+    struct FakeSender(Result<(), String>);
+    impl DispatchSender for FakeSender {
+        fn send<'a>(
+            &'a self,
+            _data: &'a NotificationData,
+        ) -> std::pin::Pin<
+            Box<dyn Future<Output = Result<(), String>> + Send + 'a>,
+        > {
+            let result = self.0.clone();
+            Box::pin(async move { result })
+        }
+    }
+
+    #[tokio::test]
+    async fn fanout_preserves_sibling_delivery_when_one_channel_fails() {
+        let data = NotificationData {
+            category: "alert".into(),
+            level: NotificationLevel::Warn,
+            title: "threshold".into(),
+            message: "bounded test".into(),
+        };
+        let result = Dispatch::new(1, Duration::ZERO)
+            .send(
+                &[
+                    (
+                        "broken".into(),
+                        Box::new(FakeSender(Err("smtp:down".into())))
+                            as Box<dyn DispatchSender>,
+                    ),
+                    (
+                        "healthy".into(),
+                        Box::new(FakeSender(Ok(()))) as Box<dyn DispatchSender>,
+                    ),
+                ],
+                data,
+            )
+            .await;
+        assert_eq!(result.deliveries.len(), 2);
+        assert!(matches!(
+            result.deliveries[0].outcome,
+            AttemptOutcome::Failed { .. }
+        ));
+        assert_eq!(result.deliveries[1].outcome, AttemptOutcome::Delivered);
+    }
 }
