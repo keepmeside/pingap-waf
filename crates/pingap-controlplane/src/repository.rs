@@ -134,6 +134,33 @@ pub struct NewSession<'a> {
     pub expires_at: i64,
 }
 
+/// One rollup row to store.
+///
+/// No `id`: the store assigns it, for the reason it does on every other table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewPerformanceMetric {
+    /// Which node computed this. Peers share a store, and a total that silently mixes two
+    /// nodes is a number nobody can act on.
+    pub node: String,
+    pub metric: String,
+    pub value: f64,
+    /// Start of the bucket, floor-aligned to the epoch so two nodes rolling up independently
+    /// produce rows that line up.
+    pub bucket_start: i64,
+    pub bucket_secs: i64,
+}
+
+/// One stored rollup row.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PerformanceMetricRecord {
+    pub id: String,
+    pub node: String,
+    pub metric: String,
+    pub value: f64,
+    pub bucket_start: i64,
+    pub bucket_secs: i64,
+}
+
 /// Which findings to read back.
 ///
 /// Every field optional, and an absent one is not a filter rather than a filter that matches
@@ -391,6 +418,28 @@ pub trait ControlPlaneStore: Send + Sync {
     /// Deliberately absent for `activity_log` and `alert_history`. Those are append-only and
     /// the trait exposes no delete for them at all; see `crate::metrics::retention`.
     async fn prune_waf_events(&self, older_than: i64) -> Result<u64>;
+
+    // ---- rollups -----------------------------------------------------------------------
+    /// Appends rollup rows, in one transaction for the whole slice.
+    ///
+    /// Batched for the reason the findings write is: a rollup of one bucket produces a handful
+    /// of rows per rule and category that fired, and writing them one at a time turns a
+    /// background job into a burst of serial inserts against the process's single writer.
+    async fn record_performance_metrics(
+        &self,
+        rows: &[NewPerformanceMetric],
+    ) -> Result<()>;
+
+    /// Reads rollup rows back, oldest bucket first.
+    ///
+    /// Oldest first and not newest, unlike every other read here: a rollup is a series, and a
+    /// caller drawing it wants it in the order it happened rather than having to reverse it.
+    /// `metric` narrows to one name; `None` is all of them.
+    async fn read_performance_metrics(
+        &self,
+        metric: Option<&str>,
+        range: TimeRange,
+    ) -> Result<Vec<PerformanceMetricRecord>>;
 
     /// Removes rollup buckets older than a cutoff. Returns how many went.
     ///

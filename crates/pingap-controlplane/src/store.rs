@@ -489,6 +489,32 @@ fn decode_waf_event(row: &Row) -> Result<crate::repository::WafEventRecord> {
     })
 }
 
+fn decode_performance_metric(
+    row: &Row,
+) -> Result<crate::repository::PerformanceMetricRecord> {
+    Ok(crate::repository::PerformanceMetricRecord {
+        id: text(row, 0)?,
+        node: text(row, 1)?,
+        metric: text(row, 2)?,
+        value: match row.get_value(3).map_err(backend)? {
+            Value::Real(value) => value,
+            // SQLite stores a whole number in a `REAL` column as an integer, so a rollup of
+            // exactly 3 comes back as `Integer(3)`. Rejecting it would make a bucket with no
+            // fractional part unreadable, which is the common case for a count.
+            Value::Integer(value) => value as f64,
+            other => {
+                return Err(StoreError::Backend {
+                    message: format!(
+                        "performance_metrics.value should be a number, found {other:?}"
+                    ),
+                });
+            },
+        },
+        bucket_start: int(row, 4)?,
+        bucket_secs: int(row, 5)?,
+    })
+}
+
 /// A stored integer that Rust holds narrower than SQLite does.
 fn narrow_u32(column: &str, value: i64) -> Result<u32> {
     u32::try_from(value).map_err(|_| StoreError::Backend {
@@ -1096,6 +1122,76 @@ impl ControlPlaneStore for TursoStore {
                 nullable(filter.category),
             ],
             decode_waf_event,
+        )
+        .await
+    }
+
+    async fn record_performance_metrics(
+        &self,
+        rows: &[crate::repository::NewPerformanceMetric],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        if let Some(row) = rows.iter().find(|row| !row.value.is_finite()) {
+            return Err(StoreError::Backend {
+                message: format!(
+                    "performance metric `{}` must be finite",
+                    row.metric
+                ),
+            });
+        }
+        const INSERT: &str = "INSERT INTO performance_metrics (id, node, metric, \
+             value, bucket_start, bucket_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+        let statements = rows
+            .iter()
+            .map(|row| {
+                (
+                    INSERT,
+                    vec![
+                        Value::Text(new_id()),
+                        Value::Text(row.node.clone()),
+                        Value::Text(row.metric.clone()),
+                        Value::Real(row.value),
+                        Value::Integer(row.bucket_start),
+                        Value::Integer(row.bucket_secs),
+                    ],
+                )
+            })
+            .collect();
+        self.writer()
+            .transaction(statements, || StoreError::Conflict {
+                kind: "performance_metric".to_string(),
+                value: String::new(),
+            })
+            .await
+    }
+
+    async fn read_performance_metrics(
+        &self,
+        metric: Option<&str>,
+        range: TimeRange,
+    ) -> Result<Vec<crate::repository::PerformanceMetricRecord>> {
+        // One statement shape, with the optional metric name as a bound sentinel rather than
+        // a branch that builds a different `WHERE`. Two shapes would be two things to review
+        // and two ways to get the parameter numbering wrong.
+        let sql = "SELECT id, node, metric, value, bucket_start, bucket_secs \
+             FROM performance_metrics \
+             WHERE bucket_start >= ?1 AND bucket_start <= ?2 \
+             AND (?4 IS NULL OR metric = ?4) \
+             ORDER BY bucket_start ASC, id ASC LIMIT ?3"
+            .to_string();
+        self.rows(
+            &sql,
+            vec![
+                Value::Integer(range.since.unwrap_or(i64::MIN)),
+                Value::Integer(range.until.unwrap_or(i64::MAX)),
+                Value::Integer(i64::from(
+                    range.limit.unwrap_or(DEFAULT_READ_LIMIT),
+                )),
+                nullable(metric.map(str::to_string)),
+            ],
+            decode_performance_metric,
         )
         .await
     }
