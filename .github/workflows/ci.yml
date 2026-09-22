@@ -158,3 +158,21 @@ jobs:
             | wc -l)
           echo "impl ProxyHttp count: ${count}"
           test "${count}" -eq 1
+
+  packaging:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        run: sh -n scripts/install-docker.sh scripts/upgrade-docker.sh tests/exposure/scan.sh
+      - name: Validate compose files
+        run: |
+          PINGAP_ADMIN_USER=admin PINGAP_ADMIN_PASSWORD=ci-only-password docker compose config --quiet
+          PINGAP_ADMIN_USER=admin PINGAP_ADMIN_PASSWORD=ci-only-password docker compose -f docker-compose.yml -f docker-compose.dev.yml config --quiet
+          PINGAP_ADMIN_USER=admin PINGAP_ADMIN_PASSWORD=ci-only-password docker compose -f docker-compose.yml -f docker-compose.pull.yml config --quiet
+      - name: Build container image
+        run: docker build --tag pingap-waf:ci .
+      - name: Check exposure harness
+        run: test -x tests/exposure/scan.sh
+      # A live exposure scan requires a configured customer data-plane server and
+      # Docker networking; run it in the deployment environment, not as a claim here.

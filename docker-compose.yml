@@ -1,18 +1,44 @@
 services:
   pingap:
-    image: vicanso/pingap
-    restart: always
+    build: .
+    image: pingap-waf:local
+    restart: unless-stopped
     ports:
-      - 80:80
-      - 443:443
-      - 3018:3018
-    volumes:
-      - ./conf:/opt/pingap/conf
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:3018:3018"
     environment:
       PINGAP_CONF: /opt/pingap/conf
       PINGAP_ADMIN_ADDR: 0.0.0.0:3018
-      PINGAP_ADMIN_USER: pingap
-      PINGAP_ADMIN_PASSWORD: 135790
-      PINGAP_AUTORELOAD: true
-    entrypoint: |
-      pingap
+      PINGAP_ADMIN_USER: ${PINGAP_ADMIN_USER:?set PINGAP_ADMIN_USER}
+      PINGAP_ADMIN_PASSWORD: ${PINGAP_ADMIN_PASSWORD:?set PINGAP_ADMIN_PASSWORD}
+      PINGAP_AUTORELOAD: "true"
+    volumes:
+      - ./conf:/opt/pingap/conf:ro
+      - pingap-data:/var/lib/pingap
+      - pingap-backups:/var/lib/pingap/backups
+    networks: [public, control]
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/etcd
+      - --name=pingap-etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    expose: ["2379"]
+    volumes:
+      - etcd-data:/etcd-data
+    networks: [control]
+
+volumes:
+  pingap-data:
+  pingap-backups:
+  etcd-data:
+
+networks:
+  public:
+  control:
+    internal: true

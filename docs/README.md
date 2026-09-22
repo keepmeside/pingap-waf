@@ -1,5 +1,6 @@
 # Documents
 
+- [Docker deployment](./deployment.md), [security posture](./security-posture.md), and [upgrades](./upgrade.md)
 - [acme chart](./acme_chart.md)
 - [modules](./modules.md)
 - **WAF** (this fork) — [plugin reference](./waf-plugin.md),

@@ -1,0 +1,19 @@
+services:
+  pingap:
+    build:
+      context: .
+      target: build
+    image: pingap-waf:dev
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:3018:3018"
+    environment:
+      PINGAP_CONF: /opt/pingap/conf
+      PINGAP_ADMIN_ADDR: 127.0.0.1:3018
+      PINGAP_ADMIN_USER: ${PINGAP_ADMIN_USER:?set PINGAP_ADMIN_USER}
+      PINGAP_ADMIN_PASSWORD: ${PINGAP_ADMIN_PASSWORD:?set PINGAP_ADMIN_PASSWORD}
+    volumes:
+      - ./conf:/opt/pingap/conf:ro
+      - pingap-data:/var/lib/pingap
+      - pingap-backups:/var/lib/pingap/backups

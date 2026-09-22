@@ -71,6 +71,18 @@ release:
 	cargo build --release
 	ls -lh target/release
 
+release-musl:
+	cargo build --release --target x86_64-unknown-linux-musl --features full
+	ldd target/x86_64-unknown-linux-musl/release/pingap-waf 2>&1 | grep -q 'not a dynamic executable'
+
+image:
+	docker build --tag pingap-waf:local .
+
+exposure:
+	docker compose up --detach --build
+	docker run --rm --network container:$$(docker compose ps -q pingap) -v "$$PWD/tests/exposure:/tests:ro" alpine:3.20 sh -c 'apk add --no-cache curl netcat-openbsd >/dev/null && /tests/scan.sh'
+	docker compose down
+
 release-full:
 	cargo build --release --features=full
 	ls -lh target/release

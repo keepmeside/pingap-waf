@@ -1,0 +1,7 @@
+services:
+  pingap:
+    environment:
+      PINGAP_CONF: /opt/pingap/conf
+      PINGAP_ADMIN_ADDR: 127.0.0.1:3018
+    ports:
+      - "127.0.0.1:3018:3018"
