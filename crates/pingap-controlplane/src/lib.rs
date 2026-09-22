@@ -9,6 +9,7 @@
 //! and policy, and already has validation, history, an etcd watch and `pingap-waf -t`. This
 //! store owns identity and history. Nothing here is on the request path.
 
+pub mod alerts;
 pub mod auth;
 pub mod events;
 pub mod metrics;
