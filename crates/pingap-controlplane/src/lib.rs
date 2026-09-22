@@ -11,6 +11,8 @@
 
 pub mod alerts;
 pub mod auth;
+pub mod backup;
+pub mod cluster;
 pub mod events;
 pub mod metrics;
 pub mod projection;
