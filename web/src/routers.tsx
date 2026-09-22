@@ -3,9 +3,8 @@ import { lazy, Suspense, type ReactNode } from "react";
 import Root from "@/pages/Root";
 import RouteError from "@/pages/RouteError";
 import { LoadingPage } from "@/components/loading";
+import { Dashboard, Domains, NewUpstreams, NewCertificates, Waf, Acl, AccessLists, BotManager, Logs, Alerts, Performance, Backup, Nodes, Users, Account, ConfigHistory } from "@/routes";
 
-// Eager: shell + error boundary. Everything else is route-split so the first
-// paint stays light and unused config pages are not downloaded up front.
 const Home = lazy(() => import("@/pages/Home"));
 const Basic = lazy(() => import("@/pages/Basic"));
 const Servers = lazy(() => import("@/pages/Servers"));
@@ -27,13 +26,35 @@ export const CERTIFICATES = "/certificates";
 export const STORAGES = "/storages";
 export const CONFIG = "/config";
 export const LOGIN = "/login";
+export const DASHBOARD = "/dashboard";
+export const DOMAINS = "/domains";
+export const WAF = "/waf";
+export const ACL = "/acl";
+export const LOGS = "/logs";
+export const ACCOUNT = "/account";
+export const ADVANCED = "/advanced";
 
 function suspense(element: ReactNode) {
   return <Suspense fallback={<LoadingPage />}>{element}</Suspense>;
 }
 
-// Everything inside the app shell. Login is deliberately not here.
 const pages = [
+  { path: DASHBOARD, element: suspense(<Dashboard />) },
+  { path: DOMAINS, element: suspense(<Domains />) },
+  { path: "/upstreams", element: suspense(<NewUpstreams />) },
+  { path: "/certificates", element: suspense(<NewCertificates />) },
+  { path: WAF, element: suspense(<Waf />) },
+  { path: ACL, element: suspense(<Acl />) },
+  { path: "/access-lists", element: suspense(<AccessLists />) },
+  { path: "/bot-manager", element: suspense(<BotManager />) },
+  { path: LOGS, element: suspense(<Logs />) },
+  { path: "/alerts", element: suspense(<Alerts />) },
+  { path: "/performance", element: suspense(<Performance />) },
+  { path: "/backup", element: suspense(<Backup />) },
+  { path: "/nodes", element: suspense(<Nodes />) },
+  { path: "/users", element: suspense(<Users />) },
+  { path: ACCOUNT, element: suspense(<Account />) },
+  { path: "/config-history", element: suspense(<ConfigHistory />) },
   { path: HOME, element: suspense(<Home />) },
   { path: BASIC, element: suspense(<Basic />) },
   { path: SERVERS, element: suspense(<Servers />) },
@@ -48,33 +69,13 @@ const pages = [
 const router = createHashRouter([
   {
     element: <Root />,
-    // Catches a throw from Root itself, where the shell cannot be kept.
     errorElement: <RouteError />,
-    // Per page as well, so a crash in one route renders inside the layout and
-    // leaves the sidebar and header usable instead of blanking the app.
     children: pages.map((page) => ({ ...page, errorElement: <RouteError /> })),
   },
-  {
-    // Outside the shell on purpose: the sidebar lists every config section and
-    // the top bar polls the process, neither of which a visitor who has not
-    // signed in should see or trigger. The layout route above is pathless, so
-    // it only matches when one of its children does — /login falls through here.
-    path: LOGIN,
-    element: suspense(<Login />),
-    errorElement: <RouteError />,
-  },
+  { path: LOGIN, element: suspense(<Login />), errorElement: <RouteError /> },
 ]);
 
 export default router;
-
-export function goToHome() {
-  router.navigate(HOME);
-}
-
-export function goToConfig() {
-  router.navigate(CONFIG);
-}
-
-export function goToLogin() {
-  router.navigate(LOGIN);
-}
+export function goToHome() { router.navigate(HOME); }
+export function goToConfig() { router.navigate(CONFIG); }
+export function goToLogin() { router.navigate(LOGIN); }
