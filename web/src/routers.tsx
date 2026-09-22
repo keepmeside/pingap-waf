@@ -15,6 +15,8 @@ const Certificates = lazy(() => import("@/pages/Certificates"));
 const Config = lazy(() => import("@/pages/Config"));
 const Storages = lazy(() => import("@/pages/Storages"));
 const Login = lazy(() => import("@/pages/Login"));
+const ConsoleResource = lazy(() => import("@/pages/ConsoleResource"));
+const Account = lazy(() => import("@/pages/Account"));
 
 export const HOME = "/";
 export const BASIC = "/basic";
@@ -33,6 +35,8 @@ export const ACL = "/acl";
 export const LOGS = "/logs";
 export const ACCOUNT = "/account";
 export const ADVANCED = "/advanced";
+
+const consoleRoutes = ["dashboard", "domains", "upstreams", "certificates", "waf", "acl", "access-lists", "bot-manager", "logs", "alerts", "performance", "backup", "nodes", "users", "config-history"] as const;
 
 function suspense(element: ReactNode) {
   return <Suspense fallback={<LoadingPage />}>{element}</Suspense>;
@@ -55,6 +59,8 @@ const pages = [
   { path: "/users", element: suspense(<Users />) },
   { path: ACCOUNT, element: suspense(<Account />) },
   { path: "/config-history", element: suspense(<ConfigHistory />) },
+  ...consoleRoutes.map((path) => ({ path: `/${path}`, element: suspense(<ConsoleResource />) })),
+  { path: "/account", element: suspense(<Account />) },
   { path: HOME, element: suspense(<Home />) },
   { path: BASIC, element: suspense(<Basic />) },
   { path: SERVERS, element: suspense(<Servers />) },

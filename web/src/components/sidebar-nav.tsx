@@ -10,6 +10,16 @@ import {
   ShieldCheck,
   Container,
   Search,
+  Gauge,
+  Globe2,
+  Shield,
+  ListChecks,
+  Bot,
+  Activity,
+  Users,
+  UserCircle,
+  History,
+  Cog,
 } from "lucide-react";
 import {
   HOME,
@@ -394,7 +404,36 @@ export function MainSidebar({
   // Order is the request's own order — a request meets a server, then a
   // location, then an upstream — so the nav teaches the pipeline instead of
   // listing seven unrelated config sections alphabetically.
+  const advanced: NavLink = {
+    title: "Advanced",
+    icon: Cog,
+    variant: "ghost",
+    path: BASIC,
+    group: "system",
+    children: [
+      { title: "Basic", path: BASIC, variant: "ghost", group: "system" },
+      { title: "Servers", path: SERVERS, variant: "ghost", group: "system" },
+      { title: "Locations", path: LOCATIONS, variant: "ghost", group: "system" },
+      { title: "Upstreams", path: UPSTREAMS, variant: "ghost", group: "system" },
+      { title: "Plugins", path: PLUGINS, variant: "ghost", group: "system" },
+      { title: "Certificates", path: CERTIFICATES, variant: "ghost", group: "system" },
+      { title: "Storages", path: STORAGES, variant: "ghost", group: "system" },
+      { title: "Config", path: "/config", variant: "ghost", group: "system" },
+      { title: "History", path: "/history", variant: "ghost", group: "system" },
+    ],
+  };
+
   const items: NavLink[] = [
+    { title: "Dashboard", icon: Gauge, variant: getVariant("/dashboard"), path: "/dashboard", group: "path" },
+    { title: "Domains", icon: Globe2, variant: getVariant("/domains"), path: "/domains", group: "path" },
+    { title: "WAF", icon: Shield, variant: getVariant("/waf"), path: "/waf", group: "policy" },
+    { title: "ACL", icon: ListChecks, variant: getVariant("/acl"), path: "/acl", group: "policy" },
+    { title: "Bot manager", icon: Bot, variant: getVariant("/bot-manager"), path: "/bot-manager", group: "policy" },
+    { title: "Logs", icon: Activity, variant: getVariant("/logs"), path: "/logs", group: "system" },
+    { title: "Users", icon: Users, variant: getVariant("/users"), path: "/users", group: "system" },
+    { title: "Account", icon: UserCircle, variant: getVariant("/account"), path: "/account", group: "system" },
+    { title: "Config history", icon: History, variant: getVariant("/config-history"), path: "/config-history", group: "system" },
+    advanced,
     {
       title: navI18n("server"),
       icon: Server,
