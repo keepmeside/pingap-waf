@@ -1,0 +1,10 @@
+target
+.claude
+.git
+node_modules
+web/node_modules
+spikes
+.xia-src
+*.db
+*.sqlite
+*.log
