@@ -7,7 +7,7 @@ RUN cd web && npm run build && cp -rf dist /src/dist
 
 FROM rust:1.88-alpine AS build
 ARG TARGET=x86_64-unknown-linux-musl
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static ca-certificates perl make g++ protobuf-dev protoc cmake clang lld pkgconf
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static ca-certificates perl make g++ zlib-dev protobuf-dev protoc cmake clang lld pkgconf
 RUN rustup target add ${TARGET}
 WORKDIR /src
 COPY --from=web /src /src
