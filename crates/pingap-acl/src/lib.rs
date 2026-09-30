@@ -15,10 +15,12 @@
 
 pub mod access_list;
 pub mod evaluate;
+pub mod marker;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 pub mod rule;
 
 pub use access_list::{AccessList, AccessListConf, AccessListError, Satisfy};
 pub use evaluate::{DefaultAction, Outcome, RequestFacts, RuleSet};
+pub use marker::ChallengeMarker;
 pub use rule::{AclRule, Action, Field, Operator, RuleError, ValidatedRule};

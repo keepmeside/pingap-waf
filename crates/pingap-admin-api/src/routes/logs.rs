@@ -14,7 +14,7 @@
 
 //! WAF findings, read back.
 //!
-//! Every parameter is a filter and an unparseable one is ignored rather than refused, for the
+//! Every parameter is a filter and an unparsable one is ignored rather than refused, for the
 //! reason the audit trail gives: these are filters, and answering a malformed `since` with a
 //! 400 breaks an operator's bookmarked URL the moment a parameter's shape changes. A request
 //! body is different — there, an unknown field means the caller believes they set something
@@ -27,7 +27,7 @@
 use crate::{ApiRequest, ApiResponse, AppState, Result};
 use pingap_controlplane::repository::{TimeRange, WafEventFilter};
 
-/// A filter parameter that is absent, empty, or unparseable — all three mean "not filtering".
+/// A filter parameter that is absent, empty, or unparsable — all three mean "not filtering".
 ///
 /// Empty counts as absent because a UI that clears a text input sends `?domain=` rather than
 /// omitting the parameter, and treating that as a domain named "" would return nothing and

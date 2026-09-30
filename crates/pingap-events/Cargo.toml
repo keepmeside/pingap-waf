@@ -1,0 +1,13 @@
+[package]
+name = "pingap-events"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "pingap_events"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

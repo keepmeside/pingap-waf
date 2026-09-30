@@ -91,8 +91,17 @@ pingap-config = { workspace = true }
 # Fork crate. Users, sessions and the audit trail behind the admin plugin's
 # per-user auth; the gateway boots and serves without it.
 pingap-controlplane = { workspace = true }
+pingap-events = { workspace = true }
 pingap-core = { workspace = true }
+pingap-challenge = { workspace = true }
+pingap-behaviour = { workspace = true }
+pingap-adaptive = { workspace = true }
 pingap-imageoptim = { workspace = true, optional = true }
+# Fork crate. The `task` feature is what compiles the refresh loop, which
+# implements `pingap-core`'s `BackgroundTask`. Without it the crate is the
+# egress guard, the line parser and the published set as a library, and nothing
+# would ever call it on a timer.
+pingap-intel = { workspace = true, features = ["task"] }
 pingap-location = { workspace = true }
 pingap-logger = { workspace = true }
 pingap-otel = { workspace = true, optional = true }
@@ -283,6 +292,12 @@ members = [
     "crates/pingap-admin-api",
     "crates/pingap-bot",
     "crates/pingap-controlplane",
+    "crates/pingap-events",
+    "crates/pingap-domainstate",
+    "crates/pingap-intel",
+    "crates/pingap-challenge",
+    "crates/pingap-behaviour",
+    "crates/pingap-adaptive",
     "crates/pingap-waf",
 ]
 # `spikes/` (phase 02) is deliberately absent from `members` and excluded here so
@@ -389,6 +404,12 @@ pingap-acl = { path = "crates/pingap-acl" }
 pingap-admin-api = { path = "crates/pingap-admin-api" }
 pingap-bot = { path = "crates/pingap-bot" }
 pingap-controlplane = { path = "crates/pingap-controlplane" }
+pingap-domainstate = { path = "crates/pingap-domainstate" }
+pingap-events = { path = "crates/pingap-events" }
+pingap-intel = { path = "crates/pingap-intel" }
+pingap-challenge = { path = "crates/pingap-challenge" }
+pingap-behaviour = { path = "crates/pingap-behaviour" }
+pingap-adaptive = { path = "crates/pingap-adaptive" }
 pingap-waf = { path = "crates/pingap-waf" }
 pingora = { version = "0.8.1", default-features = false, features = [
     "lb",

@@ -315,6 +315,13 @@ impl ConfigManager {
         self.storage.observe().await
     }
 
+    /// The backing store, for readers that address it directly rather than through a
+    /// config object. The cluster heartbeat lives on `Storage` — it is keyed state, not a
+    /// config document — so the node inventory needs the handle, not a `PingapConfig`.
+    pub fn storage(&self) -> Arc<dyn Storage> {
+        self.storage.clone()
+    }
+
     pub fn get_current_config(&self) -> Arc<PingapConfig> {
         self.current_config.load().clone()
     }

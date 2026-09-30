@@ -10,11 +10,13 @@ mod manifest;
 mod restore;
 mod validate;
 
-pub use export::{ExportResult, export_bundle};
+pub use export::{ExportResult, export_bundle, export_encrypted_bundle};
 pub use integrity::{sha256_file, verify_bundle_checksums};
 pub use manifest::{BUNDLE_FORMAT_VERSION, BundleManifest};
-pub use restore::{RestoreResult, restore_bundle};
-pub use validate::{ValidationError, validate_bundle};
+pub use restore::{RestoreResult, restore_bundle, restore_bundle_with_key};
+pub use validate::{
+    ValidationError, validate_bundle, validate_bundle_for_restore,
+};
 
 #[derive(Debug, snafu::Snafu)]
 pub enum BackupError {

@@ -20,5 +20,7 @@
 //! Rust is slower and honest about it.
 
 pub mod retention;
+pub mod rollup;
 
 pub use retention::{Cutoffs, Pruned, Retention, sweep};
+pub use rollup::{DEFAULT_BUCKET_SECS, bucket_start, rollup};

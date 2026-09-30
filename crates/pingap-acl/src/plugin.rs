@@ -9,6 +9,7 @@
 //! table rather than being a rule in it; and a failure to construct is loud, because a
 //! silently-absent ACL serves traffic nobody meant to expose.
 
+use crate::ChallengeMarker;
 use crate::access_list::{AccessList, AccessListConf};
 use crate::evaluate::{DefaultAction, RequestFacts, RuleSet};
 use crate::rule::{AclRule, ValidatedRule};
@@ -57,6 +58,8 @@ struct AclConf {
 pub struct AclState {
     /// Whether the request was refused by this plugin.
     pub denied: bool,
+    /// Whether the ACL asked the challenge plugin to verify the request.
+    pub challenged: bool,
     /// Position of the rule that decided, when a rule did.
     pub decided_by: Option<usize>,
     /// Positions of `log` rules that matched. Observations, not decisions.
@@ -81,7 +84,7 @@ impl TryFrom<&PluginConf> for Acl {
     fn try_from(value: &PluginConf) -> Result<Self> {
         let hash_value = get_hash_key(value);
         // Strict, not `get_step_conf`: that one falls back to the default on an
-        // unparseable value, so a typo in `step` would produce an access control that
+        // unparsable value, so a typo in `step` would produce an access control that
         // silently never runs.
         let plugin_step = get_step_conf_in(
             value,
@@ -258,11 +261,19 @@ impl Plugin for Acl {
         // an allowed request is the entire point of having a non-terminal action.
         if !outcome.allowed || !outcome.logged.is_empty() {
             let state = ctx.extensions.get_or_insert_default::<AclState>();
-            state.denied |= !outcome.allowed;
+            state.denied |= !outcome.allowed && !outcome.challenged;
+            state.challenged |= outcome.challenged;
             state.decided_by = outcome.decided_by;
             state.logged = outcome.logged;
         }
 
+        if outcome.challenged {
+            ctx.extensions.insert(ChallengeMarker::new(
+                CATEGORY,
+                format!("rule:{}", outcome.decided_by.unwrap_or_default()),
+            ));
+            return Ok(RequestPluginResult::Continue);
+        }
         if outcome.allowed {
             return Ok(RequestPluginResult::Continue);
         }

@@ -1,0 +1,39 @@
+[package]
+name = "pingap-domainstate"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+authors = ["keepmeside"]
+keywords = ["pingap", "state"]
+description = "Bounded, domain-keyed, expiring state for pingap"
+# Not published: this crate exists only inside this workspace.
+publish = false
+
+[lib]
+name = "pingap_domainstate"
+path = "src/lib.rs"
+
+[dependencies]
+# Unconditional, unlike the sibling crates which gate their pingora-dependent half
+# behind a `plugin` feature. Nothing in this workspace depends on this crate yet, so a
+# gated module would be compiled by no `--features` combination CI passes and would rot
+# unread — the failure the root manifest's `geo` comment exists to prevent. Every
+# consumer of this crate is itself a plugin, so the dependency costs them nothing.
+pingap-core = { workspace = true }
+pingora = { workspace = true }
+snafu = { workspace = true }
+
+[dev-dependencies]
+# Declared directly rather than through `workspace = true`: criterion is not in
+# `[workspace.dependencies]`, and every crate that benchmarks pins it the same way.
+criterion = { version = "0.7.0", features = ["html_reports"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-test = "0.4.4"
+
+# Measures the per-operation cost the open latency decision needs a number for.
+[[bench]]
+name = "store"
+harness = false
+
+[lints]
+workspace = true

@@ -27,7 +27,10 @@ plugin = [
     "dep:ctor",
     "dep:http",
     "dep:pingap-config",
+    "dep:pingap-acl",
     "dep:pingap-core",
+    "dep:pingap-events",
+    "dep:pingap-intel",
     "dep:pingap-plugin",
     "dep:pingora",
     "dep:toml",
@@ -60,7 +63,10 @@ bytes = { workspace = true, optional = true }
 ctor = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 pingap-config = { workspace = true, optional = true }
+pingap-acl = { workspace = true, optional = true }
 pingap-core = { workspace = true, optional = true }
+pingap-events = { workspace = true, optional = true }
+pingap-intel = { workspace = true, optional = true }
 pingap-plugin = { workspace = true, optional = true }
 pingora = { workspace = true, optional = true }
 # Also a dev-dependency, for config round-trip tests. Optional here because the

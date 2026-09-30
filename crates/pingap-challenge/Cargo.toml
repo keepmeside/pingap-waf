@@ -1,0 +1,43 @@
+[package]
+name = "pingap-challenge"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+authors = ["keepmeside"]
+description = "Self-contained challenge tier for pingap"
+publish = false
+
+[lib]
+name = "pingap_challenge"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+pingap-behaviour = { workspace = true }
+pingap-adaptive = { workspace = true }
+ctor = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+humantime-serde = { workspace = true }
+http = { workspace = true }
+pingap-acl = { workspace = true }
+pingap-config = { workspace = true }
+pingap-core = { workspace = true }
+pingap-domainstate = { workspace = true }
+pingap-plugin = { workspace = true }
+pingap-util = { workspace = true }
+pingora = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+snafu = { workspace = true }
+toml = { workspace = true }
+urlencoding = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tokio-test = "0.4.4"
+
+[lints]
+workspace = true

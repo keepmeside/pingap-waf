@@ -30,20 +30,17 @@ fn test_send_allowed(id: &str) -> bool {
 }
 
 fn sender(channel: &NotificationChannel) -> Box<dyn DispatchSender> {
-    if channel.kind == "telegram" {
-        if let Ok(config) =
+    if channel.kind == "telegram"
+        && let Ok(config) =
             serde_json::from_str::<serde_json::Value>(&channel.config)
-            && let (Some(token), Some(chat_id)) = (
-                config.get("token").and_then(|v| v.as_str()),
-                config.get("chat_id").and_then(|v| v.as_str()),
-            )
-            && let Ok(sender) = TelegramDispatchSender::new(
-                token.to_string(),
-                chat_id.to_string(),
-            )
-        {
-            return Box::new(sender);
-        }
+        && let (Some(token), Some(chat_id)) = (
+            config.get("token").and_then(|v| v.as_str()),
+            config.get("chat_id").and_then(|v| v.as_str()),
+        )
+        && let Ok(sender) =
+            TelegramDispatchSender::new(token.to_string(), chat_id.to_string())
+    {
+        return Box::new(sender);
     }
     Box::new(pingap_controlplane::alerts::dispatch::UnavailableSender {
         reason: "unavailable:test-send transport".into(),

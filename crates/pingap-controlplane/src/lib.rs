@@ -27,8 +27,9 @@ pub use auth::{
 };
 pub use rbac::{AuthLevel, Capability, Denial, Role, authorize};
 pub use repository::{
-    Activity, ConfigStatus, ConfigVersion, ControlPlaneStore, NewActivity,
-    NewConfigVersion, NewSession, NewUser, Session, StoreError, TimeRange,
-    User,
+    Activity, BackupFileRecord, BackupScheduleRecord, ConfigStatus,
+    ConfigVersion, ControlPlaneStore, NewActivity, NewBackupFile,
+    NewBackupSchedule, NewConfigVersion, NewNodeStatus, NewSession, NewUser,
+    NodeStatusRecord, Session, StoreError, TimeRange, User,
 };
 pub use store::TursoStore;

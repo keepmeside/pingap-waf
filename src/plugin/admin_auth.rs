@@ -618,6 +618,71 @@ impl ControlPlaneStore for UnavailableStore {
     > {
         self.refuse()
     }
+    async fn create_notification_channel(
+        &self,
+        _: pingap_controlplane::repository::NewNotificationChannel,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<
+        pingap_controlplane::repository::NotificationChannel,
+    > {
+        self.refuse()
+    }
+    async fn list_notification_channels(
+        &self,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::repository::NotificationChannel>,
+    > {
+        self.refuse()
+    }
+    async fn create_alert_rule(
+        &self,
+        _: pingap_controlplane::repository::NewAlertRule,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<
+        pingap_controlplane::repository::AlertRuleRecord,
+    > {
+        self.refuse()
+    }
+    async fn list_alert_rules(
+        &self,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::repository::AlertRuleRecord>,
+    > {
+        self.refuse()
+    }
+    async fn record_alert_history(
+        &self,
+        _: pingap_controlplane::repository::NewAlertHistory,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<
+        pingap_controlplane::repository::AlertHistory,
+    > {
+        self.refuse()
+    }
+    async fn read_alert_history(
+        &self,
+        _: pingap_controlplane::TimeRange,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::repository::AlertHistory>,
+    > {
+        self.refuse()
+    }
+
+    async fn record_performance_metrics(
+        &self,
+        _: &[pingap_controlplane::repository::NewPerformanceMetric],
+    ) -> pingap_controlplane::repository::Result<()> {
+        self.refuse()
+    }
+    async fn read_performance_metrics(
+        &self,
+        _: Option<&str>,
+        _: pingap_controlplane::TimeRange,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::repository::PerformanceMetricRecord>,
+    > {
+        self.refuse()
+    }
     async fn prune_waf_events(
         &self,
         _: i64,
@@ -743,6 +808,65 @@ impl ControlPlaneStore for UnavailableStore {
     ) -> pingap_controlplane::repository::Result<
         Vec<pingap_controlplane::ConfigVersion>,
     > {
+        self.refuse()
+    }
+    async fn list_backup_schedules(
+        &self,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::BackupScheduleRecord>,
+    > {
+        self.refuse()
+    }
+    async fn create_backup_schedule(
+        &self,
+        _: pingap_controlplane::NewBackupSchedule,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<
+        pingap_controlplane::BackupScheduleRecord,
+    > {
+        self.refuse()
+    }
+    async fn delete_backup_schedule(
+        &self,
+        _: &str,
+    ) -> pingap_controlplane::repository::Result<()> {
+        self.refuse()
+    }
+    async fn list_backup_files(
+        &self,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::BackupFileRecord>,
+    > {
+        self.refuse()
+    }
+    async fn record_backup_file(
+        &self,
+        _: pingap_controlplane::NewBackupFile,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<
+        pingap_controlplane::BackupFileRecord,
+    > {
+        self.refuse()
+    }
+    async fn list_node_status(
+        &self,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::NodeStatusRecord>,
+    > {
+        self.refuse()
+    }
+    async fn upsert_node_status(
+        &self,
+        _: pingap_controlplane::NewNodeStatus,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<()> {
+        self.refuse()
+    }
+    async fn reap_node_status(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<()> {
         self.refuse()
     }
 }

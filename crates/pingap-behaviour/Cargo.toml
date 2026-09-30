@@ -1,0 +1,35 @@
+[package]
+name = "pingap-behaviour"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+authors = ["keepmeside"]
+description = "Bounded per-client behavioural detection for pingap"
+publish = false
+
+[lib]
+name = "pingap_behaviour"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+ctor = { workspace = true }
+http = { workspace = true }
+humantime-serde = { workspace = true }
+pingap-config = { workspace = true }
+pingap-core = { workspace = true }
+pingap-domainstate = { workspace = true }
+pingap-plugin = { workspace = true }
+pingora = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+snafu = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+# tokio-test provides the mock Session IO that plugin_paths.rs drives
+# handle_request through.
+tokio-test = "0.4.4"
+
+[lints]
+workspace = true

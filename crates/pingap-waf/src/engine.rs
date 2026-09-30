@@ -82,6 +82,8 @@ pub enum RequestVerdict {
     Detected { hits: Vec<Hit>, score: u32 },
     /// Reject the request.
     Block { hits: Vec<Hit>, score: u32 },
+    /// Ask the challenge plugin to verify the client.
+    Challenge { hits: Vec<Hit>, score: u32 },
 }
 
 /// Response-side outcome. Same shape as [`RequestVerdict`], with `Redact` where
@@ -99,43 +101,53 @@ pub enum ResponseVerdict {
     Redact { hits: Vec<Hit>, score: u32 },
 }
 
-macro_rules! verdict_accessors {
-    ($t:ty, $enforce:ident) => {
-        impl $t {
-            /// Every rule that contributed, in evaluation order. An unexplainable
-            /// block is an untriageable false positive, so the full list travels
-            /// with the verdict rather than just the last or worst hit.
-            pub fn hits(&self) -> &[Hit] {
-                match self {
-                    Self::Allow => &[],
-                    Self::Detected { hits, .. }
-                    | Self::$enforce { hits, .. } => hits,
-                }
-            }
-
-            /// Total accumulated anomaly score across all hits, including hits
-            /// from categories in `detect` that could not contribute to
-            /// enforcement.
-            pub fn score(&self) -> u32 {
-                match self {
-                    Self::Allow => 0,
-                    Self::Detected { score, .. }
-                    | Self::$enforce { score, .. } => *score,
-                }
-            }
-
-            /// Whether the verdict calls for enforcement.
-            pub fn is_enforcing(&self) -> bool {
-                matches!(self, Self::$enforce { .. })
-            }
+impl RequestVerdict {
+    pub fn hits(&self) -> &[Hit] {
+        match self {
+            Self::Allow => &[],
+            Self::Detected { hits, .. }
+            | Self::Block { hits, .. }
+            | Self::Challenge { hits, .. } => hits,
         }
-    };
+    }
+
+    pub fn score(&self) -> u32 {
+        match self {
+            Self::Allow => 0,
+            Self::Detected { score, .. }
+            | Self::Block { score, .. }
+            | Self::Challenge { score, .. } => *score,
+        }
+    }
+
+    pub fn is_enforcing(&self) -> bool {
+        matches!(self, Self::Block { .. } | Self::Challenge { .. })
+    }
+
+    pub fn is_challenge(&self) -> bool {
+        matches!(self, Self::Challenge { .. })
+    }
 }
 
-// Two near-identical impls generated rather than hand-copied. The types stay
-// distinct — which is the whole point — while the accessors cannot drift apart.
-verdict_accessors!(RequestVerdict, Block);
-verdict_accessors!(ResponseVerdict, Redact);
+impl ResponseVerdict {
+    pub fn hits(&self) -> &[Hit] {
+        match self {
+            Self::Allow => &[],
+            Self::Detected { hits, .. } | Self::Redact { hits, .. } => hits,
+        }
+    }
+
+    pub fn score(&self) -> u32 {
+        match self {
+            Self::Allow => 0,
+            Self::Detected { score, .. } | Self::Redact { score, .. } => *score,
+        }
+    }
+
+    pub fn is_enforcing(&self) -> bool {
+        matches!(self, Self::Redact { .. })
+    }
+}
 
 /// A verdict plus how it was reached.
 ///
@@ -174,6 +186,8 @@ struct Scorer {
     hits: Vec<Hit>,
     total: u32,
     enforcing: u32,
+    challenge_only: bool,
+    block_seen: bool,
     threshold: u32,
 }
 
@@ -183,14 +197,20 @@ impl Scorer {
             hits: Vec::new(),
             total: 0,
             enforcing: 0,
+            challenge_only: true,
+            block_seen: false,
             threshold,
         }
     }
 
-    fn record(&mut self, hit: Hit, enforcing: bool) {
+    fn record(&mut self, hit: Hit, gate: Gate) {
         self.total = self.total.saturating_add(hit.score);
-        if enforcing {
+        if matches!(gate, Gate::Enforce | Gate::Challenge) {
             self.enforcing = self.enforcing.saturating_add(hit.score);
+            if gate == Gate::Enforce {
+                self.block_seen = true;
+                self.challenge_only = false;
+            }
         }
         self.hits.push(hit);
     }
@@ -586,6 +606,7 @@ enum Gate {
     Skip,
     Detect,
     Enforce,
+    Challenge,
 }
 
 impl From<RequestMode> for Gate {
@@ -594,6 +615,7 @@ impl From<RequestMode> for Gate {
             RequestMode::Off => Self::Skip,
             RequestMode::Detect => Self::Detect,
             RequestMode::Block => Self::Enforce,
+            RequestMode::Challenge => Self::Challenge,
         }
     }
 }
@@ -619,6 +641,7 @@ fn resolve_gate(
         Some(RawMode::Off) => Gate::Skip,
         Some(RawMode::Detect) => Gate::Detect,
         Some(RawMode::Block) if !response_side => Gate::Enforce,
+        Some(RawMode::Challenge) if !response_side => Gate::Challenge,
         Some(RawMode::Redact) if response_side => Gate::Enforce,
         // Validation rejects an action its surface cannot perform, so a loaded
         // config never reaches here. Degrading to `Detect` rather than `Enforce`
@@ -659,7 +682,7 @@ impl RuleEngine {
                 break;
             }
             if let Some(hit) = rule.evaluate(&scoped) {
-                scorer.record(hit, gate == Gate::Enforce);
+                scorer.record(hit, gate);
             }
         }
 
@@ -711,7 +734,7 @@ impl RuleEngine {
                 break;
             }
             if let Some(hit) = rule.evaluate(&scoped) {
-                scorer.record(hit, gate == Gate::Enforce);
+                scorer.record(hit, gate);
             }
         }
 
@@ -741,9 +764,16 @@ fn forced_by_policy(exhausted: Option<&Exhausted>) -> bool {
 
 fn finish_request(scorer: Scorer, forced: bool) -> RequestVerdict {
     if forced || scorer.reached() {
-        RequestVerdict::Block {
-            hits: scorer.hits,
-            score: scorer.total,
+        if !forced && scorer.challenge_only && !scorer.block_seen {
+            RequestVerdict::Challenge {
+                hits: scorer.hits,
+                score: scorer.total,
+            }
+        } else {
+            RequestVerdict::Block {
+                hits: scorer.hits,
+                score: scorer.total,
+            }
         }
     } else if scorer.hits.is_empty() {
         RequestVerdict::Allow
@@ -827,15 +857,15 @@ mod tests {
             score,
             matched_field: MatchedField::Uri,
         };
-        s.record(hit(4), false);
-        s.record(hit(4), false);
+        s.record(hit(4), Gate::Detect);
+        s.record(hit(4), Gate::Detect);
         assert_eq!(s.total, 8, "total counts every hit");
         assert_eq!(s.enforcing, 0);
         assert!(
             !s.reached(),
             "8 detect-only points must not reach a 5 threshold"
         );
-        s.record(hit(5), true);
+        s.record(hit(5), Gate::Enforce);
         assert!(s.reached());
         assert_eq!(s.total, 13);
     }
@@ -851,7 +881,7 @@ mod tests {
                 score: 5,
                 matched_field: MatchedField::Uri,
             },
-            true,
+            Gate::Enforce,
         );
         // A single `critical` (5) must reach the default threshold of 5, or the
         // documented default would be off by one rule.

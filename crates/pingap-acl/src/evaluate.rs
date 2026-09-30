@@ -21,6 +21,8 @@ pub enum DefaultAction {
     #[default]
     Allow,
     Deny,
+    /// Mark requests for verification when no rule matches.
+    Challenge,
 }
 
 /// The attributes a rule can be tested against.
@@ -72,6 +74,10 @@ fn country_of(_ip: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub allowed: bool,
+    /// The terminal action, when a rule or the default action decided.
+    pub action: Option<Action>,
+    /// Whether the terminal action requested client verification.
+    pub challenged: bool,
     /// Position of the rule that decided, or `None` when the default action did.
     pub decided_by: Option<usize>,
     /// Positions of every `log` rule that matched, in evaluation order. These are
@@ -147,6 +153,8 @@ impl RuleSet {
                 Action::Allow => {
                     return Outcome {
                         allowed: true,
+                        action: Some(Action::Allow),
+                        challenged: false,
                         decided_by: Some(index),
                         logged,
                     };
@@ -154,6 +162,17 @@ impl RuleSet {
                 Action::Deny => {
                     return Outcome {
                         allowed: false,
+                        action: Some(Action::Deny),
+                        challenged: false,
+                        decided_by: Some(index),
+                        logged,
+                    };
+                },
+                Action::Challenge => {
+                    return Outcome {
+                        allowed: false,
+                        action: Some(Action::Challenge),
+                        challenged: true,
                         decided_by: Some(index),
                         logged,
                     };
@@ -161,8 +180,15 @@ impl RuleSet {
             }
         }
 
+        let action = match self.default_action {
+            DefaultAction::Allow => Action::Allow,
+            DefaultAction::Deny => Action::Deny,
+            DefaultAction::Challenge => Action::Challenge,
+        };
         Outcome {
-            allowed: self.default_action == DefaultAction::Allow,
+            allowed: action == Action::Allow,
+            action: Some(action),
+            challenged: action == Action::Challenge,
             decided_by: None,
             logged,
         }
@@ -253,6 +279,38 @@ mod tests {
     }
 
     #[test]
+    fn a_challenge_rule_first_wins_over_a_later_deny() {
+        // `[challenge, deny]` must surface the challenge marker, not the deny —
+        // `challenge` is terminal for the walk, so ordering decides which verdict
+        // the request gets. Swapping the order must swap the outcome.
+        let rules = || {
+            vec![
+                rule(
+                    Field::Method,
+                    Operator::Equals,
+                    &["GET"],
+                    Action::Challenge,
+                ),
+                rule(Field::Method, Operator::Equals, &["GET"], Action::Deny),
+            ]
+        };
+        let challenged = set(rules(), DefaultAction::Allow);
+        let outcome = challenged.evaluate(&facts("203.0.113.9", "GET"));
+        assert!(outcome.challenged, "challenge first must not deny");
+        assert!(!outcome.allowed);
+        assert_eq!(outcome.decided_by, Some(0));
+
+        let denied =
+            set(rules().into_iter().rev().collect(), DefaultAction::Allow);
+        let outcome = denied.evaluate(&facts("203.0.113.9", "GET"));
+        assert!(
+            !outcome.allowed && !outcome.challenged,
+            "deny first must deny"
+        );
+        assert_eq!(outcome.decided_by, Some(0));
+    }
+
+    #[test]
     fn a_log_rule_records_and_does_not_stop_the_walk() {
         // Adding a `log` rule for visibility must not disable the rules below it.
         let rs = set(
@@ -296,6 +354,24 @@ mod tests {
             "the default action is not a rule and must not claim to be one"
         );
         assert!(closed.evaluate(&facts("10.1.2.3", "GET")).allowed);
+    }
+
+    #[test]
+    fn challenge_is_terminal_but_distinct_from_a_denial() {
+        let rs = set(
+            vec![rule(
+                Field::Method,
+                Operator::Equals,
+                &["GET"],
+                Action::Challenge,
+            )],
+            DefaultAction::Allow,
+        );
+        let outcome = rs.evaluate(&facts("203.0.113.9", "GET"));
+        assert!(!outcome.allowed);
+        assert!(outcome.challenged);
+        assert_eq!(outcome.action, Some(Action::Challenge));
+        assert_eq!(outcome.decided_by, Some(0));
     }
 
     #[test]

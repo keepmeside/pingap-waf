@@ -179,6 +179,25 @@ async fn a_log_rule_records_without_refusing() {
     assert_eq!(state.logged, vec![0]);
 }
 
+#[tokio::test]
+async fn a_challenge_rule_writes_a_marker_and_does_not_reach_upstream() {
+    let acl = plugin(
+        "category = \"acl\"\nrules = [ { field = \"method\", operator = \"equals\", values = [\"GET\"], action = \"challenge\" } ]\n",
+    );
+    let (status, ctx) = status_of(&acl, "GET /x HTTP/1.1\r\n\r\n").await;
+    assert_eq!(status, None);
+    let marker = ctx
+        .extensions
+        .get::<pingap_acl::ChallengeMarker>()
+        .expect("challenge marker");
+    assert_eq!(marker.source, "acl");
+    assert!(
+        ctx.extensions
+            .get::<AclState>()
+            .is_some_and(|state| state.challenged)
+    );
+}
+
 /// SHA-256 of `hunter2`, which is what the access-list config stores instead of the
 /// password itself.
 const HUNTER2: &str =

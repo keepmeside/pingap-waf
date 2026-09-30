@@ -1,6 +1,7 @@
 use crate::backup::{
     BUNDLE_FORMAT_VERSION, BackupError, BundleManifest, Result, sha256_file,
 };
+use pingap_util::{aes_encrypt, base64_encode};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,83 @@ pub async fn export_bundle(
         config_version,
         created_at,
         encrypted: false,
+        files,
+    };
+    let bytes = serde_json::to_vec_pretty(&ManifestFile {
+        manifest: &manifest,
+    })
+    .map_err(|e| BackupError::Format {
+        message: e.to_string(),
+    })?;
+    fs::write(root.join("manifest.json"), bytes)
+        .await
+        .map_err(|source| BackupError::Io { source })?;
+    Ok(ExportResult {
+        root: root.to_path_buf(),
+        manifest,
+    })
+}
+
+/// Export a bundle with payloads encrypted using an operator-supplied key.
+///
+/// The key is deliberately not persisted in the bundle. Payloads are encoded before encryption so
+/// the same authenticated AES helper can safely carry the binary store snapshot.
+///
+/// Eight independent inputs are inherent here — bundle root, canonical config bytes, the store
+/// snapshot path, product + intent-schema versions, the config version, the timestamp, and the
+/// key — and bundling them into an options struct would only rename the arity.
+#[allow(clippy::too_many_arguments)]
+pub async fn export_encrypted_bundle(
+    root: impl AsRef<Path>,
+    canonical_config: &str,
+    store_snapshot: impl AsRef<Path>,
+    product_version: impl Into<String>,
+    intent_schema_version: u32,
+    config_version: Option<String>,
+    created_at: i64,
+    key: &str,
+) -> Result<ExportResult> {
+    if key.is_empty() {
+        return Err(BackupError::Format {
+            message: "encryption key must not be empty".into(),
+        });
+    }
+    let root = root.as_ref();
+    fs::create_dir_all(root)
+        .await
+        .map_err(|source| BackupError::Io { source })?;
+    let config_path = root.join("config.toml");
+    let store_path = root.join("store.sqlite");
+    let encrypted_config = aes_encrypt(key, canonical_config).map_err(|e| {
+        BackupError::Format {
+            message: e.to_string(),
+        }
+    })?;
+    let snapshot = fs::read(store_snapshot.as_ref())
+        .await
+        .map_err(|source| BackupError::Io { source })?;
+    let encrypted_store =
+        aes_encrypt(key, &base64_encode(snapshot)).map_err(|e| {
+            BackupError::Format {
+                message: e.to_string(),
+            }
+        })?;
+    fs::write(&config_path, encrypted_config)
+        .await
+        .map_err(|source| BackupError::Io { source })?;
+    fs::write(&store_path, encrypted_store)
+        .await
+        .map_err(|source| BackupError::Io { source })?;
+    let mut files = BTreeMap::new();
+    files.insert("config.toml".to_string(), sha256_file(&config_path).await?);
+    files.insert("store.sqlite".to_string(), sha256_file(&store_path).await?);
+    let manifest = BundleManifest {
+        format_version: BUNDLE_FORMAT_VERSION,
+        product_version: product_version.into(),
+        intent_schema_version,
+        config_version,
+        created_at,
+        encrypted: true,
         files,
     };
     let bytes = serde_json::to_vec_pretty(&ManifestFile {

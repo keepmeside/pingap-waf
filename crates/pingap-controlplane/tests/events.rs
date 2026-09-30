@@ -533,7 +533,7 @@ async fn a_filter_narrows_by_the_fields_it_names() {
         vec!["api.test".to_string()]
     );
 
-    // Two filters at once, and the pair that matches nothing. A query that ANDed wrongly
+    // Two filters at once, and the pair that matches nothing. A query that AND-ed wrongly
     // would return one of the two rows here instead of none.
     assert_eq!(
         read(

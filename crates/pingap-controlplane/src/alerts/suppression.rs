@@ -31,7 +31,7 @@ impl Suppression {
         now: i64,
     ) -> SuppressionDecision {
         let prior = self.states.get(rule_id).copied();
-        let changed = prior.map_or(true, |s| s.evaluation != evaluation);
+        let changed = prior.is_none_or(|s| s.evaluation != evaluation);
         let allowed = changed
             || prior
                 .and_then(|s| s.last_sent_at)
@@ -40,10 +40,12 @@ impl Suppression {
             rule_id.to_string(),
             SuppressionState {
                 evaluation,
+                // `changed` is false only when `prior` exists and its evaluation matched —
+                // so reaching the `else` means the timestamp is there to keep.
                 changed_at: if changed {
                     now
                 } else {
-                    prior.unwrap().changed_at
+                    prior.map(|s| s.changed_at).unwrap_or(now)
                 },
                 last_sent_at: if allowed {
                     Some(now)

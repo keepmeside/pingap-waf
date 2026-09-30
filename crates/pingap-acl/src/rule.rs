@@ -102,6 +102,8 @@ impl Operator {
 pub enum Action {
     Allow,
     Deny,
+    /// Ask the challenge plugin to verify the client, then continue evaluation no further.
+    Challenge,
     /// Record the match and keep evaluating.
     ///
     /// Deliberately **not** terminal. If `log` stopped evaluation it would be
@@ -116,13 +118,22 @@ impl Action {
         match self {
             Self::Allow => "allow",
             Self::Deny => "deny",
+            Self::Challenge => "challenge",
             Self::Log => "log",
         }
     }
 
+    /// Every action, kept beside the match arms so adding a variant cannot silently
+    /// omit it from API publication or tests.
+    pub const ALL: [Self; 4] =
+        [Self::Allow, Self::Deny, Self::Challenge, Self::Log];
+
     /// Whether this action ends evaluation.
     pub const fn is_terminal(self) -> bool {
-        !matches!(self, Self::Log)
+        match self {
+            Self::Allow | Self::Deny | Self::Challenge => true,
+            Self::Log => false,
+        }
     }
 }
 
@@ -514,5 +525,9 @@ mod tests {
         assert!(!Action::Log.is_terminal());
         assert!(Action::Allow.is_terminal());
         assert!(Action::Deny.is_terminal());
+        assert!(Action::Challenge.is_terminal());
+        for action in Action::ALL {
+            assert!(!action.key().is_empty());
+        }
     }
 }

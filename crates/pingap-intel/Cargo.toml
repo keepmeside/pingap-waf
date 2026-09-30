@@ -1,0 +1,95 @@
+[package]
+name = "pingap-intel"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+authors = ["keepmeside"]
+keywords = ["pingap", "waf", "threat-intelligence"]
+description = "Threat-feed fetching behind a Tier-1 egress guard, and the deny set it publishes"
+# Not published: this crate exists only inside this workspace.
+publish = false
+
+[lib]
+name = "pingap_intel"
+path = "src/lib.rs"
+
+[features]
+default = []
+# The refresh task, and only the refresh task. `pingap-core` is where
+# `BackgroundTask` lives and it pulls pingora unconditionally, so gating keeps
+# `cargo test -p pingap-intel` free of the proxy: the egress guard, the line
+# parser and the published set are the security-critical halves and none of them
+# needs to know a `Session` exists.
+#
+# Unlike a gate nothing enables, this one is compiled by CI. The root package
+# depends on `pingap-intel` with `features = ["task"]`, and both `make lint`
+# (`cargo clippy --features=full --all-targets`) and `make test`
+# (`cargo test --workspace --features=full`) build the root package, so features
+# unify and `task.rs` is compiled and tested in both.
+task = ["dep:pingap-config", "dep:pingap-core", "dep:async-trait", "dep:ctor", "dep:pingap-plugin", "dep:pingora"]
+
+[dependencies]
+async-trait = { workspace = true, optional = true }
+ctor = { workspace = true, optional = true }
+# Whole-set publication by pointer swap. A feed entry that leaves a feed has to
+# stop being enforced on the next cycle, and an in-place map has no way to express
+# that without a sweep; replacing the set does.
+arc-swap = { workspace = true }
+# Validating one candidate address at a time. Matching goes through
+# `pingap_util::IpRules`, which is the workspace's single CIDR matcher, but it
+# drops what it cannot parse, so the parser validates first in order to count what
+# was dropped rather than discovering a silent narrowing afterwards.
+ipnet = { workspace = true }
+# `IpRules`: the same CIDR matcher `ip_restriction`, the ACL and the WAF's static
+# `ip_list` use. Two matchers for one field would let this crate and the WAF
+# disagree about which network an address belongs to.
+pingap-util = { workspace = true }
+# The fetch. Pinned at 0.13.4 in `[workspace.dependencies]`; the egress guard is
+# written against that version's `dns::Resolve` and `redirect::Policy` APIs and
+# against the fact — read from its source, not assumed — that a name pinned with
+# `ClientBuilder::resolve` never reaches a custom resolver.
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+snafu = { workspace = true }
+# `net` for the resolver's own lookup and the tests' local listener, `time` for the
+# fetch timeout. `default-features = false` upstream, so both are named.
+tokio = { workspace = true, features = ["net", "time"] }
+# The plugin conf this crate's config is read out of is a `toml::Map`.
+toml = { workspace = true }
+tracing = { workspace = true }
+# Parsing the configured feed URL, and the per-hop URL a redirect policy is handed.
+# `reqwest::Url` is this type, so the two are the same value.
+url = { workspace = true }
+# `staleness` and `timeout` are written as `"24h"` rather than as a number of
+# seconds, matching every other duration in this tree.
+humantime-serde = { workspace = true }
+
+# --- `task` feature only ---------------------------------------------------------
+pingap-config = { workspace = true, optional = true }
+pingap-core = { workspace = true, optional = true }
+pingap-plugin = { workspace = true, optional = true }
+pingora = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The egress tests stand up a real listener on 127.0.0.1 and serve redirects from
+# it, because the property under test is what a client does at connection time and
+# a mock cannot answer that. Dev-dependencies cannot be optional, so these features
+# are unconditional here; they do not reach the library's own graph.
+# An integration test links this crate, not its dependency graph, so a test that
+# names a `reqwest` or `url` type needs its own edge to each. Both are already
+# workspace dependencies of the library half; nothing new is added by repeating
+# them here.
+reqwest = { workspace = true }
+url = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "time",
+    "io-util",
+] }
+toml = { workspace = true }
+
+[lints]
+workspace = true

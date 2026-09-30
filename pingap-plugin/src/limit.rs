@@ -21,7 +21,8 @@ use http::StatusCode;
 use humantime::parse_duration;
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
-    Ctx, HttpResponse, Inflight, Plugin, PluginStep, Rate, RequestPluginResult,
+    AdaptiveRateMultiplier, Ctx, HttpResponse, Inflight, Plugin, PluginStep,
+    Rate, RequestPluginResult,
 };
 use pingap_core::{
     ensure_client_ip, get_cookie_value, get_query_value, get_req_header_value,
@@ -256,10 +257,16 @@ impl Limiter {
         };
 
         // Check if limit exceeded
-        if value > self.max {
+        let multiplier = ctx
+            .extensions
+            .get::<AdaptiveRateMultiplier>()
+            .map(|value| value.0.clamp(0.01, 2.0))
+            .unwrap_or(1.0);
+        let effective_max = self.max * multiplier;
+        if value > effective_max {
             return Err(Error::Exceed {
                 category: PluginCategory::Limit.to_string(),
-                max: self.max,
+                max: effective_max,
                 value,
             });
         }
@@ -529,6 +536,25 @@ max = 1
             .unwrap();
 
         assert_eq!(true, result == RequestPluginResult::Continue);
+    }
+
+    #[tokio::test]
+    async fn adaptive_multiplier_tightens_the_existing_ceiling_without_changing_keying()
+     {
+        let limiter = Limiter::new(
+            &toml::from_str::<PluginConf>(
+                r###"type = "inflight"
+max = 2
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut ctx = Ctx::default();
+        ctx.extensions.insert(AdaptiveRateMultiplier(0.5));
+        let session = new_session().await;
+        assert!(limiter.incr(&session, &mut ctx).is_ok());
+        assert!(limiter.incr(&session, &mut ctx).is_err());
     }
 
     #[tokio::test]

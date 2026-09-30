@@ -314,6 +314,53 @@ fn build() -> Vec<Route> {
             access: Access::Needs(Capability::ViewEvents),
             handler: handler!(routes::activity::list),
         },
+        // ---- nodes ------------------------------------------------------------------
+        //
+        // Read-only: the inventory is whatever the peers published to the shared backend.
+        // There is no write here — a node joins by heartbeating, and removal is a reaper
+        // sweeping a key that stopped being written, not an operator action on this route.
+        Route {
+            method: Method::GET,
+            path: "/nodes",
+            access: Access::Needs(Capability::ViewNodes),
+            handler: handler!(routes::nodes::list),
+        },
+        // ---- backup ------------------------------------------------------------------
+        //
+        // The listing is a read; export, schedule and restore are writes. Restore is the
+        // heaviest capability the matrix has — it is the one operation that replaces what
+        // the whole control plane believes — so it sits at `RestoreBackup`, which only an
+        // admin holds.
+        Route {
+            method: Method::GET,
+            path: "/backup",
+            access: Access::Needs(Capability::ViewBackups),
+            handler: handler!(routes::backup::list),
+        },
+        Route {
+            method: Method::POST,
+            path: "/backup/schedules",
+            access: Access::Needs(Capability::RunBackup),
+            handler: handler!(routes::backup::create_schedule),
+        },
+        Route {
+            method: Method::DELETE,
+            path: "/backup/schedules/:id",
+            access: Access::Needs(Capability::RunBackup),
+            handler: handler!(routes::backup::delete_schedule),
+        },
+        Route {
+            method: Method::POST,
+            path: "/backup/export",
+            access: Access::Needs(Capability::RunBackup),
+            handler: handler!(routes::backup::export),
+        },
+        Route {
+            method: Method::POST,
+            path: "/backup/restore",
+            access: Access::Needs(Capability::RestoreBackup),
+            handler: handler!(routes::backup::restore),
+        },
         // ---- config-shaped resources, written through the projection ------------------
         //
         // Four operations each, and the same four for every category, because they are the

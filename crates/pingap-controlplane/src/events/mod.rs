@@ -19,8 +19,7 @@
 //! tested without a database and the writer be tested without a request path, and it is also
 //! the reason the queue can promise never to block: it has no idea a store exists.
 
-pub mod queue;
 pub mod writer;
 
-pub use queue::{Admission, EventQueue, Verdict, WafEvent};
+pub use pingap_events::{Admission, EventQueue, Verdict, WafEvent};
 pub use writer::{DEFAULT_BATCH, EventWriter};

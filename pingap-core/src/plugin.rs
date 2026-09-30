@@ -305,7 +305,14 @@ pub enum PluginMiss {
 /// product exists to prevent. The list lives here, beside the trait that reports the
 /// miss, so there is one place that answers "is this plugin load-bearing for security".
 pub const SECURITY_ENFORCING_CATEGORIES: &[&str] =
-    &["waf", "acl", "bot", "access_list"];
+    &["waf", "acl", "bot", "access_list", "challenge"];
+
+/// Optional per-request multiplier supplied by the adaptive learner.
+///
+/// Keeping the value in request extensions lets the limiter retain its existing
+/// keying while adaptive policy only modulates the configured ceiling.
+#[derive(Debug, Clone, Copy)]
+pub struct AdaptiveRateMultiplier(pub f64);
 
 /// Whether a failed plugin of this category must fail the request rather than be skipped.
 pub fn is_security_enforcing(category: &str) -> bool {

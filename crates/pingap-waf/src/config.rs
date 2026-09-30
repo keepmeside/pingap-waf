@@ -8,6 +8,8 @@
 use crate::budget::ExhaustedPolicy;
 use crate::categories::Category;
 use crate::rule::Paranoia;
+#[cfg(feature = "plugin")]
+use pingap_intel::IntelConf;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -33,6 +35,9 @@ pub enum RequestMode {
     Detect,
     /// Evaluate and reject when the anomaly threshold is crossed.
     Block,
+    /// Evaluate and ask the challenge plugin to verify the client when the
+    /// anomaly threshold is crossed.
+    Challenge,
 }
 
 impl RequestMode {
@@ -43,7 +48,8 @@ impl RequestMode {
     /// [`RequestMode`] and [`ResponseMode`] being separate types is that `block` is
     /// not offerable on a response-side category, and a UI that guesses the set from
     /// a string list is a UI that offers it.
-    pub const ALL: [Self; 3] = [Self::Off, Self::Detect, Self::Block];
+    pub const ALL: [Self; 4] =
+        [Self::Off, Self::Detect, Self::Block, Self::Challenge];
 
     /// Config key, matching the `serde` rename.
     pub const fn key(self) -> &'static str {
@@ -51,6 +57,7 @@ impl RequestMode {
             Self::Off => "off",
             Self::Detect => "detect",
             Self::Block => "block",
+            Self::Challenge => "challenge",
         }
     }
 }
@@ -86,6 +93,26 @@ impl ResponseMode {
     }
 }
 
+/// The modes a request-side category accepts, joined for an error message.
+/// Derived from [`RequestMode::ALL`] so a new mode appears in the message the
+/// moment it is offerable, rather than lagging the list it describes.
+fn available_request_modes() -> String {
+    RequestMode::ALL
+        .iter()
+        .map(|mode| mode.key())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The modes a response-side category accepts. See [`available_request_modes`].
+fn available_response_modes() -> String {
+    ResponseMode::ALL
+        .iter()
+        .map(|mode| mode.key())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A mode value as it arrives from config, before it is known which surface the
 /// category belongs to.
 ///
@@ -98,7 +125,22 @@ pub enum RawMode {
     Off,
     Detect,
     Block,
+    Challenge,
     Redact,
+}
+
+impl RawMode {
+    /// Config key, matching the `serde` rename. Used to name the offending
+    /// action in a [`ConfigError::CustomRuleActionUnavailable`] message.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Detect => "detect",
+            Self::Block => "block",
+            Self::Challenge => "challenge",
+            Self::Redact => "redact",
+        }
+    }
 }
 
 /// Configuration errors. Each names the key at fault.
@@ -116,6 +158,12 @@ pub enum ConfigError {
          or `detect` to record it only"
     ))]
     BlockOnResponseCategory { category: String },
+
+    #[snafu(display(
+        "waf: category `{category}` is response-side and cannot be set to `challenge` — \
+         response hooks cannot suspend a response; use `redact` or `detect`"
+    ))]
+    ChallengeOnResponseCategory { category: String },
 
     #[snafu(display(
         "waf: category `{category}` is request-side and cannot be set to \
@@ -282,6 +330,11 @@ pub struct WafConfig {
 
     #[serde(default)]
     pub custom_rules: BTreeMap<String, CustomRule>,
+
+    /// Threat-intelligence feeds selected by this WAF policy.
+    #[cfg(feature = "plugin")]
+    #[serde(default)]
+    pub intel: IntelConf,
 }
 
 fn default_profile() -> String {
@@ -312,6 +365,8 @@ impl Default for WafConfig {
             body_inspect_limit: default_body_limit(),
             response_prefix_limit: default_response_prefix(),
             custom_rules: BTreeMap::new(),
+            #[cfg(feature = "plugin")]
+            intel: IntelConf::default(),
         }
     }
 }
@@ -331,6 +386,8 @@ pub struct ValidatedConfig {
     pub body_inspect_limit: usize,
     pub response_prefix_limit: usize,
     pub custom_rules: BTreeMap<String, ValidatedCustomRule>,
+    #[cfg(feature = "plugin")]
+    pub intel: IntelConf,
 }
 
 impl ValidatedConfig {
@@ -399,6 +456,11 @@ impl WafConfig {
                             category: category.key().to_string(),
                         });
                     },
+                    RawMode::Challenge => {
+                        return Err(ConfigError::ChallengeOnResponseCategory {
+                            category: category.key().to_string(),
+                        });
+                    },
                 };
                 response_modes.insert(category, mode);
             } else {
@@ -406,6 +468,7 @@ impl WafConfig {
                     RawMode::Off => RequestMode::Off,
                     RawMode::Detect => RequestMode::Detect,
                     RawMode::Block => RequestMode::Block,
+                    RawMode::Challenge => RequestMode::Challenge,
                     RawMode::Redact => {
                         return Err(ConfigError::RedactOnRequestCategory {
                             category: category.key().to_string(),
@@ -433,24 +496,37 @@ impl WafConfig {
                     reason,
                 });
             }
-            if rule.category.is_response_side()
-                && matches!(rule.action, Some(RawMode::Block))
-            {
+            // One exhaustive match, not two `matches!` guards: a fifth `RawMode`
+            // variant must fail to compile here rather than slip through both
+            // sides unchecked. `available` is derived from the per-side ALL
+            // constants so the message always names the modes actually offerable
+            // — never a literal that can drift from them (e.g. omitting
+            // `challenge`, which is legal on a request-side category).
+            let action = rule.action;
+            let unavailable = match action {
+                // Response-side categories cannot run request-side enforcement.
+                Some(RawMode::Block | RawMode::Challenge)
+                    if rule.category.is_response_side() =>
+                {
+                    Some((action.unwrap_or(RawMode::Detect), false))
+                },
+                // Request-side categories cannot rewrite a body that no longer
+                // exists; they reject the request instead.
+                Some(RawMode::Redact) if !rule.category.is_response_side() => {
+                    Some((RawMode::Redact, true))
+                },
+                _ => None,
+            };
+            if let Some((action, request_side)) = unavailable {
                 return Err(ConfigError::CustomRuleActionUnavailable {
                     name: name.clone(),
                     category: rule.category.key().to_string(),
-                    action: "block".to_string(),
-                    available: "off, detect, redact".to_string(),
-                });
-            }
-            if !rule.category.is_response_side()
-                && matches!(rule.action, Some(RawMode::Redact))
-            {
-                return Err(ConfigError::CustomRuleActionUnavailable {
-                    name: name.clone(),
-                    category: rule.category.key().to_string(),
-                    action: "redact".to_string(),
-                    available: "off, detect, block".to_string(),
+                    action: action.key().to_string(),
+                    available: if request_side {
+                        available_request_modes()
+                    } else {
+                        available_response_modes()
+                    },
                 });
             }
             custom_rules.insert(
@@ -473,6 +549,8 @@ impl WafConfig {
             body_inspect_limit: self.body_inspect_limit,
             response_prefix_limit: self.response_prefix_limit,
             custom_rules,
+            #[cfg(feature = "plugin")]
+            intel: self.intel,
         })
     }
 }
@@ -709,6 +787,82 @@ mod tests {
     }
 
     #[test]
+    fn challenge_is_request_side_only_and_is_published() {
+        let v = cfg_with(&[("sql_injection", RawMode::Challenge)])
+            .validate()
+            .expect("challenge is a request-side mode");
+        assert_eq!(
+            v.request_mode(Category::SqlInjection),
+            RequestMode::Challenge
+        );
+        let err = cfg_with(&[("data_leakage", RawMode::Challenge)])
+            .validate()
+            .expect_err("response-side challenge cannot suspend a response");
+        assert!(matches!(
+            err,
+            ConfigError::ChallengeOnResponseCategory { .. }
+        ));
+        assert!(
+            RequestMode::ALL
+                .iter()
+                .any(|mode| mode.key() == "challenge")
+        );
+    }
+
+    #[test]
+    fn every_raw_mode_is_checked_against_both_category_surfaces() {
+        let request = Category::SqlInjection.key();
+        let response = Category::DataLeakage.key();
+        for mode in [
+            RawMode::Off,
+            RawMode::Detect,
+            RawMode::Block,
+            RawMode::Challenge,
+            RawMode::Redact,
+        ] {
+            let request_result = cfg_with(&[(request, mode)]).validate();
+            let response_result = cfg_with(&[(response, mode)]).validate();
+            match mode {
+                RawMode::Off
+                | RawMode::Detect
+                | RawMode::Block
+                | RawMode::Challenge => {
+                    assert!(
+                        request_result.is_ok(),
+                        "request mode {mode:?} rejected"
+                    );
+                },
+                RawMode::Redact => {
+                    assert!(matches!(
+                        request_result,
+                        Err(ConfigError::RedactOnRequestCategory { .. })
+                    ));
+                },
+            }
+            match mode {
+                RawMode::Off | RawMode::Detect | RawMode::Redact => {
+                    assert!(
+                        response_result.is_ok(),
+                        "response mode {mode:?} rejected"
+                    );
+                },
+                RawMode::Block => {
+                    assert!(matches!(
+                        response_result,
+                        Err(ConfigError::BlockOnResponseCategory { .. })
+                    ));
+                },
+                RawMode::Challenge => {
+                    assert!(matches!(
+                        response_result,
+                        Err(ConfigError::ChallengeOnResponseCategory { .. })
+                    ));
+                },
+            }
+        }
+    }
+
+    #[test]
     fn response_categories_accept_off_detect_redact() {
         let v = cfg_with(&[
             ("data_leakage", RawMode::Redact),
@@ -890,6 +1044,54 @@ mod tests {
             assert!(msg.contains(label), "names the bad action: {msg}");
             assert!(msg.contains(category.key()), "names the category: {msg}");
         }
+    }
+
+    #[test]
+    fn the_unavailable_action_message_lists_only_that_sides_modes() {
+        // The `available` list is derived from the side's ALL constant, so a
+        // request-side rejection names `challenge` — which is legal there — and a
+        // response-side rejection never does. A literal would drift from the list.
+        let mut cfg = WafConfig::default();
+        cfg.custom_rules.insert(
+            "rs".into(),
+            CustomRule {
+                category: Category::DataLeakage,
+                pattern: "x".into(),
+                severity: crate::rule::Severity::Critical,
+                paranoia: Paranoia::default(),
+                action: Some(RawMode::Challenge),
+            },
+        );
+        let msg = cfg
+            .validate()
+            .expect_err("challenge on response-side")
+            .to_string();
+        assert!(msg.contains("challenge"), "names the action: {msg}");
+        assert!(
+            msg.contains("off, detect, redact"),
+            "response-side list omits block and challenge: {msg}"
+        );
+
+        let mut cfg = WafConfig::default();
+        cfg.custom_rules.insert(
+            "rs".into(),
+            CustomRule {
+                category: Category::SqlInjection,
+                pattern: "x".into(),
+                severity: crate::rule::Severity::Critical,
+                paranoia: Paranoia::default(),
+                action: Some(RawMode::Redact),
+            },
+        );
+        let msg = cfg
+            .validate()
+            .expect_err("redact on request-side")
+            .to_string();
+        assert!(msg.contains("redact"), "names the action: {msg}");
+        assert!(
+            msg.contains("off, detect, block, challenge"),
+            "request-side list includes challenge: {msg}"
+        );
     }
 
     #[test]

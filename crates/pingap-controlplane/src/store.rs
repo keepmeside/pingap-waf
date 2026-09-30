@@ -21,9 +21,12 @@
 
 use crate::rbac::{AuthLevel, Role};
 use crate::repository::{
-    Activity, ConfigStatus, ConfigVersion, ControlPlaneStore, NewActivity,
-    NewConfigVersion, NewSession, NewUser, Result, Session, StoreError,
-    TimeRange, User,
+    Activity, AlertHistory, AlertRuleRecord, BackupFileRecord,
+    BackupScheduleRecord, ConfigStatus, ConfigVersion, ControlPlaneStore,
+    NewActivity, NewAlertHistory, NewAlertRule, NewBackupFile,
+    NewBackupSchedule, NewConfigVersion, NewNodeStatus, NewNotificationChannel,
+    NewSession, NewUser, NodeStatusRecord, NotificationChannel, Result,
+    Session, StoreError, TimeRange, User,
 };
 use crate::schema::{MIGRATIONS, VERSION_TABLE};
 use std::sync::Arc;
@@ -448,6 +451,73 @@ fn decode_activity(row: &Row) -> Result<Activity> {
     })
 }
 
+fn decode_channel(row: &Row) -> Result<NotificationChannel> {
+    Ok(NotificationChannel {
+        id: text(row, 0)?,
+        name: text(row, 1)?,
+        kind: text(row, 2)?,
+        config: text(row, 3)?,
+        enabled: flag(row, 4)?,
+        created_at: int(row, 5)?,
+    })
+}
+
+fn decode_alert_rule(row: &Row) -> Result<AlertRuleRecord> {
+    let comparator = text(row, 3)?;
+    let comparator = serde_json::from_str(&format!("\"{comparator}\""))
+        .map_err(|e| StoreError::Backend {
+            message: format!("invalid alert comparator: {e}"),
+        })?;
+    Ok(AlertRuleRecord {
+        rule: crate::alerts::AlertRule {
+            id: text(row, 0)?,
+            name: text(row, 1)?,
+            metric: text(row, 2)?,
+            comparator,
+            threshold: numeric(row, 4)?,
+            window_secs: int(row, 5)?,
+            severity: text(row, 6)?,
+            enabled: flag(row, 7)?,
+            channel_ids: vec![],
+        },
+        created_at: int(row, 8)?,
+    })
+}
+
+fn decode_alert_history(row: &Row) -> Result<AlertHistory> {
+    Ok(AlertHistory {
+        id: text(row, 0)?,
+        rule_id: opt_text(row, 1)?,
+        rule_name: text(row, 2)?,
+        severity: text(row, 3)?,
+        observed: numeric(row, 4)?,
+        threshold: numeric(row, 5)?,
+        delivered: flag(row, 6)?,
+        delivery_error: opt_text(row, 7)?,
+        created_at: int(row, 8)?,
+    })
+}
+
+fn alert_comparator_key(c: crate::alerts::Comparison) -> &'static str {
+    match c {
+        crate::alerts::Comparison::Greater => "greater",
+        crate::alerts::Comparison::GreaterOrEqual => "greater_or_equal",
+        crate::alerts::Comparison::Less => "less",
+        crate::alerts::Comparison::LessOrEqual => "less_or_equal",
+        crate::alerts::Comparison::Equal => "equal",
+    }
+}
+
+fn numeric(row: &Row, idx: usize) -> Result<f64> {
+    match row.get_value(idx).map_err(backend)? {
+        Value::Real(v) => Ok(v),
+        Value::Integer(v) => Ok(v as f64),
+        other => Err(StoreError::Backend {
+            message: format!("column {idx} should be numeric, found {other:?}"),
+        }),
+    }
+}
+
 /// `Some(text)` as a bound value, `NULL` otherwise.
 fn nullable(value: Option<String>) -> Value {
     value.map_or(Value::Null, Value::Text)
@@ -554,6 +624,45 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default()
+}
+
+const BACKUP_SCHEDULE_COLUMNS: &str =
+    "id, name, cron, retain, enabled, created_at";
+const BACKUP_FILE_COLUMNS: &str =
+    "id, schedule_id, path, size_bytes, sha256, created_at";
+const NODE_STATUS_COLUMNS: &str =
+    "node, version, config_version, last_seen_at, reaped_at";
+
+fn decode_backup_schedule(row: &Row) -> Result<BackupScheduleRecord> {
+    Ok(BackupScheduleRecord {
+        id: text(row, 0)?,
+        name: text(row, 1)?,
+        cron: text(row, 2)?,
+        retain: int(row, 3)?,
+        enabled: flag(row, 4)?,
+        created_at: int(row, 5)?,
+    })
+}
+
+fn decode_backup_file(row: &Row) -> Result<BackupFileRecord> {
+    Ok(BackupFileRecord {
+        id: text(row, 0)?,
+        schedule_id: opt_text(row, 1)?,
+        path: text(row, 2)?,
+        size_bytes: int(row, 3)?,
+        sha256: text(row, 4)?,
+        created_at: int(row, 5)?,
+    })
+}
+
+fn decode_node_status(row: &Row) -> Result<NodeStatusRecord> {
+    Ok(NodeStatusRecord {
+        node: text(row, 0)?,
+        version: opt_text(row, 1)?,
+        config_version: opt_text(row, 2)?,
+        last_seen_at: int(row, 3)?,
+        reaped_at: opt_int(row, 4)?,
+    })
 }
 
 #[async_trait::async_trait]
@@ -994,6 +1103,121 @@ impl ControlPlaneStore for TursoStore {
         .await
     }
 
+    async fn create_notification_channel(
+        &self,
+        channel: NewNotificationChannel,
+        now: i64,
+    ) -> Result<NotificationChannel> {
+        let id = new_id();
+        self.writer().execute_unique("INSERT INTO notification_channels (id,name,kind,config,enabled,created_at) VALUES (?1,?2,?3,?4,?5,?6)", vec![Value::Text(id.clone()), Value::Text(channel.name.clone()), Value::Text(channel.kind.clone()), Value::Text(channel.config.clone()), Value::Integer(i64::from(channel.enabled)), Value::Integer(now)], || StoreError::Conflict { kind: "notification channel".into(), value: channel.name.clone() }).await?;
+        Ok(NotificationChannel {
+            id,
+            name: channel.name,
+            kind: channel.kind,
+            config: channel.config,
+            enabled: channel.enabled,
+            created_at: now,
+        })
+    }
+
+    async fn list_notification_channels(
+        &self,
+    ) -> Result<Vec<NotificationChannel>> {
+        self.rows("SELECT id,name,kind,config,enabled,created_at FROM notification_channels ORDER BY name,id", vec![], decode_channel).await
+    }
+
+    async fn create_alert_rule(
+        &self,
+        rule: NewAlertRule,
+        now: i64,
+    ) -> Result<AlertRuleRecord> {
+        if !rule.threshold.is_finite() || rule.window_secs <= 0 {
+            return Err(StoreError::Backend {
+                message:
+                    "alert threshold must be finite and window_secs positive"
+                        .into(),
+            });
+        }
+        let id = new_id();
+        let mut statements = vec![(
+            "INSERT INTO alert_rules (id,name,metric,comparator,threshold,window_secs,severity,enabled,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            vec![
+                Value::Text(id.clone()),
+                Value::Text(rule.name.clone()),
+                Value::Text(rule.metric.clone()),
+                Value::Text(alert_comparator_key(rule.comparator).into()),
+                Value::Real(rule.threshold),
+                Value::Integer(rule.window_secs),
+                Value::Text(rule.severity.clone()),
+                Value::Integer(i64::from(rule.enabled)),
+                Value::Integer(now),
+            ],
+        )];
+        for channel_id in &rule.channel_ids {
+            statements.push(("INSERT INTO alert_rule_channels (rule_id,channel_id) VALUES (?1,?2)", vec![Value::Text(id.clone()), Value::Text(channel_id.clone())]));
+        }
+        self.writer()
+            .transaction(statements, || StoreError::Conflict {
+                kind: "alert rule".into(),
+                value: rule.name.clone(),
+            })
+            .await?;
+        Ok(AlertRuleRecord {
+            rule: crate::alerts::AlertRule {
+                id,
+                name: rule.name,
+                metric: rule.metric,
+                comparator: rule.comparator,
+                threshold: rule.threshold,
+                window_secs: rule.window_secs,
+                severity: rule.severity,
+                enabled: rule.enabled,
+                channel_ids: rule.channel_ids,
+            },
+            created_at: now,
+        })
+    }
+
+    async fn list_alert_rules(&self) -> Result<Vec<AlertRuleRecord>> {
+        let mut out = self.rows("SELECT id,name,metric,comparator,threshold,window_secs,severity,enabled,created_at FROM alert_rules ORDER BY name,id", vec![], decode_alert_rule).await?;
+        for item in &mut out {
+            item.rule.channel_ids = self.rows("SELECT channel_id FROM alert_rule_channels WHERE rule_id = ?1 ORDER BY channel_id", vec![Value::Text(item.rule.id.clone())], |r| text(r, 0)).await?;
+        }
+        Ok(out)
+    }
+
+    async fn record_alert_history(
+        &self,
+        entry: NewAlertHistory,
+        now: i64,
+    ) -> Result<AlertHistory> {
+        if !entry.observed.is_finite() || !entry.threshold.is_finite() {
+            return Err(StoreError::Backend {
+                message: "alert history values must be finite".into(),
+            });
+        }
+        let id = new_id();
+        self.writer().execute("INSERT INTO alert_history (id,rule_id,rule_name,severity,observed,threshold,delivered,delivery_error,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", vec![Value::Text(id.clone()), nullable(entry.rule_id.clone()), Value::Text(entry.rule_name.clone()), Value::Text(entry.severity.clone()), Value::Real(entry.observed), Value::Real(entry.threshold), Value::Integer(i64::from(entry.delivered)), nullable(entry.delivery_error.clone()), Value::Integer(now)]).await?;
+        Ok(AlertHistory {
+            id,
+            rule_id: entry.rule_id,
+            rule_name: entry.rule_name,
+            severity: entry.severity,
+            observed: entry.observed,
+            threshold: entry.threshold,
+            delivered: entry.delivered,
+            delivery_error: entry.delivery_error,
+            created_at: now,
+        })
+    }
+
+    async fn read_alert_history(
+        &self,
+        range: TimeRange,
+    ) -> Result<Vec<AlertHistory>> {
+        self.rows("SELECT id,rule_id,rule_name,severity,observed,threshold,delivered,delivery_error,created_at FROM alert_history WHERE created_at >= ?1 AND created_at <= ?2 ORDER BY created_at DESC,id DESC LIMIT ?3", vec![Value::Integer(range.since.unwrap_or(i64::MIN)), Value::Integer(range.until.unwrap_or(i64::MAX)), Value::Integer(i64::from(range.limit.unwrap_or(DEFAULT_READ_LIMIT)))], decode_alert_history).await
+    }
+
     async fn record_config_version(
         &self,
         version: NewConfigVersion,
@@ -1315,6 +1539,188 @@ impl ControlPlaneStore for TursoStore {
         )
         .await
     }
+
+    async fn list_backup_schedules(&self) -> Result<Vec<BackupScheduleRecord>> {
+        self.rows(
+            &format!(
+                "SELECT {BACKUP_SCHEDULE_COLUMNS} FROM backup_schedules \
+                 ORDER BY name, id"
+            ),
+            vec![],
+            decode_backup_schedule,
+        )
+        .await
+    }
+
+    async fn create_backup_schedule(
+        &self,
+        schedule: NewBackupSchedule,
+        now: i64,
+    ) -> Result<BackupScheduleRecord> {
+        let id = new_id();
+        self.writer()
+            .execute_unique(
+                "INSERT INTO backup_schedules \
+                 (id, name, cron, retain, enabled, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                vec![
+                    Value::Text(id.clone()),
+                    Value::Text(schedule.name.clone()),
+                    Value::Text(schedule.cron.clone()),
+                    Value::Integer(schedule.retain),
+                    Value::Integer(i64::from(schedule.enabled)),
+                    Value::Integer(now),
+                ],
+                || StoreError::Conflict {
+                    kind: "backup schedule".into(),
+                    value: schedule.name.clone(),
+                },
+            )
+            .await?;
+        self.row(
+            &format!(
+                "SELECT {BACKUP_SCHEDULE_COLUMNS} FROM backup_schedules \
+                 WHERE id = ?1"
+            ),
+            vec![Value::Text(id)],
+            decode_backup_schedule,
+        )
+        .await?
+        .ok_or_else(|| StoreError::Backend {
+            message: "a schedule was written but did not read back".into(),
+        })
+    }
+
+    async fn delete_backup_schedule(&self, schedule_id: &str) -> Result<()> {
+        if !self.exists("backup_schedules", schedule_id).await? {
+            return Err(StoreError::NotFound {
+                kind: "backup schedule".into(),
+                id: schedule_id.to_string(),
+            });
+        }
+        // Detach rather than cascade: a bundle recorded under a deleted schedule still
+        // exists on disk, so its row must outlive the schedule with `schedule_id` cleared.
+        // Deleting the files' rows instead would lose the inventory entry for a bundle
+        // that is still restorable.
+        self.writer()
+            .transaction(
+                vec![
+                    (
+                        "UPDATE backup_files SET schedule_id = NULL \
+                         WHERE schedule_id = ?1",
+                        vec![Value::Text(schedule_id.to_string())],
+                    ),
+                    (
+                        "DELETE FROM backup_schedules WHERE id = ?1",
+                        vec![Value::Text(schedule_id.to_string())],
+                    ),
+                ],
+                || StoreError::Backend {
+                    message: "a schedule delete did not apply".into(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn list_backup_files(&self) -> Result<Vec<BackupFileRecord>> {
+        self.rows(
+            &format!(
+                "SELECT {BACKUP_FILE_COLUMNS} FROM backup_files \
+                 ORDER BY created_at DESC, id DESC"
+            ),
+            vec![],
+            decode_backup_file,
+        )
+        .await
+    }
+
+    async fn record_backup_file(
+        &self,
+        file: NewBackupFile,
+        now: i64,
+    ) -> Result<BackupFileRecord> {
+        let id = new_id();
+        self.writer()
+            .execute(
+                "INSERT INTO backup_files \
+                 (id, schedule_id, path, size_bytes, sha256, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                vec![
+                    Value::Text(id.clone()),
+                    nullable(file.schedule_id.clone()),
+                    Value::Text(file.path.clone()),
+                    Value::Integer(file.size_bytes),
+                    Value::Text(file.sha256.clone()),
+                    Value::Integer(now),
+                ],
+            )
+            .await?;
+        self.row(
+            &format!(
+                "SELECT {BACKUP_FILE_COLUMNS} FROM backup_files WHERE id = ?1"
+            ),
+            vec![Value::Text(id)],
+            decode_backup_file,
+        )
+        .await?
+        .ok_or_else(|| StoreError::Backend {
+            message: "a bundle was recorded but did not read back".into(),
+        })
+    }
+
+    async fn list_node_status(&self) -> Result<Vec<NodeStatusRecord>> {
+        self.rows(
+            &format!(
+                "SELECT {NODE_STATUS_COLUMNS} FROM node_status \
+                 ORDER BY node"
+            ),
+            vec![],
+            decode_node_status,
+        )
+        .await
+    }
+
+    async fn upsert_node_status(
+        &self,
+        node: NewNodeStatus,
+        now: i64,
+    ) -> Result<()> {
+        // `reaped_at` is deliberately cleared on heartbeat: a node that comes back is
+        // live again, and carrying the tombstone forward would read it as gone forever.
+        self.writer()
+            .execute(
+                "INSERT INTO node_status \
+                 (node, version, config_version, last_seen_at, reaped_at) \
+                 VALUES (?1, ?2, ?3, ?4, NULL) \
+                 ON CONFLICT(node) DO UPDATE SET \
+                   version = excluded.version, \
+                   config_version = excluded.config_version, \
+                   last_seen_at = excluded.last_seen_at, \
+                   reaped_at = NULL",
+                vec![
+                    Value::Text(node.node.clone()),
+                    nullable(node.version.clone()),
+                    nullable(node.config_version.clone()),
+                    Value::Integer(node.last_seen_at.max(now)),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn reap_node_status(&self, node: &str, now: i64) -> Result<()> {
+        // Only stamp a row that is not already reaped — a second sweep must not move the
+        // timestamp, or "when it was collected" keeps drifting forward.
+        self.writer()
+            .execute(
+                "UPDATE node_status SET reaped_at = ?2 \
+                 WHERE node = ?1 AND reaped_at IS NULL",
+                vec![Value::Text(node.to_string()), Value::Integer(now)],
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1381,6 +1787,153 @@ mod tests {
             0,
             "the first insert survived a failed transaction"
         );
+    }
+
+    /// The backup registry round-trips: a schedule is created, listed, named-unique, and
+    /// deleted; a bundle is recorded and listed.
+    #[tokio::test]
+    async fn backup_schedules_and_files_round_trip() {
+        let (store, _dir) = store().await;
+
+        let schedule = store
+            .create_backup_schedule(
+                NewBackupSchedule {
+                    name: "nightly".to_string(),
+                    cron: "0 3 * * *".to_string(),
+                    retain: 7,
+                    enabled: true,
+                },
+                1_000,
+            )
+            .await
+            .expect("a schedule is created");
+        assert_eq!(schedule.name, "nightly");
+
+        // The name is the schedule's key, so a duplicate is a conflict, not a second row.
+        let err = store
+            .create_backup_schedule(
+                NewBackupSchedule {
+                    name: "nightly".to_string(),
+                    cron: "0 4 * * *".to_string(),
+                    retain: 3,
+                    enabled: true,
+                },
+                1_001,
+            )
+            .await
+            .expect_err("a duplicate name must conflict");
+        assert!(matches!(err, StoreError::Conflict { .. }), "{err:?}");
+
+        assert_eq!(store.list_backup_schedules().await.expect("list").len(), 1);
+
+        let file = store
+            .record_backup_file(
+                NewBackupFile {
+                    schedule_id: Some(schedule.id.clone()),
+                    path: "/var/lib/pingap/backups/backup-1".to_string(),
+                    size_bytes: 4096,
+                    sha256: "deadbeef".to_string(),
+                },
+                1_100,
+            )
+            .await
+            .expect("a bundle is recorded");
+        assert_eq!(file.schedule_id.as_deref(), Some(schedule.id.as_str()));
+        assert_eq!(store.list_backup_files().await.expect("files").len(), 1);
+
+        store
+            .delete_backup_schedule(&schedule.id)
+            .await
+            .expect("delete works");
+        assert!(
+            store
+                .list_backup_schedules()
+                .await
+                .expect("list")
+                .is_empty()
+        );
+        // The bundle outlives its schedule: deleting the schedule detaches the file's
+        // reference rather than deleting the record, because the bundle still exists on
+        // disk and is still restorable.
+        let files = store
+            .list_backup_files()
+            .await
+            .expect("files after delete");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].schedule_id, None);
+        // Deleting it again is a NotFound, not a quiet second success.
+        assert!(
+            matches!(
+                store.delete_backup_schedule(&schedule.id).await,
+                Err(StoreError::NotFound { .. })
+            ),
+            "a second delete should report the miss"
+        );
+    }
+
+    /// The node record upserts on heartbeat and is reaped once, idempotently.
+    #[tokio::test]
+    async fn node_status_upserts_and_reaps_idempotently() {
+        let (store, _dir) = store().await;
+
+        store
+            .upsert_node_status(
+                NewNodeStatus {
+                    node: "node-a".to_string(),
+                    version: Some("v1".to_string()),
+                    config_version: Some("1".to_string()),
+                    last_seen_at: 100,
+                },
+                100,
+            )
+            .await
+            .expect("first heartbeat");
+
+        // A second heartbeat updates in place rather than adding a row.
+        store
+            .upsert_node_status(
+                NewNodeStatus {
+                    node: "node-a".to_string(),
+                    version: Some("v2".to_string()),
+                    config_version: Some("2".to_string()),
+                    last_seen_at: 200,
+                },
+                200,
+            )
+            .await
+            .expect("second heartbeat");
+
+        let nodes = store.list_node_status().await.expect("list");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].last_seen_at, 200);
+        assert_eq!(nodes[0].version.as_deref(), Some("v2"));
+        assert_eq!(nodes[0].reaped_at, None);
+
+        // Reaped once; a second sweep must not move the timestamp forward.
+        store.reap_node_status("node-a", 300).await.expect("reap");
+        store
+            .reap_node_status("node-a", 400)
+            .await
+            .expect("reap is idempotent");
+        let nodes = store.list_node_status().await.expect("list");
+        assert_eq!(nodes[0].reaped_at, Some(300));
+
+        // A node that heartbeats again clears the tombstone — it is live, not gone.
+        store
+            .upsert_node_status(
+                NewNodeStatus {
+                    node: "node-a".to_string(),
+                    version: Some("v3".to_string()),
+                    config_version: Some("3".to_string()),
+                    last_seen_at: 500,
+                },
+                500,
+            )
+            .await
+            .expect("a returning node clears reaped_at");
+        let nodes = store.list_node_status().await.expect("list");
+        assert_eq!(nodes[0].reaped_at, None);
+        assert_eq!(nodes[0].last_seen_at, 500);
     }
 
     #[tokio::test]

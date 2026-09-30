@@ -64,6 +64,11 @@ struct AdminPluginParams {
 /// directory, and neither does a missing `-c`, so those land in the working
 /// directory — `store=` on the admin address is how to say otherwise.
 fn default_store_path() -> String {
+    if let Ok(store) = std::env::var("PINGAP_STORE")
+        && !store.is_empty()
+    {
+        return store;
+    }
     let conf = get_config_path()
         .map(|c| pingap_util::resolve_path(&c))
         .filter(|c| !c.starts_with("etcd://"))

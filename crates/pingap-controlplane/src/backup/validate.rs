@@ -15,6 +15,19 @@ pub enum ValidationError {
 }
 
 pub async fn validate_bundle(root: &Path) -> Result<BundleManifest> {
+    validate_bundle_internal(root, false).await
+}
+
+pub async fn validate_bundle_for_restore(
+    root: &Path,
+) -> Result<BundleManifest> {
+    validate_bundle_internal(root, true).await
+}
+
+async fn validate_bundle_internal(
+    root: &Path,
+    allow_encrypted: bool,
+) -> Result<BundleManifest> {
     let bytes = fs::read(root.join("manifest.json"))
         .await
         .map_err(|source| BackupError::Io { source })?;
@@ -39,7 +52,7 @@ pub async fn validate_bundle(root: &Path) -> Result<BundleManifest> {
             .to_string(),
         });
     }
-    if manifest.encrypted {
+    if manifest.encrypted && !allow_encrypted {
         return Err(BackupError::Format {
             message: ValidationError::Encrypted.to_string(),
         });

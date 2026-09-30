@@ -103,11 +103,10 @@ mod server_locations;
 mod upstreams;
 mod webhook;
 
-// Avoid musl's default allocator due to lackluster performance
-// https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
-#[cfg(target_env = "musl")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// Turso 0.7.2 enables mimalloc for the whole process. Keep the allocator
+// declaration in that dependency rather than declaring a second process-global
+// allocator here; Rust rejects multiple `#[global_allocator]` definitions in a
+// musl build.
 
 static TEMPLATE_CONFIG: &str = r###"
 [basic]

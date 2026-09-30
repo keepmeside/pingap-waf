@@ -37,7 +37,7 @@ pub use request::{ApiRequest, ApiResponse, Caller};
 pub use router::{Access, Handler, Route, dispatch, table};
 
 use pingap_controlplane::ControlPlaneStore;
-use pingap_controlplane::projection::Applier;
+use pingap_controlplane::projection::{Applier, ConfigSource};
 use pingap_controlplane::{AuthError, TotpGuard};
 use std::sync::Arc;
 
@@ -57,6 +57,20 @@ use std::sync::Arc;
 pub struct AppState {
     pub store: Arc<dyn ControlPlaneStore>,
     pub applier: Arc<Applier>,
+    pub(crate) config_source: Option<Arc<dyn ConfigSource>>,
+    /// The peer inventory over the config `Storage` — the etcd heartbeat, not the Turso
+    /// store. `None` where there is no shared backend to read, and `/nodes` says so rather
+    /// than reporting an empty cluster as if it were a real one.
+    pub(crate) cluster:
+        Option<Arc<pingap_controlplane::cluster::ClusterInventory>>,
+    /// Where export writes bundles and where restore reads them. `None` when the deployment
+    /// set no backup directory; the route answers `Unavailable` naming the setting rather
+    /// than inventing a path the operator never agreed to.
+    pub(crate) backup_dir: Option<std::path::PathBuf>,
+    /// The store's backing file, for the snapshot an export copies. `None` for an in-memory
+    /// store — there is no file to copy, and exporting one would produce a bundle with no
+    /// store in it, which reads as success while being empty.
+    pub(crate) store_file: Option<std::path::PathBuf>,
     totp: Arc<TotpGuard>,
     /// Private and exposed only as `Option<&str>`, because it is the one secret this crate
     /// holds. A `pub` field would put it in every struct literal and every debug print.
@@ -73,9 +87,50 @@ impl AppState {
         Self {
             store,
             applier,
+            config_source: None,
+            cluster: None,
+            backup_dir: None,
+            store_file: None,
             totp,
             totp_key,
         }
+    }
+
+    /// Drift reads storage, never the last config the process already knows about.
+    pub fn with_config_source(mut self, source: Arc<dyn ConfigSource>) -> Self {
+        self.config_source = Some(source);
+        self
+    }
+
+    /// The peer inventory, when the deployment runs on a shared backend.
+    pub fn with_cluster(
+        mut self,
+        cluster: Arc<pingap_controlplane::cluster::ClusterInventory>,
+    ) -> Self {
+        self.cluster = Some(cluster);
+        self
+    }
+
+    /// The directory export writes to and restore reads from.
+    pub fn with_backup_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.backup_dir = Some(dir);
+        self
+    }
+
+    /// The directory, when the deployment configured one — the `Option`-carrying form so a
+    /// builder can pass the setting straight through without a branch.
+    pub fn with_optional_backup_dir(
+        mut self,
+        dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.backup_dir = dir;
+        self
+    }
+
+    /// The store's backing file, for export to snapshot.
+    pub fn with_store_file(mut self, path: std::path::PathBuf) -> Self {
+        self.store_file = Some(path);
+        self
     }
 
     /// The guard that spends a code, shared with the login path.

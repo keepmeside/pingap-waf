@@ -161,6 +161,66 @@ pub struct PerformanceMetricRecord {
     pub bucket_secs: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationChannel {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub config: String,
+    pub enabled: bool,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewNotificationChannel {
+    pub name: String,
+    pub kind: String,
+    pub config: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewAlertRule {
+    pub name: String,
+    pub metric: String,
+    pub comparator: crate::alerts::Comparison,
+    pub threshold: f64,
+    pub window_secs: i64,
+    pub severity: String,
+    pub enabled: bool,
+    pub channel_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlertRuleRecord {
+    pub rule: crate::alerts::AlertRule,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewAlertHistory {
+    pub rule_id: Option<String>,
+    pub rule_name: String,
+    pub severity: String,
+    pub observed: f64,
+    pub threshold: f64,
+    pub delivered: bool,
+    pub delivery_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlertHistory {
+    pub id: String,
+    pub rule_id: Option<String>,
+    pub rule_name: String,
+    pub severity: String,
+    pub observed: f64,
+    pub threshold: f64,
+    pub delivered: bool,
+    pub delivery_error: Option<String>,
+    pub created_at: i64,
+}
+
 /// Which findings to read back.
 ///
 /// Every field optional, and an absent one is not a filter rather than a filter that matches
@@ -286,6 +346,77 @@ pub struct NewConfigVersion {
     pub error: Option<String>,
 }
 
+/// A scheduled backup, as stored.
+///
+/// `cron` is the schedule expression and `retain` the number of bundles to keep. The row
+/// is the schedule itself; what it produced is in [`BackupFileRecord`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupScheduleRecord {
+    pub id: String,
+    pub name: String,
+    pub cron: String,
+    pub retain: i64,
+    pub enabled: bool,
+    pub created_at: i64,
+}
+
+/// A schedule being created. The store assigns the id and the timestamp.
+#[derive(Debug, Clone)]
+pub struct NewBackupSchedule {
+    pub name: String,
+    pub cron: String,
+    pub retain: i64,
+    pub enabled: bool,
+}
+
+/// A bundle on disk, as recorded when an export completed.
+///
+/// `schedule_id` is `None` for a manual export — the bundle exists but was not produced by
+/// any schedule. `path` is the bundle root, so a restore can be pointed at it and a prune
+/// can find it; `sha256` is the manifest checksum the restore re-verifies before staging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupFileRecord {
+    pub id: String,
+    pub schedule_id: Option<String>,
+    pub path: String,
+    pub size_bytes: i64,
+    pub sha256: String,
+    pub created_at: i64,
+}
+
+/// A bundle being recorded. The store assigns the id.
+#[derive(Debug, Clone)]
+pub struct NewBackupFile {
+    pub schedule_id: Option<String>,
+    pub path: String,
+    pub size_bytes: i64,
+    pub sha256: String,
+}
+
+/// The durable record of a node, mirroring the etcd heartbeat.
+///
+/// Written on heartbeat so "this node existed" survives etcd being unreachable; read by the
+/// nodes view alongside the live inventory. `reaped_at` is the only post-insert write: it is
+/// set when a peer deletes the heartbeat key, so a reaped node stays on the record as reaped
+/// rather than vanishing — the difference between "node left" and "never heard of it".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeStatusRecord {
+    pub node: String,
+    pub version: Option<String>,
+    pub config_version: Option<String>,
+    pub last_seen_at: i64,
+    pub reaped_at: Option<i64>,
+}
+
+/// A heartbeat write. `node` is the primary key, so an upsert refreshes the row in place.
+#[derive(Debug, Clone)]
+pub struct NewNodeStatus {
+    pub node: String,
+    pub version: Option<String>,
+    pub config_version: Option<String>,
+    pub last_seen_at: i64,
+}
+
 /// Everything the control plane stores.
 ///
 /// One trait rather than several, because the swap-out is all-or-nothing: a driver that
@@ -376,6 +507,31 @@ pub trait ControlPlaneStore: Send + Sync {
         now: i64,
     ) -> Result<Activity>;
     async fn read_activity(&self, range: TimeRange) -> Result<Vec<Activity>>;
+
+    // ---- alerts ------------------------------------------------------------------------
+    async fn create_notification_channel(
+        &self,
+        channel: NewNotificationChannel,
+        now: i64,
+    ) -> Result<NotificationChannel>;
+    async fn list_notification_channels(
+        &self,
+    ) -> Result<Vec<NotificationChannel>>;
+    async fn create_alert_rule(
+        &self,
+        rule: NewAlertRule,
+        now: i64,
+    ) -> Result<AlertRuleRecord>;
+    async fn list_alert_rules(&self) -> Result<Vec<AlertRuleRecord>>;
+    async fn record_alert_history(
+        &self,
+        entry: NewAlertHistory,
+        now: i64,
+    ) -> Result<AlertHistory>;
+    async fn read_alert_history(
+        &self,
+        range: TimeRange,
+    ) -> Result<Vec<AlertHistory>>;
 
     // ---- WAF findings ------------------------------------------------------------------
     /// Appends WAF findings, in one transaction for the whole slice.
@@ -482,6 +638,51 @@ pub trait ControlPlaneStore: Send + Sync {
         &self,
         limit: Option<u32>,
     ) -> Result<Vec<ConfigVersion>>;
+
+    // ---- backups ---------------------------------------------------------------
+    //
+    // `backup_schedules` is a writable registry the admin edits; `backup_files` is the
+    // inventory of bundles that exist on disk. Neither is append-only — a schedule is
+    // edited and a deleted bundle is removed from the listing — but both are audit-logged
+    // at the handler so the *change* is still on the record even though the row is not.
+
+    /// A backup schedule row as stored.
+    async fn list_backup_schedules(&self) -> Result<Vec<BackupScheduleRecord>>;
+    /// Create a schedule; a duplicate `name` is a [`StoreError::Conflict`].
+    async fn create_backup_schedule(
+        &self,
+        schedule: NewBackupSchedule,
+        now: i64,
+    ) -> Result<BackupScheduleRecord>;
+    /// Remove a schedule by id; a miss is [`StoreError::NotFound`].
+    async fn delete_backup_schedule(&self, schedule_id: &str) -> Result<()>;
+
+    /// The recorded bundles, newest first.
+    async fn list_backup_files(&self) -> Result<Vec<BackupFileRecord>>;
+    /// Record that a bundle was produced. The row is the inventory entry the listing and
+    /// the retention sweep agree on.
+    async fn record_backup_file(
+        &self,
+        file: NewBackupFile,
+        now: i64,
+    ) -> Result<BackupFileRecord>;
+
+    // ---- node liveness ---------------------------------------------------------
+    //
+    // `node_status` is the durable mirror of the etcd heartbeat: the heartbeat can be lost
+    // with etcd, but "was this node ever here" must survive it. `reaped_at` is the one
+    // field written after insert, so the table is update-shaped rather than append-only.
+
+    /// Every node the control plane has ever seen, whether currently live or reaped.
+    async fn list_node_status(&self) -> Result<Vec<NodeStatusRecord>>;
+    /// Insert or refresh a node's durable record on heartbeat.
+    async fn upsert_node_status(
+        &self,
+        node: NewNodeStatus,
+        now: i64,
+    ) -> Result<()>;
+    /// Mark a node reaped. Idempotent — a second sweep over the same node is a no-op.
+    async fn reap_node_status(&self, node: &str, now: i64) -> Result<()>;
 }
 
 #[cfg(test)]

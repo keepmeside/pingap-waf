@@ -26,8 +26,8 @@
 //! because the queue is bounded and a restore that ignored the bound would make the bound
 //! meaningless at the moment the store is struggling.
 
-use super::queue::{Admission, EventQueue};
 use crate::repository::ControlPlaneStore;
+use pingap_events::{Admission, EventQueue};
 use std::sync::Arc;
 use tracing::warn;
 

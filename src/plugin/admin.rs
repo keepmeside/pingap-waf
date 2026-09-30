@@ -139,6 +139,12 @@ pub struct AdminServe {
     /// Per-user sessions from the control-plane store. Replaces the shared
     /// `authorizations` list, which could not say who did anything.
     auth: LazyAdminAuth,
+    /// The control-plane store's path, kept so `/backup/export` can snapshot the file the
+    /// store is actually writing — not a guess at where it lives.
+    store_path: String,
+    /// Where `/backup/export` writes and `/backup/restore` reads. `None` disables both,
+    /// which the route surfaces as `Unavailable` naming the setting rather than as a crash.
+    backup_dir: Option<std::path::PathBuf>,
     /// The route table's state, built on first API request.
     ///
     /// Deferred for the same reason `auth` is: pingora forks for daemon mode after
@@ -282,6 +288,17 @@ impl AdminServe {
             });
         }
         let totp_key = get_str_conf(value, "totp_key");
+        // Where backups live. Absent is a valid choice: the routes then answer
+        // `Unavailable` naming the setting, rather than writing bundles to a path the
+        // operator never agreed to.
+        let backup_dir = {
+            let dir = get_str_conf(value, "backup_dir");
+            if dir.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(dir))
+            }
+        };
 
         let params = AdminServe {
             hash_value,
@@ -296,6 +313,8 @@ impl AdminServe {
                 category: "config_manager".to_string(),
                 message: e.to_string(),
             })?,
+            store_path: store_path.clone(),
+            backup_dir,
             auth: make_auth(
                 store_path,
                 bootstrap,
@@ -342,7 +361,23 @@ impl AdminServe {
                     Arc::new(applier),
                     auth.totp_guard(),
                     auth.totp_key(),
+                )
+                .with_config_source(Arc::new(
+                    crate::projection::ConfigManagerSource::new(
+                        self.manager.clone(),
+                    ),
                 ))
+                .with_store_file(std::path::PathBuf::from(
+                    self.store_path.clone(),
+                ))
+                .with_cluster(Arc::new(
+                    pingap_controlplane::cluster::ClusterInventory::new(
+                        self.manager.storage(),
+                        pingap_controlplane::cluster::LivenessPolicy::default(),
+                    )
+                    .map_err(|e| e.to_string())?,
+                ))
+                .with_optional_backup_dir(self.backup_dir.clone()))
             })
             .await
     }

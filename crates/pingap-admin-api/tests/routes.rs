@@ -28,7 +28,7 @@ use pingap_controlplane::projection::{
     Applier, ConfigSink, DataPlane, Intent, NoPluginCheck, Validator,
     plugin_config_key,
 };
-use pingap_controlplane::repository::TimeRange;
+use pingap_controlplane::repository::{NewPerformanceMetric, TimeRange};
 use pingap_controlplane::{
     AuthLevel, ConfigStatus, ControlPlaneStore, Role, TotpGuard, TursoStore,
 };
@@ -55,6 +55,7 @@ struct Reloaded {
 
 struct ReloadingSink {
     reloaded: Arc<Reloaded>,
+    path: std::path::PathBuf,
 }
 
 #[async_trait::async_trait]
@@ -63,6 +64,8 @@ impl ConfigSink for ReloadingSink {
         let config =
             pingap_config::PingapConfig::new(canonical_toml.as_bytes(), true)
                 .map_err(|e| e.to_string())?;
+        std::fs::write(&self.path, canonical_toml)
+            .map_err(|e| e.to_string())?;
         let mut running = self.reloaded.running.lock().expect("lock");
         running.clear();
         for (name, conf) in &config.plugins {
@@ -117,6 +120,7 @@ async fn api() -> Api {
         Arc::new(NoPluginCheck),
         Arc::new(ReloadingSink {
             reloaded: reloaded.clone(),
+            path: dir.path().join("gateway.toml"),
         }),
         reloaded,
         Duration::from_millis(0),
@@ -686,7 +690,7 @@ fn finding(domain: &str, verdict: Verdict, at: i64, rule: u32) -> WafEvent {
 
 /// The findings route filters, pages by time, and treats a bad parameter as no parameter.
 ///
-/// The last part is the behaviour worth pinning. These are filters, so an unparseable `since`
+/// The last part is the behaviour worth pinning. These are filters, so an unparsable `since`
 /// is ignored rather than refused — answering a malformed bookmark with a 400 would break it
 /// the moment a parameter's shape changed. An *empty* one is ignored too, because a UI that
 /// clears a text input sends `?domain=` and treating that as a domain named "" would return
@@ -748,7 +752,7 @@ async fn the_findings_route_filters_and_pages_by_time() {
     assert_eq!(
         domains(&api, "since=not-a-number").await.len(),
         3,
-        "an unparseable filter was refused or treated as a value"
+        "an unparsable filter was refused or treated as a value"
     );
     assert_eq!(
         domains(&api, "domain=").await.len(),
@@ -759,5 +763,321 @@ async fn the_findings_route_filters_and_pages_by_time() {
         domains(&api, "blocked=perhaps").await.len(),
         3,
         "an unrecognised flag silently meant `false`"
+    );
+}
+
+fn metric(name: &str, value: f64, at: i64) -> NewPerformanceMetric {
+    NewPerformanceMetric {
+        node: "node-a".to_string(),
+        metric: name.to_string(),
+        value,
+        bucket_start: at,
+        bucket_secs: 60,
+    }
+}
+
+#[tokio::test]
+async fn performance_reads_stored_rollups_in_time_order() {
+    let mut api = api().await;
+    api.admin.role = Role::Viewer;
+    api.admin.auth_level = AuthLevel::PasswordOnly;
+    api.store
+        .record_performance_metrics(&[
+            metric("waf.findings", 8.0, 180),
+            metric("waf.blocks", 2.0, 120),
+            metric("waf.findings", 4.0, 60),
+        ])
+        .await
+        .expect("rollups write");
+    for (query, expected) in [
+        ("", vec![60, 120, 180]),
+        ("metric=waf.findings", vec![60, 180]),
+        ("since=120&until=180", vec![120, 180]),
+        ("limit=1", vec![60]),
+        ("metric=", vec![60, 120, 180]),
+        ("metric=%27%20OR%201%3D1%20--", vec![]),
+    ] {
+        let response =
+            send_query(&api, Method::GET, "/performance", query).await;
+        assert_eq!(response.status, StatusCode::OK, "{query}: {response:?}");
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["bucket_start"].as_i64().expect("timestamp"))
+                .collect::<Vec<_>>(),
+            expected,
+            "{query}"
+        );
+        for row in &rows {
+            assert_eq!(row["node"], "node-a");
+            assert_eq!(row["bucket_secs"], 60);
+        }
+        if query == "metric=waf.findings" {
+            assert_eq!(rows[0]["value"], 4.0);
+            assert_eq!(rows[1]["value"], 8.0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn metric_reads_reject_invalid_or_unbounded_windows() {
+    let api = api().await;
+    for path in ["/performance", "/dashboard"] {
+        for query in [
+            "since=x",
+            "until=x",
+            "since=20&until=10",
+            "limit=0",
+            "limit=1001",
+            "limit=-1",
+        ] {
+            let response = send_query(&api, Method::GET, path, query).await;
+            assert_eq!(
+                response.status,
+                StatusCode::BAD_REQUEST,
+                "{path}?{query}: {response:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn dashboard_reads_rollups_not_raw_findings_and_never_guesses_drift() {
+    let api = api().await;
+    api.store
+        .record_waf_events(&[finding("site.test", Verdict::Block, 120, 942100)])
+        .await
+        .expect("finding writes");
+    let response = send_query(&api, Method::GET, "/dashboard", "").await;
+    assert_eq!(response.status, StatusCode::OK, "{response:?}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(body["metrics"], serde_json::json!([]));
+    assert_eq!(body["drift"]["status"], "unavailable");
+
+    api.store
+        .record_performance_metrics(&[metric("waf.blocks", 7.0, 120)])
+        .await
+        .expect("rollup writes");
+    let response =
+        send_query(&api, Method::GET, "/dashboard", "since=120&until=120")
+            .await;
+    assert_eq!(response.status, StatusCode::OK, "{response:?}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(body["metrics"].as_array().expect("metrics").len(), 1);
+    assert_eq!(body["metrics"][0]["value"], 7.0);
+    assert!(
+        api.store
+            .read_activity(TimeRange::default())
+            .await
+            .expect("audit")
+            .is_empty()
+    );
+}
+
+struct ConfigFile(std::path::PathBuf);
+
+#[async_trait::async_trait]
+impl pingap_controlplane::projection::ConfigSource for ConfigFile {
+    async fn current(&self) -> Result<pingap_config::PingapConfig, String> {
+        let contents = std::fs::read(&self.0).map_err(|e| e.to_string())?;
+        pingap_config::PingapConfig::new(&contents, true)
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[tokio::test]
+async fn dashboard_checks_stored_config_without_exposing_or_correcting_it() {
+    let mut api = api().await;
+    let path = api._dir.path().join("gateway.toml");
+    api.state = api
+        .state
+        .with_config_source(Arc::new(ConfigFile(path.clone())));
+
+    let response = send(&api, Method::GET, "/dashboard", "").await;
+    assert_eq!(response.status, StatusCode::OK, "{response:?}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(body["drift"]["status"], "no_baseline");
+
+    assert_eq!(
+        send(&api, Method::PUT, "/upstreams/app", UPSTREAM)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let applied = api
+        .store
+        .latest_applied_config_version()
+        .await
+        .expect("read")
+        .expect("version");
+    api.admin.role = Role::Viewer;
+    api.admin.auth_level = AuthLevel::PasswordOnly;
+    let response = send(&api, Method::GET, "/dashboard", "").await;
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(body["drift"]["status"], "in_sync");
+    assert_eq!(body["drift"]["version_id"], applied.id);
+
+    let original = std::fs::read_to_string(&path).expect("committed config");
+    let edited = format!(
+        "{original}\n[plugins.manual]\ncategory = 'basic_auth'\nauthorization = 'DO-NOT-EXPOSE'\n"
+    );
+    std::fs::write(&path, &edited).expect("out-of-band edit");
+    let response = send(&api, Method::GET, "/dashboard", "").await;
+    assert_eq!(response.status, StatusCode::OK, "{response:?}");
+    assert!(!String::from_utf8_lossy(&response.body).contains("DO-NOT-EXPOSE"));
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(body["drift"]["status"], "detected");
+    assert_eq!(body["drift"]["version_id"], applied.id);
+    assert_eq!(body["drift"]["expected_hash"], applied.hash);
+    assert_ne!(body["drift"]["actual_hash"], applied.hash);
+    assert_eq!(body["drift"]["differing"], serde_json::json!(["plugins"]));
+    assert_eq!(std::fs::read_to_string(&path).expect("read back"), edited);
+
+    // Parse diagnostics can include the line carrying a secret. Never return them to viewers.
+    std::fs::write(&path, "[plugins.manual]\nsecret = DO-NOT-EXPOSE")
+        .expect("bad edit");
+    let response = send(&api, Method::GET, "/dashboard", "").await;
+    assert_eq!(response.status, StatusCode::OK, "{response:?}");
+    assert!(!String::from_utf8_lossy(&response.body).contains("DO-NOT-EXPOSE"));
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(body["drift"]["status"], "unavailable");
+    assert_eq!(
+        api.store
+            .list_config_versions(None)
+            .await
+            .expect("versions")
+            .len(),
+        1
+    );
+    assert_eq!(
+        api.store
+            .read_activity(TimeRange::default())
+            .await
+            .expect("audit")
+            .len(),
+        1
+    );
+}
+
+/// `GET /nodes` without a shared backend reports `Unavailable`, not an empty cluster.
+///
+/// The fixture wires no `ClusterInventory`, which is the shape a single-node deployment
+/// takes — and the honest answer is "there is no inventory to read", not "zero peers",
+/// which would read as either a healthy cluster or a reaping bug.
+#[tokio::test]
+async fn nodes_with_no_shared_backend_is_unavailable_not_empty() {
+    let api = api().await;
+    let response = send(&api, Method::GET, "/nodes", "").await;
+    assert_eq!(
+        response.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{response:?}"
+    );
+}
+
+/// `GET /backup` returns the empty registry when nothing is scheduled and nothing exported.
+#[tokio::test]
+async fn backup_lists_schedules_and_files_empty() {
+    let api = api().await;
+    let response = send(&api, Method::GET, "/backup", "").await;
+    assert_eq!(response.status, StatusCode::OK, "{response:?}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(body["schedules"], serde_json::json!([]));
+    assert_eq!(body["files"], serde_json::json!([]));
+}
+
+/// A schedule is created, listed, and removed — and the audit trail names each write.
+#[tokio::test]
+async fn a_backup_schedule_round_trips_and_is_audited() {
+    let api = api().await;
+
+    let response = send(
+        &api,
+        Method::POST,
+        "/backup/schedules",
+        r#"{"name":"nightly","cron":"0 3 * * *","retain":7,"enabled":true}"#,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK, "{response:?}");
+    let created: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    let id = created["id"].as_str().expect("an id");
+    assert_eq!(created["name"], "nightly");
+
+    // A duplicate name is a conflict — the schedule is keyed by name so an operator can
+    // address it.
+    let response = send(
+        &api,
+        Method::POST,
+        "/backup/schedules",
+        r#"{"name":"nightly","cron":"0 4 * * *","retain":7,"enabled":true}"#,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::CONFLICT, "{response:?}");
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &send(&api, Method::GET, "/backup", "").await.body,
+    )
+    .expect("json");
+    assert_eq!(body["schedules"].as_array().expect("a list").len(), 1);
+
+    let response =
+        send(&api, Method::DELETE, &format!("/backup/schedules/{id}"), "")
+            .await;
+    assert_eq!(response.status, StatusCode::NO_CONTENT, "{response:?}");
+
+    // Deleting it again is a 404, not a quiet second success.
+    let response =
+        send(&api, Method::DELETE, &format!("/backup/schedules/{id}"), "")
+            .await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND, "{response:?}");
+
+    let actions: Vec<String> = api
+        .store
+        .read_activity(TimeRange::default())
+        .await
+        .expect("audit")
+        .into_iter()
+        .map(|row| row.action)
+        .collect();
+    assert!(actions.iter().any(|a| a == "backup.schedule.create"));
+    assert!(actions.iter().any(|a| a == "backup.schedule.delete"));
+}
+
+/// Export and restore refuse cleanly when the deployment set no backup directory.
+///
+/// The fixture builds `AppState` without `backup_dir`, which is the shape an operator
+/// gets when `backup_dir` is unset — and the answer names the setting rather than writing
+/// to a path nobody agreed to.
+#[tokio::test]
+async fn backup_export_and_restore_are_unavailable_without_a_backup_dir() {
+    let api = api().await;
+
+    let response = send(&api, Method::POST, "/backup/export", "").await;
+    assert_eq!(
+        response.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{response:?}"
+    );
+
+    let response = send(
+        &api,
+        Method::POST,
+        "/backup/restore",
+        r#"{"path":"/tmp/whatever"}"#,
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{response:?}"
     );
 }

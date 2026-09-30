@@ -1,0 +1,1 @@
+(()=>{const token=document.querySelector('input[name="challenge_token"]')?.value;if(!token)return;const fp=[navigator.userAgent,navigator.language,screen.width+'x'+screen.height].join('|');document.cookie='pingap_challenge_fp='+encodeURIComponent(token+'|'+fp)+'; Max-Age=300; Path=/; Secure; SameSite=Lax';})();

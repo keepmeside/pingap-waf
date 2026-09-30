@@ -878,7 +878,7 @@ async fn a_code_spent_by_the_login_path_cannot_remove_the_second_factor() {
 ///
 /// The other fixtures store a hash-shaped string that `verify_password` refuses to parse,
 /// which is the right thing for a route that never checks a password and the wrong thing for
-/// one that does: a password test over an unparseable hash would be testing the corrupt-hash
+/// one that does: a password test over an unparsable hash would be testing the corrupt-hash
 /// path and passing for the wrong reason.
 async fn user_with_two_sessions(
     api: &Api,

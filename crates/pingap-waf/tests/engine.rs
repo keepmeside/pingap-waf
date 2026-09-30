@@ -183,6 +183,18 @@ fn two_sub_threshold_rules_block_in_sum_and_every_id_is_reported() {
 }
 
 #[test]
+fn challenge_mode_returns_a_challenge_verdict_instead_of_a_block() {
+    let e = engine(
+        config(&[("sql_injection", RawMode::Challenge)]),
+        two_warning_rules(1),
+    );
+    let result = e.evaluate_request(&uri("/?q=union+select+1"));
+    assert!(result.verdict.is_challenge());
+    assert!(result.verdict.is_enforcing());
+    assert_eq!(result.verdict.score(), 6);
+}
+
+#[test]
 fn lowering_paranoia_below_the_rules_allows_the_same_request() {
     let request = uri("/?q=union+select+1");
 

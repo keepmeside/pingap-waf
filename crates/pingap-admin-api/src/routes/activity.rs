@@ -19,7 +19,7 @@ use pingap_controlplane::repository::TimeRange;
 
 /// `since`, `until` and `limit`, all optional.
 ///
-/// An unparseable value is ignored rather than refused, and that is the one place in this
+/// An unparsable value is ignored rather than refused, and that is the one place in this
 /// crate where that is right: the range is a *filter*, and answering a malformed `since` with
 /// 400 would break an operator's bookmarked URL when the shape of the parameter changed.
 /// Compare the request DTOs, where an unknown field means the caller believes they set

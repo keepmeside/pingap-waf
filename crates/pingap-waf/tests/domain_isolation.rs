@@ -14,6 +14,14 @@
 //! guarantee than keying state by domain, but it is only worth anything if it is
 //! actually checked, because the natural way to add a counter later is to put it on the
 //! plugin.
+//!
+//! **That answer holds for this plugin and is no longer the fork's only answer.** The
+//! intelligence, challenge, behavioural and adaptive controls do hold verdict-affecting state,
+//! and they isolate by *keying* on `(domain, client identity)` rather than by holding nothing.
+//! Keying is the strictly weaker guarantee, so it carries the strictly stronger test: see
+//! `crates/pingap-domainstate/tests/isolation.rs`, which asserts isolation against a
+//! process-global store rather than a local one. This file keeps its own criterion intact and
+//! unchanged — a WAF verdict must still not depend on anything but the request.
 #![cfg(feature = "plugin")]
 
 use pingap_config::PluginConf;
@@ -51,6 +59,21 @@ categories = { sql_injection = "detect", xss = "detect" }
 const MALICIOUS: &str =
     "GET /s?q=%27+UNION+SELECT+pw+FROM+users+--+ HTTP/1.1\r\n\r\n";
 const BENIGN: &str = "GET /products?page=2&sort=price HTTP/1.1\r\n\r\n";
+
+/// The same two requests, under two `Host` values.
+///
+/// The pair above carries no `Host` at all, so it cannot distinguish a plugin that keys on
+/// nothing from one that keys on a host it never sees vary. These can. Alternating two tenants
+/// through one instance is also what a shared named profile actually sees in production, which
+/// makes this the driver the stateful controls extend rather than a new idea.
+const MALICIOUS_TENANT_A: &str = "GET /s?q=%27+UNION+SELECT+pw+FROM+users+--+ HTTP/1.1\r\n\
+     Host: tenant-a.example\r\n\r\n";
+const MALICIOUS_TENANT_B: &str = "GET /s?q=%27+UNION+SELECT+pw+FROM+users+--+ HTTP/1.1\r\n\
+     Host: tenant-b.example\r\n\r\n";
+const BENIGN_TENANT_A: &str = "GET /products?page=2&sort=price HTTP/1.1\r\n\
+     Host: tenant-a.example\r\n\r\n";
+const BENIGN_TENANT_B: &str = "GET /products?page=2&sort=price HTTP/1.1\r\n\
+     Host: tenant-b.example\r\n\r\n";
 
 fn plugin(conf: &str) -> Waf {
     Waf::try_from(
@@ -166,5 +189,42 @@ async fn a_blocking_profile_and_an_audit_profile_do_not_share_a_threshold() {
             "the audit profile blocked, so a threshold crossed elsewhere reached it"
         );
         assert_eq!(state.expect("state recorded").profile, "audit-only");
+    }
+}
+
+#[tokio::test]
+async fn alternating_hosts_through_one_instance_do_not_move_a_verdict() {
+    // The stronger form of the criterion above, and the driver a stateful control has to
+    // survive too. This one passes because the instance still holds nothing to key; the same
+    // shape pointed at the keyed container is what proves the keying, and that test lives with
+    // the container.
+    let shared = plugin(AUDIT_ONLY);
+
+    let (_, first) = run(&shared, MALICIOUS_TENANT_A).await;
+    let first = first.expect("state recorded");
+
+    for round in 0..100 {
+        let request = if round % 2 == 0 {
+            MALICIOUS_TENANT_A
+        } else {
+            MALICIOUS_TENANT_B
+        };
+        let (_, other) = run(&shared, request).await;
+        let other = other.expect("state recorded");
+        assert_eq!(
+            other.score, first.score,
+            "the score moved between requests, so the instance is accumulating per host"
+        );
+        assert_eq!(other.hits.len(), first.hits.len());
+    }
+
+    // Neither tenant's benign traffic inherits anything from the other's attack traffic.
+    for request in [BENIGN_TENANT_A, BENIGN_TENANT_B] {
+        let (blocked, state) = run(&shared, request).await;
+        assert!(!blocked);
+        assert!(
+            state.is_none_or(|s| s.hits.is_empty() && s.score == 0),
+            "a benign request inherited findings from the traffic before it"
+        );
     }
 }

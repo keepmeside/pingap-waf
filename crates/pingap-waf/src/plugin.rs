@@ -19,12 +19,15 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use ctor::ctor;
 use http::StatusCode;
+use pingap_acl::ChallengeMarker;
 use pingap_config::PluginConf;
 use pingap_core::{
     Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
     ResponseBodyPluginResult, ensure_client_ip, new_internal_error,
     trusted_proxies_enabled,
 };
+use pingap_events::{Verdict as EventVerdict, WafEvent};
+use pingap_intel::{FeedMatch, FeedRegistry};
 use pingap_plugin::{
     Error, get_hash_key, get_plugin_factory, get_step_conf_in,
 };
@@ -74,12 +77,23 @@ pub struct WafState {
     pub enforcing_score: u32,
     /// Whether the request was rejected by this plugin.
     pub blocked: bool,
+    /// Whether the WAF requested the challenge tier instead of a hard block.
+    pub challenged: bool,
     /// Whether any inspected body had bytes the engine never saw.
     pub truncated: bool,
     /// Whether evaluation ran out of budget on any surface.
     pub budget_exhausted: bool,
     /// Whether a response body was masked.
     pub redacted: bool,
+    /// Feed attribution for an IP refusal, when intelligence contributed it.
+    pub intel_feed: Option<String>,
+    pub intel_category: Option<String>,
+    pub emitted_hits: usize,
+    pub domain: String,
+    pub client_ip: Option<String>,
+    pub method: String,
+    pub uri: String,
+    terminal_emitted: bool,
 }
 
 impl WafState {
@@ -87,6 +101,70 @@ impl WafState {
         self.hits.extend_from_slice(hits);
         self.score = self.score.saturating_add(score);
         self.enforcing_score = self.enforcing_score.saturating_add(enforcing);
+    }
+}
+
+fn event_verdict(state: &WafState) -> EventVerdict {
+    if state.blocked {
+        EventVerdict::Block
+    } else if state.redacted {
+        EventVerdict::Redact
+    } else {
+        EventVerdict::Detect
+    }
+}
+
+fn offer_new_events(ctx: &mut Ctx, terminal: bool) {
+    let Some(queue) = pingap_events::global() else {
+        return;
+    };
+    let (events, aggregate) = {
+        let Some(state) = ctx.extensions.get_mut::<WafState>() else {
+            return;
+        };
+        let mut events = Vec::new();
+        for hit in state.hits[state.emitted_hits..].iter() {
+            events.push(WafEvent {
+                node: state.domain.clone(),
+                domain: state.domain.clone(),
+                profile: state.profile.clone(),
+                rule_id: Some(hit.rule_id.get()),
+                category: Some(hit.category.to_string()),
+                severity: Some(hit.severity.to_string()),
+                score: hit.score,
+                verdict: event_verdict(state),
+                client_ip: state.client_ip.clone(),
+                method: Some(state.method.clone()),
+                uri: Some(state.uri.clone()),
+                created_at: pingap_core::now_sec() as i64,
+            });
+        }
+        state.emitted_hits = state.hits.len();
+        let aggregate =
+            terminal && events.is_empty() && !state.terminal_emitted;
+        if aggregate {
+            state.terminal_emitted = true;
+        }
+        (events, aggregate)
+    };
+    for event in events {
+        let _ = queue.offer(event);
+    }
+    if aggregate && let Some(state) = ctx.extensions.get::<WafState>() {
+        let _ = queue.offer(WafEvent {
+            node: state.domain.clone(),
+            domain: state.domain.clone(),
+            profile: state.profile.clone(),
+            rule_id: None,
+            category: state.intel_category.clone(),
+            severity: None,
+            score: state.score,
+            verdict: event_verdict(state),
+            client_ip: state.client_ip.clone(),
+            method: Some(state.method.clone()),
+            uri: Some(state.uri.clone()),
+            created_at: pingap_core::now_sec() as i64,
+        });
     }
 }
 
@@ -109,6 +187,7 @@ pub struct Waf {
     plugin_step: PluginStep,
     engine: RuleEngine,
     ip_filter: Option<IpFilter>,
+    intel: Option<Arc<FeedRegistry>>,
     over_cap: OverCap,
     body_limit: usize,
     response_prefix_limit: usize,
@@ -125,7 +204,7 @@ impl TryFrom<&PluginConf> for Waf {
     fn try_from(value: &PluginConf) -> Result<Self> {
         let hash_value = get_hash_key(value);
         // Strict, not `get_step_conf`: that one falls back to the default on an
-        // unparseable value, which for a WAF means a typo in `step` produces a
+        // unparsable value, which for a WAF means a typo in `step` produces a
         // plugin that silently never runs. Failing loudly is the only acceptable
         // behaviour for a security control.
         let plugin_step = get_step_conf_in(
@@ -154,6 +233,21 @@ impl TryFrom<&PluginConf> for Waf {
             .map_err(|e| invalid(format!("waf config: {e}")))?;
 
         let validated = waf.validate().map_err(|e| invalid(e.to_string()))?;
+        let intel_conf = validated.intel.clone();
+        let has_static_deny = !extras.ip_list.is_empty()
+            || !intel_conf.manual.is_empty()
+            || crate::categories::Category::ALL.iter().any(|category| {
+                matches!(
+                    validated.request_mode(*category),
+                    crate::config::RequestMode::Block
+                )
+            });
+        if !intel_conf.feed.is_empty() && !has_static_deny {
+            return Err(invalid(format!(
+                "WAF profile `{}` selects threat feeds but declares no static deny source; add `ip_list`, `intel.manual`, or a request category with `mode = \"block\"`",
+                validated.profile
+            )));
+        }
         let engine = RuleEngine::build(
             validated,
             crate::detectors::request_rules(),
@@ -162,6 +256,19 @@ impl TryFrom<&PluginConf> for Waf {
         .map_err(|e| invalid(e.to_string()))?;
 
         let ip_filter = Self::build_ip_filter(&extras).map_err(invalid)?;
+        let intel =
+            if intel_conf.feed.is_empty() && intel_conf.manual.is_empty() {
+                None
+            } else {
+                let plan = pingap_intel::config::plan([(
+                    hash_value.as_str(),
+                    &intel_conf,
+                )])
+                .map_err(|error| invalid(error.to_string()))?;
+                let registry = Arc::new(FeedRegistry::new(plan));
+                let _ = pingap_intel::install_global_registry(registry.clone());
+                Some(registry)
+            };
 
         Ok(Self {
             plugin_step,
@@ -170,6 +277,7 @@ impl TryFrom<&PluginConf> for Waf {
             profile: engine.config().profile.clone(),
             engine,
             ip_filter,
+            intel,
             over_cap: extras.over_cap,
             forbidden: HttpResponse {
                 status: StatusCode::FORBIDDEN,
@@ -193,6 +301,12 @@ impl Waf {
             state.profile = self.profile.clone();
         }
         state
+    }
+
+    fn record_intel(state: &mut WafState, matched: FeedMatch) {
+        state.intel_feed = matched.feed;
+        state.intel_category = matched.category;
+        state.blocked = true;
     }
 
     /// Build the IP filter, refusing the two configurations that would be worse than
@@ -298,6 +412,8 @@ fn emit_verdict(ctx: &mut Ctx) {
         };
         let action = if state.blocked {
             "block"
+        } else if state.challenged {
+            "challenge"
         } else if state.redacted {
             "redact"
         } else if state.hits.is_empty() {
@@ -329,6 +445,12 @@ fn emit_verdict(ctx: &mut Ctx) {
             if let Some(severity) = worst {
                 fields.push(("waf_severity", severity.to_string()));
             }
+        }
+        if let Some(feed) = &state.intel_feed {
+            fields.push(("waf_intel_feed", feed.clone()));
+        }
+        if let Some(category) = &state.intel_category {
+            fields.push(("waf_intel_category", category.clone()));
         }
         // The two caveats an operator needs even on a request that was allowed, because both
         // mean the verdict covers less than it looks like: bytes the engine never saw, and an
@@ -372,6 +494,20 @@ impl Plugin for Waf {
             return Ok(RequestPluginResult::Skipped);
         }
 
+        let method = session.req_header().method.as_str().to_string();
+        let uri = session.req_header().uri.to_string();
+        let client_ip = ensure_client_ip(session, ctx).to_string();
+        let domain = pingap_core::get_host(session.req_header())
+            .map(str::to_string)
+            .unwrap_or_else(|| ctx.upstream.location.to_string());
+        {
+            let state = self.state(ctx);
+            state.domain = domain;
+            state.client_ip = Some(client_ip);
+            state.method = method;
+            state.uri = uri;
+        }
+
         // Cheapest work first, and it uses the gateway's own resolver so the WAF and
         // the access log can never disagree about who the client is.
         if let Some(filter) = &self.ip_filter {
@@ -381,6 +517,20 @@ impl Plugin for Waf {
                 let state = self.state(ctx);
                 state.blocked = true;
                 emit_verdict(ctx);
+                offer_new_events(ctx, true);
+                return Ok(RequestPluginResult::Respond(
+                    self.forbidden.clone(),
+                ));
+            }
+        }
+
+        if let Some(intel) = &self.intel {
+            let ip = ensure_client_ip(session, ctx).parse().ok();
+            if let Some(ip) = ip.and_then(|ip| intel.matches(&ip)) {
+                let state = self.state(ctx);
+                Self::record_intel(state, ip);
+                emit_verdict(ctx);
+                offer_new_events(ctx, true);
                 return Ok(RequestPluginResult::Respond(
                     self.forbidden.clone(),
                 ));
@@ -415,13 +565,28 @@ impl Plugin for Waf {
             evaluation.enforcing_score,
         );
         state.budget_exhausted |= evaluation.exhausted.is_some();
-        state.blocked |= blocking;
+        if evaluation.verdict.is_challenge() {
+            state.challenged = true;
+        } else {
+            state.blocked |= blocking;
+        }
 
         if blocking {
+            if evaluation.verdict.is_challenge() {
+                ctx.extensions.insert(ChallengeMarker::new(
+                    CATEGORY,
+                    "anomaly-threshold".to_string(),
+                ));
+                emit_verdict(ctx);
+                offer_new_events(ctx, true);
+                return Ok(RequestPluginResult::Continue);
+            }
             emit_verdict(ctx);
+            offer_new_events(ctx, true);
             return Ok(RequestPluginResult::Respond(self.forbidden.clone()));
         }
         emit_verdict(ctx);
+        offer_new_events(ctx, true);
         Ok(RequestPluginResult::Continue)
     }
 
@@ -470,6 +635,7 @@ impl Plugin for Waf {
                 let state = self.state(ctx);
                 state.blocked = true;
                 emit_verdict(ctx);
+                offer_new_events(ctx, true);
                 return Err(new_internal_error(
                     413,
                     format!(
@@ -509,6 +675,7 @@ impl Plugin for Waf {
             // Nothing is released, so the upstream sees none of it.
             *body = None;
             emit_verdict(ctx);
+            offer_new_events(ctx, true);
             return Err(new_internal_error(
                 403,
                 "waf: request body rejected".to_string(),
@@ -519,6 +686,7 @@ impl Plugin for Waf {
         // would allocate a handful of strings per chunk to overwrite the same values.
         if end_of_stream {
             emit_verdict(ctx);
+            offer_new_events(ctx, true);
         }
         Ok(())
     }
@@ -541,6 +709,7 @@ impl Plugin for Waf {
             self.scan_response::<UpstreamBody>(ctx, body, end_of_stream);
         if end_of_stream {
             emit_verdict(ctx);
+            offer_new_events(ctx, true);
         }
         result
     }
@@ -563,6 +732,7 @@ impl Plugin for Waf {
             self.scan_response::<DownstreamBody>(ctx, body, end_of_stream);
         if end_of_stream {
             emit_verdict(ctx);
+            offer_new_events(ctx, true);
         }
         result
     }
@@ -782,6 +952,36 @@ categories = { sql_injection = "block", xss = "block", data_leakage = "redact", 
     }
 
     #[tokio::test]
+    async fn challenge_mode_writes_a_marker_and_continues_to_the_next_plugin() {
+        let waf = plugin(
+            r#"category = "waf"
+anomaly_threshold = 1
+categories = { sql_injection = "challenge" }
+"#,
+        );
+        let mut ctx = Ctx::default();
+        let mut session = session_for(
+            "GET /s?q=%27+UNION+SELECT+pw+FROM+users+--+ HTTP/1.1\r\n\r\n",
+        )
+        .await;
+        let result = waf
+            .handle_request(PluginStep::Request, &mut session, &mut ctx)
+            .await
+            .expect("evaluation is total");
+        assert!(matches!(result, RequestPluginResult::Continue));
+        let marker = ctx
+            .extensions
+            .get::<ChallengeMarker>()
+            .expect("challenge marker");
+        assert_eq!(marker.source, "waf");
+        assert!(
+            ctx.extensions
+                .get::<WafState>()
+                .is_some_and(|state| state.challenged)
+        );
+    }
+
+    #[tokio::test]
     async fn an_ip_list_without_trusted_proxies_fails_to_construct() {
         // Without a trusted-proxy list, forwarded headers are trusted
         // unconditionally, so the address an IP list is matched against is one the
@@ -815,6 +1015,28 @@ categories = { sql_injection = "block", xss = "block", data_leakage = "redact", 
             err.to_string().contains("reject every request"),
             "the error must say what would happen: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn feed_only_policy_fails_without_a_static_deny_source() {
+        let err = match Waf::try_from(
+            &toml::from_str::<PluginConf>(
+                r#"category = "waf"
+
+[intel]
+[[intel.feed]]
+name = "example"
+url = "https://example.invalid/list"
+"#,
+            )
+            .expect("parses"),
+        ) {
+            Err(error) => error,
+            Ok(_) => {
+                panic!("feed-only policy must fail closed at construction")
+            },
+        };
+        assert!(err.to_string().contains("no static deny source"));
     }
 
     /// A blocked request publishes its verdict as access-log variables.
