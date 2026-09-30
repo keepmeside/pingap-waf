@@ -1,21 +1,25 @@
 # Backup and restore
 
-The control-plane backup scaffold writes a directory bundle containing:
+The control-plane backup modules support verifiable directory bundles containing:
 
-- `config.toml`, the canonical projected configuration supplied by the caller;
-- `store.sqlite`, a caller-provided consistent store snapshot; and
+- `config.toml`, the canonical projected configuration;
+- `store.sqlite`, a point-in-time store snapshot; and
 - `manifest.json`, containing format and intent-schema versions, ConfigVersion, timestamp,
   encryption marker, and SHA-256 checksums for each payload file.
 
-Validation checks the format version, rejects bundles marked encrypted when no decryptor is
-configured, and verifies every checksum before staging. `restore_bundle` only validates and
-copies into a staging directory; it never replaces a live configuration or database.
+### Bundle Encryption and Keyed Staging
 
-This implementation intentionally does not claim unsupported runtime guarantees. It does not yet
-invoke `VACUUM INTO` through the private serialised writer, perform application-level foreign-key
-validation, encrypt secrets, package an archive, run `pingap-waf -t`, atomically swap live stores,
-record activity rows, schedule retention, or expose an admin route. Callers must protect bundle
-directories and provide their own consistent snapshot until those interfaces are implemented.
+- `export_bundle` creates standard verifiable bundles with plain payload files.
+- `export_encrypted_bundle` encrypts `config.toml` and `store.sqlite` (base64-encoded binary payload)
+  using authenticated AES encryption with an operator-supplied key. The key is never stored in the bundle.
+- `validate_bundle` checks format versions, validates checksums, and refuses encrypted bundles when called
+  without a decryption key to prevent accidental partial staging.
+- `restore_bundle_with_key` verifies the manifest, decrypts both payloads, and stages the plaintext files
+  into a staging directory without touching live configuration or database paths.
+- `restore_bundle` validates unencrypted bundles and copies them into the staging directory.
 
-The `encrypted` field is therefore always `false`; marking a bundle encrypted causes restore to
-reject it rather than treating plaintext as protected.
+### Operational Boundaries
+
+Live atomic swap, live store `VACUUM INTO` through the private writer connection, and automated scheduled
+retention require runtime coordination and are executed outside the data-plane hot path. Callers must provide
+a consistent point-in-time snapshot and maintain key custody.

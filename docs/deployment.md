@@ -1,8 +1,10 @@
 # Docker deployment
 
 The supported container deployment uses `docker compose`. It publishes only the
-public data plane on ports 80 and 443. The admin listener is bound to loopback
-by default (`127.0.0.1:3018`) and etcd is on an internal-only network.
+public data plane on ports 80 and 443. The admin listener binds the internal
+`control` network's pinned address (`172.30.0.10:3018`) — reachable from the host
+(and over an SSH tunnel to it) at that address, and absent from the public
+data-plane network entirely. etcd is on the same internal-only network.
 
 ## First install
 
@@ -19,5 +21,7 @@ The first successful admin bootstrap creates the account; retain the `.env` file
 outside source control and rotate the password after first login.
 
 For local development, use `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build`.
-The pull overlay is intentionally limited to the loopback admin port and does
-not publish metrics or etcd.
+The dev and pull overlays re-bind admin to `127.0.0.1:3018` and publish it on
+loopback for a single-machine setup — a deliberate convenience for a host that is
+not the production posture; the production `docker-compose.yml` keeps admin on the
+internal control network instead. Neither overlay publishes metrics or etcd.

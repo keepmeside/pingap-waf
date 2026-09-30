@@ -29,6 +29,10 @@ and the outcome is whatever the first `allow` or `deny` that matches says. There
 rules are a classic source of accidental exposure, and every heuristic that tries to be
 clever about them makes the list harder to reason about than the exposure was worth.
 
+`challenge` is terminal for the rule walk, but it is not a denial: it writes a marker for
+the later `challenge` plugin. Put `challenge` after this ACL entry in the Location plugin
+list so the marker is consumed before the request reaches the upstream.
+
 `log` is **not** terminal. It records the match and evaluation continues. If it stopped,
 adding a `log` rule for visibility would silently disable every rule below it, turning an
 observability change into a policy change.
@@ -42,7 +46,7 @@ listed".
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `step` | `request` | Only `request` is accepted. A typo fails at config load rather than producing an access control that never runs |
-| `default_action` | `allow` | `allow` or `deny`, applied when no rule reached a terminal action |
+| `default_action` | `allow` | `allow`, `deny`, or `challenge`, applied when no rule reached a terminal action |
 | `rules` | none | Array of rule tables, evaluated in written order |
 | `access_list` | none | An inline gate; see below |
 | `realm` | `Restricted` | Shown in the `WWW-Authenticate` challenge |
@@ -59,7 +63,7 @@ is accepted.
 | `field` | required | `ip`, `geo_country`, `user_agent`, `referer`, `method`, `header` |
 | `operator` | required | `equals`, `contains`, `regex`, `in_cidr`, `in_list` |
 | `values` | required | Any one matching makes the rule match |
-| `action` | required | `allow`, `deny`, `log` |
+| `action` | required | `allow`, `deny`, `challenge`, `log` |
 | `header` | — | Which header, and required when `field = "header"` |
 | `order` | `0` | Sorting hint for stores that do not preserve insertion order |
 | `enabled` | `true` | A disabled rule is skipped, not deleted |

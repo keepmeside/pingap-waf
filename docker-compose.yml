@@ -4,12 +4,22 @@ services:
     image: pingap-waf:local
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-      - "127.0.0.1:3018:3018"
+      - "${PINGAP_HTTP_PORT:-80}:80"
+      - "${PINGAP_HTTPS_PORT:-443}:443"
+      # No host publish for admin: the admin listener binds the control network's pinned
+      # address (172.30.0.10), which the host — and an operator reaching the host over SSH —
+      # reaches directly at http://172.30.0.10:3018. It is never on the public data-plane
+      # network. A `127.0.0.1:port:3018` publish would DNAT to the container's *public* iface
+      # where admin does not listen, so it would look like a dead endpoint; the internal-IP
+      # path is the real operator door and is what docs/security-posture.md describes.
     environment:
       PINGAP_CONF: /opt/pingap/conf
-      PINGAP_ADMIN_ADDR: 0.0.0.0:3018
+      # Bind the admin listener to the control network's address for this container,
+      # which compose pins to 172.30.0.10 (see the control network's ipam). A wildcard
+      # bind would also answer on `public`, exposing an authenticated-but-operator-only
+      # surface to the data-plane network; pinning to the control interface keeps admin
+      # off the public side entirely while the 127.0.0.1 host publish still reaches it.
+      PINGAP_ADMIN_ADDR: 172.30.0.10:3018?store=/var/lib/pingap/control-plane.db
       PINGAP_ADMIN_USER: ${PINGAP_ADMIN_USER:?set PINGAP_ADMIN_USER}
       PINGAP_ADMIN_PASSWORD: ${PINGAP_ADMIN_PASSWORD:?set PINGAP_ADMIN_PASSWORD}
       PINGAP_AUTORELOAD: "true"
@@ -17,7 +27,10 @@ services:
       - ./conf:/opt/pingap/conf:ro
       - pingap-data:/var/lib/pingap
       - pingap-backups:/var/lib/pingap/backups
-    networks: [public, control]
+    networks:
+      public:
+      control:
+        ipv4_address: 172.30.0.10
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.5
@@ -31,7 +44,9 @@ services:
     expose: ["2379"]
     volumes:
       - etcd-data:/etcd-data
-    networks: [control]
+    networks:
+      control:
+        ipv4_address: 172.30.0.20
 
 volumes:
   pingap-data:
@@ -42,3 +57,9 @@ networks:
   public:
   control:
     internal: true
+    # A fixed subnet so the pingap admin listener can bind a stable control-interface
+    # address (172.30.0.10) — pinning the IP is what lets admin live on this internal
+    # network and not on `public`.
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

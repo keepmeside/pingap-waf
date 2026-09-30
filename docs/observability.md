@@ -95,25 +95,56 @@ requirement and the obvious way to meet it is a window on the audit trail; the t
 `prune_activity` and `prune_alert_history` so that doing it is a decision rather than a
 convenience.
 
+## What remains deliberately open
+
+- **Nothing feeds the queue yet.** The WAF publishes access-log variables and the queue and writer
+  exist and are tested, but no producer offers findings to the queue and no background task drives
+  the writer. Sink ownership remains deliberately undecided: vendored `pingap-core`, linking
+  `turso` into a plugin, or a third shared crate are materially different dependency boundaries.
+- **No live rollup worker.** The pure Rust rollup and `performance_metrics` read/write paths exist,
+  and `/api/performance` plus `/api/dashboard` expose stored rows. No runtime worker computes rows
+  yet, so an empty series means no stored rollup, not zero traffic. Turso lacks the needed window
+  functions, so rates, percentiles and deltas remain Rust-side.
+- **No ACL verdict.** `decided_by: Option<usize>` is a rule-list position, not a stable identifier;
+  it needs a stable rule ID before it can be logged.
+- **Redaction is stored as not-blocked.** `waf_events` has one `blocked` column, so a migration is
+  needed to distinguish redaction from detection in persisted rows.
+- **No load test.** Queue overload is asserted by unit test; sustained WAF traffic and request-path
+  latency attributable to event writing remain unmeasured.
+- **Retention is implemented but not scheduled.** The tables have bounded sweep methods and
+  defaults; runtime configuration and periodic scheduling remain open.
+
+The query routes are read-only and do not fabricate request rate, latency, percentiles, upstream
+health, bot analytics, or findings that have not reached the store. Those broad metrics remain
+owned by existing Prometheus/performance instrumentation until live rollup inputs are designed.
+
+## Query routes now available
+
+- `GET /api/logs/waf-events` reads structured findings with domain, rule, category, verdict and
+  time filters.
+- `GET /api/performance` reads stored rollup rows oldest-first with bounded time, metric and limit
+  filters.
+- `GET /api/dashboard` returns the same rollup window plus storage-backed config drift. Drift is
+  `unavailable` when no source is wired or it cannot be parsed; diagnostics and config contents
+  are never returned.
+
+All three are authenticated and read-only; the server-side route table, not UI visibility, is the
+RBAC control.
+
+## Security and data-shape gaps
+
+`waf_events` still lacks matched-field excerpts, latency, and a distinct persisted redaction
+verdict. These are schema decisions, not silently inferred values.
+
 ## Not built yet
 
-- **Nothing feeds the queue.** The WAF publishes access-log variables and the queue and writer
-  exist and are tested, but no producer offers findings to the queue and no background task
-  drives the writer. Wiring both needs a decision about where a process-global sink lives that a
-  plugin crate can reach: `pingap-core` is vendored, `pingap-controlplane` would pull `turso`
-  into a plugin, and a third small crate is the clean answer and a new workspace member.
-- **No rollup worker.** `performance_metrics` has a table, an index and a prune method, and
-  nothing computes a row. Rates, percentiles and deltas are to be computed in Rust, not SQL:
-  the store's window functions have no `lag` or `lead` and no custom frames.
-- **No query routes.** `read_waf_events` takes a time range; filtering by domain, rule, verdict
-  and category is not built, and neither are the `logs`, `dashboard` or `performance` endpoints.
-- **No ACL verdict.** The ACL plugin's state records `decided_by: Option<usize>` — a *position*
-  in the rule list, not a stable identifier. Publishing a position under a name that reads like
-  an ID would put a number in every log line that silently changes meaning the next time someone
-  reorders a rule. It needs an identifier on the rule first.
-- **Redaction is stored as not-blocked.** `waf_events` has one `blocked` column, so the queue
-  protects a redaction like a block but the table cannot tell them apart. Widening the column is
-  a migration.
-- **No load test.** The queue's behaviour under deliberate overload is asserted by unit test;
-  sustained traffic with the WAF enabled, confirming no request-path latency attributable to
-  event writing, has not been measured.
+- Live queue producer and background writer (sink ownership decision pending).
+- Rollup worker inputs, retention scheduling, and overload latency measurement.
+- ACL stable identifiers and the distinct redaction schema.
+- Dashboard analytics beyond stored WAF rollup rows.
+
+The queue's priority policy and its tests remain valid: enforced findings are protected from
+queue eviction, while detect findings may be dropped under overload.
+
+This page deliberately does not claim the Phase 11 success criteria that require those missing
+runtime integrations.

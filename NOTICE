@@ -174,14 +174,38 @@ mango-waf  --  subsystem source material, not vendored as a crate
 
   Author:     Nguyễn Văn Trọng
   Repository: https://github.com/hoangtuvungcao/mango-waf
-  Licence:    MIT  (read from the clone's LICENSE file, which names the copyright
-              holder above; the README badge was not relied on)
+  Licence:    MIT  (read from the clone's LICENSE file, reproduced in full below;
+              the README badge was not relied on)
   Commit:     7f2c30ccd103fe2c36407c12a0fc804d7412b554  (2026-08-10)
 
   This project is absorbed as source material for four subsystems the fork adds.
-  MIT code may be incorporated into an Apache-2.0 work; the MIT copyright notice
-  and permission notice are preserved by this entry and by the clone's LICENSE
-  file, which is what that licence requires of a redistribution.
+  MIT code may be incorporated into an Apache-2.0 work. That licence requires the
+  copyright notice and the permission notice to be included in all copies or
+  substantial portions of the software, and the clone this was read from is
+  developer-local and not distributed — so both notices are reproduced here rather
+  than pointed at:
+
+    MIT License
+
+    Copyright (c) 2026 Nguyễn Văn Trọng
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
 
   Files ported, with the receiving fork crate named in each case because a port
   rewrites rather than translates:
@@ -202,12 +226,10 @@ mango-waf  --  subsystem source material, not vendored as a crate
   engine is measurably stronger — fuzzed, false-positive rate tuned to zero, and
   gated at config load by a pattern-cost check this project does not have.
 
-  ### Attribution header form
-
-  Every file carrying ported logic opens with a module doc comment in this shape.
-  It is recorded here once so the five receiving crates stay consistent, and
-  `crates/pingap-waf/tests/provenance.rs` fails the build if the donor's name
-  appears in a Rust file outside a `//!` line:
+  Attribution header form. Every file carrying ported logic opens with a module doc
+  comment in this shape. It is recorded here once so the four receiving crates stay
+  consistent, and `crates/pingap-waf/tests/provenance.rs` fails the build if the
+  donor's name appears in a Rust file outside a `//!` line:
 
     //! <what this module does, in this repository's voice>
     //!

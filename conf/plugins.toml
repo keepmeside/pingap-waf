@@ -32,27 +32,24 @@ path = "/ping"
 ###
 # Plugin Admin Config
 ###
-# Admin web page plugin, which is used to expose admin web page.
-[plugins.adminWebPage]
-# Plugin type
-category = "admin"
-
-# Base URL path where the admin interface will be accessible
-# The admin panel will be available at http(s)://your-domain/pingap/
-path = "/pingap"
-
-# List of authorized username:password pairs encoded in base64
-# You can generate new entries using: echo -n "admin:123456" | base64
-authorizations = ["YWRtaW46MTIzNDU2"]
-
-# How long the login session remains valid
-# After this period, users will need to log in again
-# Default `2d`
-# max_age = "2d"
-
-# Maximum number of failed login attempts allowed from an IP address
-# After this many failures, the IP will be blocked for 5 minutes
-# ip_fail_limit = 5
+# The admin UI is served by a dedicated `--admin` listener, not by this plugin table —
+# `PINGAP_ADMIN_*` (or `--admin user:pass@addr?store=`) synthesises a `[plugins.admin]`
+# config with `bootstrap`/`store`/`totp_key` at startup. A table here is a *named* admin
+# plugin a Location could bind; it is left as documentation of the shape, not enabled.
+#
+# IMPORTANT: this build's admin plugin has no `authorizations` key — that shared-credential
+# scheme was removed (Phase 07) because it could not say who did anything. The plugin
+# hard-rejects a config that still carries it, so do not add it back. Authentication is
+# per-user sessions from the control-plane `store`; the optional `bootstrap` credential is
+# a one-shot that creates the first admin into an empty store and is never consulted again.
+# To bind one in config instead of via `--admin`, the shape is:
+#
+#   [plugins.admin]
+#   category = "admin"
+#   path = "/pingap"              # URL prefix the admin UI + API mount under
+#   store = "/var/lib/pingap/cp.db"  # control-plane database (users, sessions, versions)
+#   bootstrap = "<base64 user:pass>" # optional one-shot first-admin credential
+#   # totp_key = "<base64 32-byte key>" # seals 2FA secrets at rest; required to enrol 2FA
 
 
 ###

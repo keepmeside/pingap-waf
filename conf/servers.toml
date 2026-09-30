@@ -7,7 +7,13 @@
 #   "0.0.0.0:80" - listen on all interfaces on port 80
 #   "127.0.0.1:8080" - listen only on localhost on port 8080
 #   "0.0.0.0:80,0.0.0.0:443,[::]:80" - listen on multiple ports
-addr = "0.0.0.0:6188"
+#
+# The packaged deployment (docker-compose.yml) publishes 80 and 443 to the host, so the
+# data-plane server binds both on every interface. 443 only terminates when a certificate
+# is configured for a matching hostname — until then it accepts the port but cannot serve
+# TLS, which the exposure scan still counts as open. Split the addresses if a deployment
+# must keep 443 closed until a cert exists.
+addr = "0.0.0.0:80,0.0.0.0:443"
 
 # access log format (default none)
 # Supported short formats:
