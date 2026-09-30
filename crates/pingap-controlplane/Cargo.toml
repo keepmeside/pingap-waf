@@ -18,7 +18,15 @@ pingap-events = { path = "../pingap-events" }
 # Pinned exactly. An inexact requirement drifts onto the `0.8.0-pre.*` line, which is
 # not acceptable for a store that owns accounts and audit history. The Turso spike
 # measured this exact version — see docs/spikes/turso-finding.md.
-turso = "=0.7.2"
+#
+# `default-features = false` drops `fts` and `sync`, neither of which the store uses —
+# it opens a local embedded database (`Builder::new_local`) and never runs a MATCH query
+# or a remote sync. `fts` is what pulls `tantivy` → `lru 0.16.4`, which carries
+# RUSTSEC-2026-0253 (`LruCache::pop` is not panic-safe); dropping the feature removes the
+# vulnerable dependency entirely rather than chasing a patched `lru` that tantivy's
+# `=0.16` constraint will not accept. `mimalloc` stays on: turso supplies the process's
+# `#[global_allocator]` on the musl build (see src/main.rs), and Rust rejects a second.
+turso = { version = "=0.7.2", default-features = false, features = ["mimalloc"] }
 # argon2id for passwords. `password-hash` ships with it and owns the PHC string
 # format, so a stored hash carries its own parameters and a later parameter change
 # does not invalidate existing credentials.

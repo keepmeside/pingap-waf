@@ -38,4 +38,17 @@ ignore = [
     # this workspace's MSRV is 1.88. Remove when the MSRV moves to 1.95+.
     "RUSTSEC-2026-0183",
     "RUSTSEC-2026-0184",
+
+    # lru 0.16 (unsound: `LruCache::pop` is not panic-safe - a panicking `Drop`
+    # on a stored key skips `detach()`, leaving a dangling list node that a later
+    # eviction dereferences). Reached only through `pingora-cache 0.8.1`, which
+    # pins `lru = "0.16.3"`; the fix `0.18.2` is outside that caret, so `cargo
+    # update` cannot reach it without forking pingora. The advisory is not
+    # exploitable in this tree: it fires only when `catch_unwind` intercepts a
+    # panicking `Drop`, and no `catch_unwind` exists anywhere in the dependency
+    # graph, nor do the stored keys (`CompactCacheKey` - plain data) have a
+    # panicking `Drop`. The `fts`-side copy of `lru` (turso -> tantivy) was
+    # removed by disabling turso's unused `fts` feature. Remove when pingora
+    # moves `pingora-cache` to `lru >= 0.18` (or when we fork it).
+    "RUSTSEC-2026-0253",
 ]
