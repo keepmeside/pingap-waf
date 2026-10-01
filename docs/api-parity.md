@@ -27,6 +27,8 @@ Everything below is served by the admin listener from the one process, under `/a
 | `/acl` | `GET/PUT/DELETE /api/policies[/:name]` | Mapped differently, see below |
 | `/access-lists` | `GET/PUT/DELETE /api/policies[/:name]` | A named access list is a key in the `acl` profile's own config table, not a separate resource |
 | `/bot-manager` | `GET/PUT/DELETE /api/policies[/:name]` | Profiles and rules only. Its analytics routes are deferred with `logs` and `dashboard` |
+| `/backup` | `GET /api/backup`, `POST/DELETE /api/backup/schedules[/:id]`, `POST /api/backup/export`, `POST /api/backup/restore` | Schedules, manual export, staged restore. The export reads the canonical projection and the store file, not drifted on-disk config |
+| `/slave` | `GET /api/nodes` | Peer inventory over the shared config backend — last-seen, version, config hash, and a status that separates convergence lag (`stale`) from divergence (`drifted`) from a missed heartbeat (`offline`). There is no `/slave` enrolment route; see Waived |
 
 ### Why three reference mounts are one route here
 
@@ -167,9 +169,9 @@ subsystem behind them exists.
 
 | Reference | Owned by | What it will supply |
 | --- | --- | --- |
-| `/logs` (partly mapped, see Partial), `/performance`, `/dashboard` | Observability | WAF verdicts and JA4H fingerprints as structured `Ctx` data rather than log-file scraping, aggregated in Rust because the store's window functions lack `lag`/`lead` |
+| `/logs` (partly mapped, see Partial) | Observability | WAF verdicts and JA4H fingerprints as structured `Ctx` data rather than log-file scraping; `/api/logs/waf-events` is the query surface |
+| `/performance`, `/dashboard` | Observability | Stored rollup rows, oldest-first, with bounded time/metric filters; dashboard also reports storage-backed config drift without correcting it |
 | `/alerts` | Alerts | Rules (projected) and channels, plus delivery history (store-only) |
-| `/backup` | Backup & Restore | Schedules, export, restore |
 | `/slave` | Cluster via etcd Peers | Peer inventory, last-seen, version, config hash |
 | `/bot-manager` analytics | Observability | Top fingerprints, hit rates |
 

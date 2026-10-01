@@ -190,6 +190,7 @@ build_en() {
     acl-plugin domain-model
     ja4-support
     control-plane-store config-projection
+    intel-plugin challenge-plugin behaviour-plugin adaptive-plugin
   )
   local page
   for page in "${fork_docs[@]}"; do

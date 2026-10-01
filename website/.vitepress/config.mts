@@ -146,6 +146,15 @@ function guideSidebar(prefix: string, labels: {
       items: [{ text: "JA4 support", link: `${prefix}/guide/ja4-support` }],
     },
     {
+      text: "Detection and feeds",
+      items: [
+        { text: "Threat feeds", link: `${prefix}/guide/intel-plugin` },
+        { text: "Challenge tier", link: `${prefix}/guide/challenge-plugin` },
+        { text: "Behaviour scoring", link: `${prefix}/guide/behaviour-plugin` },
+        { text: "Adaptive baseline", link: `${prefix}/guide/adaptive-plugin` },
+      ],
+    },
+    {
       text: "Control plane",
       items: [
         {

@@ -152,6 +152,9 @@ are read off the certificate provider, which is an observability surface.
 | ACL rule table | `acl` | `acl:<profile>` |
 | Access list | `acl` (the `access_list` table inside a profile) | shared by attaching the same entry |
 | Bot profile | `bot` | `bot:<profile>` |
+| Challenge tier | `challenge` | `challenge:<profile>` — must follow the `waf`/`acl`/`bot`/`behaviour`/`adaptive` entry whose marker it acts on |
+| Behaviour scoring | `behaviour` | `behaviour:<profile>` — publishes a score; the challenge plugin turns it into a tier |
+| Adaptive baseline | `adaptive` | `adaptive:<profile>` — modulates the configured limits; never originates a refusal |
 
 ### The one thing that is not free
 

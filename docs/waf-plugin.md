@@ -45,6 +45,7 @@ configuration. Divergent policy means two named entries, not one name listed twi
 | `off` | ✓ | ✓ |
 | `detect` | ✓ — record a hit, allow the request | ✓ |
 | `block` | ✓ — refuse with 403 | **rejected at config load** |
+| `challenge` | ✓ — write a marker for the later `challenge` plugin | **rejected at config load** |
 | `redact` | rejected at config load | ✓ — mask the matched bytes in place |
 
 `block` on a response-side category is not accepted, and not silently downgraded.
@@ -52,6 +53,10 @@ configuration. Divergent policy means two named entries, not one name listed twi
 no variant that denies — and by the time a body hook runs the status and headers are
 already downstream. A `block` that behaved as `redact` would tell an operator a leak is
 prevented when it is only being rewritten on the way past.
+
+`challenge` is off unless selected, and it is request-side only. It writes a marker; the
+`challenge` plugin must follow this WAF entry in the Location list and must have a configured
+secret. See [challenge-plugin.md](./challenge-plugin.md).
 
 **`detect` is the default and should stay the default until a category's false-positive
 rate is known on *your* traffic.** The ported detectors measure 0 false positives over

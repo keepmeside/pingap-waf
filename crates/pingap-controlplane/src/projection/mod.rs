@@ -129,6 +129,9 @@ pub enum PolicyBinding {
     Waf(String),
     Acl(String),
     Bot(String),
+    Challenge(String),
+    Behaviour(String),
+    Adaptive(String),
 }
 
 impl PolicyBinding {
@@ -137,12 +140,20 @@ impl PolicyBinding {
             Self::Waf(_) => "waf",
             Self::Acl(_) => "acl",
             Self::Bot(_) => "bot",
+            Self::Challenge(_) => "challenge",
+            Self::Behaviour(_) => "behaviour",
+            Self::Adaptive(_) => "adaptive",
         }
     }
 
     pub fn profile(&self) -> &str {
         match self {
-            Self::Waf(p) | Self::Acl(p) | Self::Bot(p) => p,
+            Self::Waf(p)
+            | Self::Acl(p)
+            | Self::Bot(p)
+            | Self::Challenge(p)
+            | Self::Behaviour(p)
+            | Self::Adaptive(p) => p,
         }
     }
 
