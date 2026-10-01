@@ -21,7 +21,7 @@ import { EntityBadge } from "@/components/config-entity-badge";
 import { PageShell } from "@/components/page-shell";
 import { ConfigEntityList, EntityText } from "@/components/config-entity-list";
 import { ConfigEntitySummary } from "@/components/config-entity-summary";
-import { UPSTREAMS } from "@/routers";
+import { UPSTREAMS_PAGE } from "@/routers";
 import useBasicState from "@/states/basic";
 import { cn } from "@/lib/utils";
 
@@ -76,7 +76,7 @@ export default function Upstreams() {
         nameLabel={upstreamI18n("name")}
         addLabel={upstreamI18n("add")}
         emptyText={upstreamI18n("empty")}
-        basePath={UPSTREAMS}
+        basePath={UPSTREAMS_PAGE}
         newValue={newUpstream}
         names={upstreams}
         values={config.upstreams || {}}
@@ -551,7 +551,7 @@ export default function Upstreams() {
       title={upstreamI18n("title")}
       description={upstreamI18n("description")}
       width="narrow"
-      backTo={UPSTREAMS}
+      backTo={UPSTREAMS_PAGE}
       backLabel={i18n("backToList")}
       badge={
         <EntityBadge

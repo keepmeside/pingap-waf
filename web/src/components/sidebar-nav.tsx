@@ -2,13 +2,8 @@ import { cn } from "@/lib/utils";
 import { LucideIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
-  AppWindow,
-  Server,
-  Webhook,
   TrendingUpDown,
-  PlugZap,
   ShieldCheck,
-  Container,
   Search,
   Gauge,
   Globe2,
@@ -20,22 +15,42 @@ import {
   UserCircle,
   History,
   Cog,
+  Radio,
+  AlertTriangle,
+  DatabaseBackup,
+  Network,
 } from "lucide-react";
 import {
   HOME,
+  DASHBOARD,
+  DOMAINS,
+  UPSTREAMS,
+  LISTENERS,
+  SSL,
+  WAF,
+  ACL,
+  ACCESS_LISTS,
+  BOT_MANAGER,
+  LOGS,
+  ALERTS,
+  PERFORMANCE,
+  BACKUP,
+  NODES,
+  USERS,
+  ACCOUNT,
+  CONFIG_HISTORY,
   BASIC,
   SERVERS,
   LOCATIONS,
-  UPSTREAMS,
+  UPSTREAMS_PAGE,
   PLUGINS,
   CERTIFICATES,
   STORAGES,
+  CONFIG,
 } from "@/routers.tsx";
-import useConfigState from "@/states/config";
 import { useI18n } from "@/i18n";
 import { Input } from "@/components/ui/input";
 import React from "react";
-import { useShallow } from "zustand/react/shallow";
 import { useLocation } from "react-router-dom";
 import {
   SidebarContent,
@@ -326,9 +341,6 @@ export function MainSidebar({
   // Normalise where it is used, not on the way in, so the box shows exactly
   // what was typed instead of eating case and trailing spaces mid-word.
   const activeKeyword = expanded ? keyword.trim().toLowerCase() : "";
-  const [config, initialized] = useConfigState(
-    useShallow((state) => [state.data, state.initialized]),
-  );
 
   // Read straight from the router instead of mirroring it into state via an
   // effect: it is derived, so the copy only added a render behind the URL.
@@ -342,159 +354,50 @@ export function MainSidebar({
     return "ghost";
   };
 
-  const servers = Object.keys(config.servers || {}).sort();
-  const locations = Object.keys(config.locations || {}).sort();
-  const upstreams = Object.keys(config.upstreams || {}).sort();
-  const plugins = Object.keys(config.plugins || {}).sort();
-  const certificates = Object.keys(config.certificates || {}).sort();
-  const storages = Object.keys(config.storages || {}).sort();
-  const getLabel = (category: string) => {
-    if (!initialized) {
-      return "--";
-    }
-    switch (category) {
-      case "server": {
-        return servers.length.toString();
-      }
-      case "location": {
-        return locations.length.toString();
-      }
-      case "upstream": {
-        return upstreams.length.toString();
-      }
-      case "plugin": {
-        return plugins.length.toString();
-      }
-      case "certificate": {
-        return certificates.length.toString();
-      }
-      case "storage": {
-        return storages.length.toString();
-      }
-      default: {
-        return "--";
-      }
-    }
-  };
-
-  // Expanded: only expand children for the active route (or when searching).
-  // Collapsed: always build full lists so hover flyouts have content.
-  const generateChildren = (baseUrl: string, items: string[]) => {
-    if (expanded && !activeKeyword && !pathname.startsWith(baseUrl)) {
-      return [] as NavLink[];
-    }
-    const arr: NavLink[] = [];
-    items.forEach((item) => {
-      if (activeKeyword && !item.toLowerCase().includes(activeKeyword)) {
-        return;
-      }
-      const path = `${baseUrl}?name=${item}`;
-      arr.push({
-        title: item,
-        variant: getVariant(path),
-        label: "",
-        path,
-      } as NavLink);
-    });
-    return arr;
-  };
-
   // Dashboard is reached via the Pingap brand in the sidebar header, not a nav item.
   //
-  // Order is the request's own order — a request meets a server, then a
-  // location, then an upstream — so the nav teaches the pipeline instead of
-  // listing seven unrelated config sections alphabetically.
+  // The product nav is the primary surface; the retained raw-config pages live under a
+  // single "Advanced" collapsible rather than as peer routes, because there is one config
+  // the operator means and two ways to edit it — the projected intent above, the raw
+  // config below. Naming the second "Advanced" is what keeps the first from being
+  // mistaken for a second opinion.
   const advanced: NavLink = {
-    title: "Advanced",
+    title: navI18n("advanced"),
     icon: Cog,
     variant: "ghost",
     path: BASIC,
     group: "system",
     children: [
-      { title: "Basic", path: BASIC, variant: "ghost", group: "system" },
-      { title: "Servers", path: SERVERS, variant: "ghost", group: "system" },
-      { title: "Locations", path: LOCATIONS, variant: "ghost", group: "system" },
-      { title: "Upstreams", path: UPSTREAMS, variant: "ghost", group: "system" },
-      { title: "Plugins", path: PLUGINS, variant: "ghost", group: "system" },
-      { title: "Certificates", path: CERTIFICATES, variant: "ghost", group: "system" },
-      { title: "Storages", path: STORAGES, variant: "ghost", group: "system" },
-      { title: "Config", path: "/config", variant: "ghost", group: "system" },
-      { title: "History", path: "/history", variant: "ghost", group: "system" },
+      { title: navI18n("basic"), path: BASIC, variant: "ghost", group: "system" },
+      { title: navI18n("server"), path: SERVERS, variant: "ghost", group: "system" },
+      { title: navI18n("location"), path: LOCATIONS, variant: "ghost", group: "system" },
+      { title: navI18n("upstream"), path: UPSTREAMS_PAGE, variant: "ghost", group: "system" },
+      { title: navI18n("plugin"), path: PLUGINS, variant: "ghost", group: "system" },
+      { title: navI18n("certificate"), path: CERTIFICATES, variant: "ghost", group: "system" },
+      { title: navI18n("storage"), path: STORAGES, variant: "ghost", group: "system" },
+      { title: "Config", path: CONFIG, variant: "ghost", group: "system" },
     ],
   };
 
   const items: NavLink[] = [
-    { title: "Dashboard", icon: Gauge, variant: getVariant("/dashboard"), path: "/dashboard", group: "path" },
-    { title: "Domains", icon: Globe2, variant: getVariant("/domains"), path: "/domains", group: "path" },
-    { title: "WAF", icon: Shield, variant: getVariant("/waf"), path: "/waf", group: "policy" },
-    { title: "ACL", icon: ListChecks, variant: getVariant("/acl"), path: "/acl", group: "policy" },
-    { title: "Bot manager", icon: Bot, variant: getVariant("/bot-manager"), path: "/bot-manager", group: "policy" },
-    { title: "Logs", icon: Activity, variant: getVariant("/logs"), path: "/logs", group: "system" },
-    { title: "Users", icon: Users, variant: getVariant("/users"), path: "/users", group: "system" },
-    { title: "Account", icon: UserCircle, variant: getVariant("/account"), path: "/account", group: "system" },
-    { title: "Config history", icon: History, variant: getVariant("/config-history"), path: "/config-history", group: "system" },
+    { title: navI18n("dashboard"), icon: Gauge, variant: getVariant(DASHBOARD), path: DASHBOARD, group: "path" },
+    { title: navI18n("domains"), icon: Globe2, variant: getVariant(DOMAINS), path: DOMAINS, group: "path" },
+    { title: navI18n("upstream"), icon: TrendingUpDown, variant: getVariant(UPSTREAMS), path: UPSTREAMS, group: "path" },
+    { title: navI18n("listeners"), icon: Radio, variant: getVariant(LISTENERS), path: LISTENERS, group: "path" },
+    { title: navI18n("certificate"), icon: ShieldCheck, variant: getVariant(SSL), path: SSL, group: "path" },
+    { title: navI18n("waf"), icon: Shield, variant: getVariant(WAF), path: WAF, group: "policy" },
+    { title: navI18n("acl"), icon: ListChecks, variant: getVariant(ACL), path: ACL, group: "policy" },
+    { title: navI18n("accessLists"), icon: ListChecks, variant: getVariant(ACCESS_LISTS), path: ACCESS_LISTS, group: "policy" },
+    { title: navI18n("botManager"), icon: Bot, variant: getVariant(BOT_MANAGER), path: BOT_MANAGER, group: "policy" },
+    { title: navI18n("logs"), icon: Activity, variant: getVariant(LOGS), path: LOGS, group: "system" },
+    { title: navI18n("alerts"), icon: AlertTriangle, variant: getVariant(ALERTS), path: ALERTS, group: "system" },
+    { title: navI18n("performance"), icon: TrendingUpDown, variant: getVariant(PERFORMANCE), path: PERFORMANCE, group: "system" },
+    { title: navI18n("backup"), icon: DatabaseBackup, variant: getVariant(BACKUP), path: BACKUP, group: "system" },
+    { title: navI18n("nodes"), icon: Network, variant: getVariant(NODES), path: NODES, group: "system" },
+    { title: navI18n("users"), icon: Users, variant: getVariant(USERS), path: USERS, group: "system" },
+    { title: navI18n("account"), icon: UserCircle, variant: getVariant(ACCOUNT), path: ACCOUNT, group: "system" },
+    { title: navI18n("configHistory"), icon: History, variant: getVariant(CONFIG_HISTORY), path: CONFIG_HISTORY, group: "system" },
     advanced,
-    {
-      title: navI18n("server"),
-      icon: Server,
-      variant: getVariant(SERVERS),
-      label: getLabel("server"),
-      path: SERVERS,
-      group: "path",
-      children: generateChildren(SERVERS, servers),
-    },
-    {
-      title: navI18n("location"),
-      icon: Webhook,
-      variant: getVariant(LOCATIONS),
-      label: getLabel("location"),
-      path: LOCATIONS,
-      group: "path",
-      children: generateChildren(LOCATIONS, locations),
-    },
-    {
-      title: navI18n("upstream"),
-      icon: TrendingUpDown,
-      variant: getVariant(UPSTREAMS),
-      label: getLabel("upstream"),
-      path: UPSTREAMS,
-      group: "path",
-      children: generateChildren(UPSTREAMS, upstreams),
-    },
-    {
-      title: navI18n("plugin"),
-      icon: PlugZap,
-      variant: getVariant(PLUGINS),
-      label: getLabel("plugin"),
-      path: PLUGINS,
-      group: "policy",
-      children: generateChildren(PLUGINS, plugins),
-    },
-    {
-      title: navI18n("certificate"),
-      icon: ShieldCheck,
-      variant: getVariant(CERTIFICATES),
-      label: getLabel("certificate"),
-      path: CERTIFICATES,
-      group: "policy",
-      children: generateChildren(CERTIFICATES, certificates),
-    },
-    {
-      title: navI18n("basic"),
-      icon: AppWindow,
-      variant: getVariant(BASIC),
-      path: BASIC,
-      group: "system",
-    },
-    {
-      title: navI18n("storage"),
-      icon: Container,
-      variant: getVariant(STORAGES),
-      label: getLabel("storage"),
-      path: STORAGES,
-      group: "system",
-      children: generateChildren(STORAGES, storages),
-    },
   ];
 
   const groups: { key: NavGroup; label: string }[] = [

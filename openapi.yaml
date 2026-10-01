@@ -944,7 +944,7 @@ paths:
         table only grows, so an offset shifts under a concurrent insert and the caller sees one
         finding twice and misses another.
 
-        Every parameter is a filter, and an unparseable or empty one is ignored rather than
+        Every parameter is a filter, and an unparsable or empty one is ignored rather than
         refused: these are filters, and answering a malformed bookmark with `400` would break it
         the moment a parameter's shape changed. `?blocked=perhaps` widens to "either" rather
         than silently meaning `false`.
@@ -1247,7 +1247,7 @@ paths:
       summary: The audit trail, newest first
       description: >
         Ranges rather than offsets, because the log only grows and an offset shifts under a
-        concurrent insert. An unparseable filter value is ignored rather than refused: the
+        concurrent insert. An unparsable filter value is ignored rather than refused: the
         range is a filter, and answering a malformed `since` with `400` would break an
         operator's bookmarked URL when the parameter's shape changed.
       parameters:
@@ -1300,6 +1300,195 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /nodes:
+    get:
+      tags: [cluster]
+      operationId: listNodes
+      summary: Every peer the inventory knows
+      description: |
+        The operator-facing half of clustering. Peers publish a heartbeat to the shared
+        config backend; this reads it back with `last_seen` derived against the liveness
+        threshold and the applied config against the newest committed one.
+
+        `status` distinguishes the three ways a node can be not-current: `stale` is
+        convergence lag — it is on an older committed version and will catch up;
+        `drifted` is tampering or a partial write — its on-disk hash diverged from what it
+        reports having applied; `offline` means its `last_seen` fell past the threshold.
+        Collapsing them is how "still on the old version" reads as "compromised".
+
+        A `503` is returned when no shared backend is configured — a single-node
+        deployment has no peer inventory, and reporting "zero peers" would read as a
+        healthy cluster or a reaping bug rather than as "there is no cluster".
+      x-required-capability: view_nodes
+      responses:
+        '200':
+          description: Peers, ordered by node id.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NodeStatus'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+
+  /backup:
+    get:
+      tags: [backup]
+      operationId: listBackups
+      summary: Backup schedules and the bundle inventory
+      description: |
+        The schedule registry and the recorded bundles, returned as one value: a dashboard
+        shows them side by side, and two calls could disagree about a schedule deleted
+        between them.
+      x-required-capability: view_backups
+      responses:
+        '200':
+          description: Schedules and recorded bundles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /backup/schedules:
+    post:
+      tags: [backup]
+      operationId: createBackupSchedule
+      summary: Register a recurring export
+      description: |
+        A schedule is intent, not a running job — the control-plane's scheduler honours the
+        row once it exists. The `name` is the schedule's key, so a duplicate is a conflict.
+      x-required-capability: run_backup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewBackupSchedule'
+      responses:
+        '200':
+          description: The created schedule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupScheduleRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A schedule with this name already exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /backup/schedules/{id}:
+    delete:
+      tags: [backup]
+      operationId: deleteBackupSchedule
+      summary: Stop a recurring export
+      x-required-capability: run_backup
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204':
+          description: The schedule was removed.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /backup/export:
+    post:
+      tags: [backup]
+      operationId: exportBackup
+      summary: Write a bundle now
+      description: |
+        Exports the canonical projection — what the data plane should be enforcing, not
+        whatever is on disk — plus a snapshot of the control-plane store file, into the
+        configured backup directory.
+
+        `503` when no backup directory is configured: the setting is `backup_dir` on the
+        admin plugin, and inventing a path the operator never agreed to is worse than
+        refusing.
+      x-required-capability: run_backup
+      responses:
+        '200':
+          description: The recorded bundle.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupFileRecord'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+
+  /backup/restore:
+    post:
+      tags: [backup]
+      operationId: restoreBackup
+      summary: Validate and stage a bundle
+      description: |
+        Verifies the manifest checksums and copies the payload to a staging directory —
+        **staged, never applied in place**. A bundle that fails validation never reaches a
+        path that could be mistaken for live state, and the apply step that swaps it in is
+        a separate, deliberate and destructive decision.
+
+        This is the heaviest capability in the matrix because it is the one operation that
+        replaces what the whole control plane believes.
+      x-required-capability: restore_backup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              additionalProperties: false
+              properties:
+                path:
+                  type: string
+                  description: The bundle root to restore from, named rather than defaulted.
+      responses:
+        '200':
+          description: The staged bundle's paths and format version.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  staged: {type: boolean}
+                  staged_config: {type: string}
+                  staged_store: {type: string}
+                  format_version: {type: integer, format: int64}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
 
   # ---- retained surface ---------------------------------------------------------------
   #
@@ -1888,7 +2077,7 @@ components:
           properties:
             name: {type: string}
             metric: {type: string}
-            comparator: {type: string, enum: [greater_than, greater_or_equal, less_than, less_or_equal]}
+            comparator: {type: string, enum: [greater, greater_or_equal, less, less_or_equal, equal]}
             threshold: {type: number}
             window_secs: {type: integer, format: int64, minimum: 1}
             severity: {type: string}
@@ -1903,7 +2092,7 @@ components:
       properties:
         name: {type: string}
         metric: {type: string}
-        comparator: {type: string, enum: [greater_than, greater_or_equal, less_than, less_or_equal]}
+        comparator: {type: string, enum: [greater, greater_or_equal, less, less_or_equal, equal]}
         threshold: {type: number}
         window_secs: {type: integer, format: int64, minimum: 1}
         severity: {type: string}
@@ -2696,3 +2885,104 @@ components:
             A two-value state rather than a reason, because a load balancer needs to know
             whether this node can accept admin traffic and nothing more. The reason an operator
             needs is on an authenticated route.
+
+    NodeStatus:
+      type: object
+      required: [node_id, version, status, last_seen]
+      description: |
+        One peer, read back from the shared heartbeat. `status` separates the three ways a
+        node can be not-current, because they mean different things to an operator.
+      properties:
+        node_id:
+          type: string
+          description: Stable identity derived from configuration, not hostname or IP — both change under orchestration.
+        version:
+          type: string
+        config_version:
+          type: string
+          nullable: true
+        config_hash:
+          type: string
+          nullable: true
+        last_seen:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [healthy, stale, drifted, offline]
+          description: >
+            `stale` is convergence lag — on an older committed version, will catch up.
+            `drifted` is tampering or a partial write — the on-disk hash diverged from the
+            applied one. `offline` is `last_seen` past the liveness threshold.
+        cpu_millis:
+          type: integer
+          format: int64
+          nullable: true
+        memory_bytes:
+          type: integer
+          format: int64
+          nullable: true
+
+    BackupScheduleRecord:
+      type: object
+      required: [id, name, cron, retain, enabled, created_at]
+      properties:
+        id: {type: string}
+        name:
+          type: string
+          description: The schedule's key — a duplicate is a conflict.
+        cron:
+          type: string
+        retain:
+          type: integer
+          format: int64
+          description: How many bundles to keep.
+        enabled: {type: boolean}
+        created_at: {type: integer, format: int64}
+
+    NewBackupSchedule:
+      type: object
+      required: [name, cron, retain]
+      additionalProperties: false
+      properties:
+        name: {type: string}
+        cron: {type: string}
+        retain:
+          type: integer
+          format: int64
+        enabled:
+          type: boolean
+          default: true
+
+    BackupFileRecord:
+      type: object
+      required: [id, path, size_bytes, sha256, created_at]
+      properties:
+        id: {type: string}
+        schedule_id:
+          type: string
+          nullable: true
+          description: Null for a manual export — produced by no schedule.
+        path:
+          type: string
+          description: The bundle root — where a restore points and a prune looks.
+        size_bytes:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+          description: The manifest checksum, recomputed on restore before anything is staged.
+        created_at: {type: integer, format: int64}
+
+    BackupView:
+      type: object
+      required: [schedules, files]
+      properties:
+        schedules:
+          type: array
+          items:
+            $ref: '#/components/schemas/BackupScheduleRecord'
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/BackupFileRecord'

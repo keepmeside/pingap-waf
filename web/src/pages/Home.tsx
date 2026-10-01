@@ -8,7 +8,7 @@ import {
   PLUGINS,
   SERVERS,
   STORAGES,
-  UPSTREAMS,
+    UPSTREAMS_PAGE,
 } from "@/routers";
 import { LoadingPage } from "@/components/loading";
 import useBasicState from "@/states/basic";
@@ -160,7 +160,7 @@ export default function Home() {
       upstreamSummary.push({
         name,
         nameClass,
-        link: `${UPSTREAMS}?name=${name}`,
+        link: `${UPSTREAMS_PAGE}?name=${name}`,
         value: value.addrs.map((addr) => addr.split(" ")[0]).join(" "),
       });
     });
@@ -293,7 +293,7 @@ export default function Home() {
             ? homeI18n("poolsHealthy")
             : homeI18n("noHealthChecks"),
       detailTone: degradedPools > 0 ? "warn" : "muted",
-      to: UPSTREAMS,
+      to:   UPSTREAMS_PAGE,
     },
     {
       key: "origin",
@@ -310,7 +310,7 @@ export default function Home() {
           ? homeI18n("backendsDown", { count: backendsDown })
           : homeI18n("stageOriginAllUp"),
       detailTone: backendsDown > 0 ? "down" : "muted",
-      to: UPSTREAMS,
+      to:   UPSTREAMS_PAGE,
     },
   ];
 
@@ -358,7 +358,7 @@ export default function Home() {
               healthy: status.healthy,
               total: status.total,
             }),
-      to: `${UPSTREAMS}?name=${name}`,
+      to: `${UPSTREAMS_PAGE}?name=${name}`,
     });
   });
   Object.keys(certificateInfos).forEach((name) => {
@@ -398,7 +398,7 @@ export default function Home() {
     },
     {
       title: homeI18n("upstream"),
-      path: UPSTREAMS,
+      path:   UPSTREAMS_PAGE,
       count: upstreamSummary.length,
       unit: homeI18n("upstreamUnit"),
       summary: upstreamSummary,
