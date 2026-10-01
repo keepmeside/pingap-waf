@@ -1,0 +1,16 @@
+[package]
+name = "spike-egress-guard"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway. Answers whether a connection-time egress guard is expressible on the
+# pinned reqwest: can a custom `dns::Resolve` refuse an address, is it consulted
+# again on a redirect hop, and does an IP-literal target reach it at all?
+# Not in the workspace `members`; see the root Cargo.toml `exclude`.
+
+[dependencies]
+# Pinned exactly, not by caret. `reqwest = "0.13.4"` resolves to 0.13.5, which is
+# not what the workspace Cargo.lock pins, and the whole point is the pinned API.
+reqwest = { version = "=0.13.4", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

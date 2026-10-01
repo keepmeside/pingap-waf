@@ -1,0 +1,16 @@
+# Example only. This directory is not a compiled default.
+
+[plugins.waf-strict]
+category = "waf"
+categories = { sql_injection = "block" }
+ip_list = ["192.0.2.0/24"]
+
+[plugins.waf-strict.intel]
+manual = ["198.51.100.7"]
+staleness = "24h"
+
+[[plugins.waf-strict.intel.feed]]
+name = "example-blocklist"
+url = "https://feeds.example.invalid/blocklist.txt"
+category = "example"
+enabled = false
