@@ -69,3 +69,35 @@ async fn the_score_and_profile_are_published_on_an_allowed_request() {
     );
     assert!(ctx.get_variable("behaviour_cost_ms").is_some());
 }
+
+#[tokio::test]
+async fn the_score_and_profile_render_into_an_access_log_line() {
+    // `{:behaviour_score}` and `{:behaviour_profile}` must reach a rendered log line on
+    // the allow path, not only sit in the variables map — the map assertion above is the
+    // one that passes while the field renders empty. Asserted on the bytes
+    // `Parser::format` produces, mirroring the WAF's rendered-line test.
+    use pingap_logger::Parser;
+
+    let plugin = plugin();
+    let mut ctx = Ctx::default();
+    let mut session =
+        session_for("GET /asset HTTP/1.1\r\nHost: a.test\r\n\r\n").await;
+    plugin
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("handle_request is total");
+
+    let parser: Parser = "{:behaviour_score}|{:behaviour_profile}".into();
+    let rendered = parser.format(&session, &ctx);
+    let line = String::from_utf8_lossy(&rendered).to_string();
+    let fields: Vec<&str> = line.split('|').collect();
+    assert_eq!(fields.len(), 2, "expected two fields: {line}");
+    assert!(
+        !fields[0].is_empty() && fields[0].chars().all(|c| c.is_ascii_digit() || c == '.'),
+        "behaviour_score did not render a number: {line}"
+    );
+    assert!(
+        !fields[1].is_empty(),
+        "behaviour_profile rendered empty: {line}"
+    );
+}

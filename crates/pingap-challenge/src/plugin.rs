@@ -145,6 +145,14 @@ impl Challenge {
     }
 
     pub fn counters(&self) -> &ChallengeCounters {
+        // The store owns the authoritative expiry count — it is the only place a stale
+        // record is observed and dropped. Mirror it into the read-only counter so the
+        // `expired` figure reflects what the store actually evicted rather than a field
+        // that was declared and never written.
+        self.state
+            .counters
+            .expired
+            .store(self.state.tokens.expired_count(), Ordering::Relaxed);
         &self.state.counters
     }
 

@@ -36,6 +36,10 @@ urlencoding = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Renders `{:name}` against a `Parser` so the access-log variables are asserted on the
+# bytes a log format emits, not on the variables map — the assertion that catches a
+# variable that was set but never reached a line. Dev-only, not in the shipped binary.
+pingap-logger = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 tokio-test = "0.4.4"
 

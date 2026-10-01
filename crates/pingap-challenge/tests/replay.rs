@@ -91,4 +91,54 @@ fn an_expired_token_is_refused_for_read_and_for_solve() {
             .is_none(),
         "an expired token is still solvable"
     );
+    // The stale record was consumed by `take`, so the expiry is measured, not silent —
+    // the spec's `expired` counter is real, not a declared-but-dead field.
+    assert_eq!(
+        store.expired_count(),
+        1,
+        "the expired eviction must be counted"
+    );
+}
+
+#[test]
+fn expiries_during_the_issue_sweep_are_counted() {
+    // A record that ages out *between* verify calls is swept by the next `issue`, and
+    // that sweep is counted too — expiry is observable regardless of which call finds it.
+    let store = TokenStore::new(8);
+    store
+        .issue(
+            "stale".to_string(),
+            ChallengeRecord {
+                domain: "a.test".into(),
+                identity: "203.0.113.1".into(),
+                salt: "s".into(),
+                difficulty: 1,
+                target: "/".into(),
+                kind: "pow".into(),
+                attempts: 0,
+                expires_at: SystemTime::now() - Duration::from_secs(1),
+            },
+        )
+        .expect("room");
+    // The record inserted already-stale is dropped by the next issue's sweep.
+    store
+        .issue(
+            "fresh".to_string(),
+            ChallengeRecord {
+                domain: "a.test".into(),
+                identity: "203.0.113.1".into(),
+                salt: "s".into(),
+                difficulty: 1,
+                target: "/".into(),
+                kind: "pow".into(),
+                attempts: 0,
+                expires_at: SystemTime::now() + Duration::from_secs(60),
+            },
+        )
+        .expect("room");
+    assert_eq!(
+        store.expired_count(),
+        1,
+        "the issue sweep must count the stale record it dropped"
+    );
 }

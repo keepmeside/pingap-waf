@@ -74,3 +74,42 @@ async fn a_marked_request_is_answered_with_the_interstitial() {
         Some("issued".to_string()).as_deref()
     );
 }
+
+#[tokio::test]
+async fn the_challenge_outcome_renders_into_an_access_log_line() {
+    // `{:challenge_status}` must reach a rendered log line, not just the variables map —
+    // the map assertion above is the one that passes while the field renders empty. This
+    // is the test the shared `{:name}` fallback exists to satisfy, and it is asserted on
+    // the bytes `Parser::format` produces, mirroring the WAF's rendered-line test.
+    use pingap_logger::Parser;
+
+    let plugin = plugin();
+    let mut ctx = Ctx::default();
+    ctx.extensions
+        .insert(pingap_acl::ChallengeMarker::new("acl", "test"));
+    let mut session =
+        session_for("GET /account HTTP/1.1\r\nHost: a.test\r\n\r\n").await;
+    plugin
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("handle_request is total");
+
+    let parser: Parser = "status={:challenge_status}".into();
+    let rendered = parser.format(&session, &ctx);
+    assert_eq!(
+        "status=issued",
+        String::from_utf8_lossy(&rendered),
+        "the challenge outcome must render as a log field"
+    );
+
+    // The allow path with no marker writes nothing, which a log format must tolerate —
+    // the field renders empty rather than as a stray literal `{:challenge_status}`.
+    let mut ctx = Ctx::default();
+    let mut session = session_for("GET / HTTP/1.1\r\nHost: a.test\r\n\r\n").await;
+    plugin
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("handle_request is total");
+    let rendered = parser.format(&session, &ctx);
+    assert_eq!("status=", String::from_utf8_lossy(&rendered));
+}

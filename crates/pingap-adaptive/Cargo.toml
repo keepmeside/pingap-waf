@@ -22,5 +22,13 @@ serde = { workspace = true, features = ["derive"] }
 snafu = { workspace = true }
 toml = { workspace = true }
 
+[dev-dependencies]
+# Renders `{:name}` against a `Parser` so the access-log variables are asserted on the
+# bytes a log format emits, not on the variables map. Dev-only, not in the shipped
+# binary.
+pingap-logger = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-test = "0.4.4"
+
 [lints]
 workspace = true

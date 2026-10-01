@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -24,6 +25,7 @@ pub enum TokenError {
 pub struct TokenStore {
     inner: Arc<Mutex<HashMap<String, ChallengeRecord>>>,
     domains: Arc<Mutex<HashSet<String>>>,
+    expired: Arc<AtomicUsize>,
     max_domains: usize,
     max_entries: usize,
 }
@@ -37,8 +39,34 @@ impl TokenStore {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             domains: Arc::new(Mutex::new(HashSet::new())),
+            expired: Arc::new(AtomicUsize::new(0)),
             max_domains: max_domains.max(1),
             max_entries: max_entries.max(1),
+        }
+    }
+
+    /// How many records the store has evicted for being past `expires_at`.
+    ///
+    /// The store is the only place an expiry is observed — a record is dropped the
+    /// moment it is found stale inside `issue`, `take`, or `get` — so the count lives
+    /// here and the plugin's counter mirrors it, rather than the other way around. A
+    /// record that ages out *between* calls is counted when the next call sweeps it.
+    pub fn expired_count(&self) -> usize {
+        self.expired.load(Ordering::Relaxed)
+    }
+
+    /// Drop every record whose `expires_at` is at or before `now`, counting each.
+    /// Called inside `issue`'s sweep so expiry is measured, not silent.
+    fn sweep_expired(
+        guard: &mut HashMap<String, ChallengeRecord>,
+        expired: &AtomicUsize,
+        now: SystemTime,
+    ) {
+        let before = guard.len();
+        guard.retain(|_, value| value.expires_at > now);
+        let dropped = before - guard.len();
+        if dropped > 0 {
+            expired.fetch_add(dropped, Ordering::Relaxed);
         }
     }
 
@@ -52,7 +80,7 @@ impl TokenStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = SystemTime::now();
-        guard.retain(|_, value| value.expires_at > now);
+        Self::sweep_expired(&mut guard, &self.expired, now);
         let mut domains = self
             .domains
             .lock()
@@ -145,6 +173,9 @@ impl TokenStore {
                 .is_some_and(|record| record.expires_at <= now)
             {
                 guard.remove(token);
+                // A token the client held out for verification is now proven stale:
+                // it expired in hand, so it counts here, not only in the issue sweep.
+                self.expired.fetch_add(1, Ordering::Relaxed);
             }
             None
         }
