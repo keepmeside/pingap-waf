@@ -21,12 +21,13 @@
 
 use crate::rbac::{AuthLevel, Role};
 use crate::repository::{
-    Activity, AlertHistory, AlertRuleRecord, BackupFileRecord,
-    BackupScheduleRecord, ConfigStatus, ConfigVersion, ControlPlaneStore,
-    NewActivity, NewAlertHistory, NewAlertRule, NewBackupFile,
-    NewBackupSchedule, NewConfigVersion, NewNodeStatus, NewNotificationChannel,
-    NewSession, NewUser, NodeStatusRecord, NotificationChannel, Result,
-    Session, StoreError, TimeRange, User,
+    Activity, AdaptiveBaselineRecord, AlertHistory, AlertRuleRecord,
+    BackupFileRecord, BackupScheduleRecord, ConfigStatus, ConfigVersion,
+    ControlPlaneStore, NewActivity, NewAdaptiveBaseline, NewAlertHistory,
+    NewAlertRule, NewBackupFile, NewBackupSchedule, NewConfigVersion,
+    NewNodeStatus, NewNotificationChannel, NewSession, NewUser,
+    NodeStatusRecord, NotificationChannel, Result, Session, StoreError,
+    TimeRange, User,
 };
 use crate::schema::{MIGRATIONS, VERSION_TABLE};
 use std::sync::Arc;
@@ -632,6 +633,17 @@ const BACKUP_FILE_COLUMNS: &str =
     "id, schedule_id, path, size_bytes, sha256, created_at";
 const NODE_STATUS_COLUMNS: &str =
     "node, version, config_version, last_seen_at, reaped_at";
+const ADAPTIVE_BASELINE_COLUMNS: &str =
+    "domain, payload, learned_at_secs, updated_at";
+
+fn decode_adaptive_baseline(row: &Row) -> Result<AdaptiveBaselineRecord> {
+    Ok(AdaptiveBaselineRecord {
+        domain: text(row, 0)?,
+        payload: text(row, 1)?,
+        learned_at_secs: int(row, 2)?,
+        updated_at: int(row, 3)?,
+    })
+}
 
 fn decode_backup_schedule(row: &Row) -> Result<BackupScheduleRecord> {
     Ok(BackupScheduleRecord {
@@ -1721,6 +1733,73 @@ impl ControlPlaneStore for TursoStore {
             .await?;
         Ok(())
     }
+
+    async fn list_adaptive_baselines(
+        &self,
+    ) -> Result<Vec<AdaptiveBaselineRecord>> {
+        self.rows(
+            &format!(
+                "SELECT {ADAPTIVE_BASELINE_COLUMNS} FROM adaptive_baselines \
+                 ORDER BY domain"
+            ),
+            vec![],
+            decode_adaptive_baseline,
+        )
+        .await
+    }
+
+    async fn find_adaptive_baseline(
+        &self,
+        domain: &str,
+    ) -> Result<Option<AdaptiveBaselineRecord>> {
+        self.row(
+            &format!(
+                "SELECT {ADAPTIVE_BASELINE_COLUMNS} FROM adaptive_baselines \
+                 WHERE domain = ?1"
+            ),
+            vec![Value::Text(domain.to_string())],
+            decode_adaptive_baseline,
+        )
+        .await
+    }
+
+    async fn upsert_adaptive_baseline(
+        &self,
+        baseline: NewAdaptiveBaseline,
+        now: i64,
+    ) -> Result<()> {
+        // `updated_at` is the store's own clock for staleness-since-write;
+        // `learned_at_secs` is the learner's clock for staleness-since-calibration —
+        // they answer different questions, so neither substitutes for the other.
+        self.writer()
+            .execute(
+                "INSERT INTO adaptive_baselines \
+                 (domain, payload, learned_at_secs, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(domain) DO UPDATE SET \
+                   payload = excluded.payload, \
+                   learned_at_secs = excluded.learned_at_secs, \
+                   updated_at = excluded.updated_at",
+                vec![
+                    Value::Text(baseline.domain.clone()),
+                    Value::Text(baseline.payload.clone()),
+                    Value::Integer(baseline.learned_at_secs),
+                    Value::Integer(now),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_adaptive_baseline(&self, domain: &str) -> Result<()> {
+        self.writer()
+            .execute(
+                "DELETE FROM adaptive_baselines WHERE domain = ?1",
+                vec![Value::Text(domain.to_string())],
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1914,8 +1993,8 @@ mod tests {
         store
             .reap_node_status("node-a", 400)
             .await
-            .expect("reap is idempotent");
-        let nodes = store.list_node_status().await.expect("list");
+            .expect("idempotent reap");
+        let nodes = store.list_node_status().await.expect("list after reap");
         assert_eq!(nodes[0].reaped_at, Some(300));
 
         // A node that heartbeats again clears the tombstone — it is live, not gone.
@@ -1934,6 +2013,76 @@ mod tests {
         let nodes = store.list_node_status().await.expect("list");
         assert_eq!(nodes[0].reaped_at, None);
         assert_eq!(nodes[0].last_seen_at, 500);
+    }
+
+    #[tokio::test]
+    async fn adaptive_baselines_upsert_find_and_delete_round_trip() {
+        let (store, _dir) = store().await;
+
+        // Two domains keep independent baselines — the per-domain keying is the whole
+        // point of the table.
+        for (domain, learned) in [("a.example", 111), ("b.example", 222)] {
+            store
+                .upsert_adaptive_baseline(
+                    NewAdaptiveBaseline {
+                        domain: domain.to_string(),
+                        payload: format!("{{\"domain\":\"{domain}\"}}"),
+                        learned_at_secs: learned,
+                    },
+                    500,
+                )
+                .await
+                .expect("upsert");
+        }
+
+        let all = store.list_adaptive_baselines().await.expect("list");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].domain, "a.example");
+        assert_eq!(all[0].learned_at_secs, 111);
+        assert_eq!(all[0].updated_at, 500);
+
+        // A second upsert replaces the row rather than appending — one row per domain.
+        store
+            .upsert_adaptive_baseline(
+                NewAdaptiveBaseline {
+                    domain: "a.example".to_string(),
+                    payload: "{\"domain\":\"a.example\",\"v\":2}".to_string(),
+                    learned_at_secs: 333,
+                },
+                600,
+            )
+            .await
+            .expect("re-upsert");
+
+        let a = store
+            .find_adaptive_baseline("a.example")
+            .await
+            .expect("find")
+            .expect("present");
+        assert_eq!(a.learned_at_secs, 333);
+        assert_eq!(a.updated_at, 600);
+        assert!(a.payload.contains("\"v\":2"));
+        assert_eq!(
+            store.list_adaptive_baselines().await.expect("list").len(),
+            2,
+            "an upsert must not grow the table"
+        );
+
+        store
+            .delete_adaptive_baseline("a.example")
+            .await
+            .expect("delete");
+        assert!(
+            store
+                .find_adaptive_baseline("a.example")
+                .await
+                .expect("find")
+                .is_none()
+        );
+        assert_eq!(
+            store.list_adaptive_baselines().await.expect("list").len(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -417,6 +417,31 @@ pub struct NewNodeStatus {
     pub last_seen_at: i64,
 }
 
+/// The learned hourly baseline the adaptive detector keeps per domain.
+///
+/// `payload` is the serialised `pingap_adaptive::Baseline` — the store treats it as
+/// opaque JSON because the aggregate's shape belongs to the adaptive crate, not to the
+/// schema. The two facts the store does need to know are on the record: `domain`, the
+/// key everything else in the plan is keyed by, and `learned_at_secs`, the timestamp a
+/// restored baseline is judged stale against. Derived aggregate data only — no client
+/// information — so it carries no privacy exposure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdaptiveBaselineRecord {
+    pub domain: String,
+    pub payload: String,
+    pub learned_at_secs: i64,
+    pub updated_at: i64,
+}
+
+/// A baseline write. `domain` is the primary key, so an upsert refreshes the row in
+/// place as new aggregates land — a baseline is replaced, never appended.
+#[derive(Debug, Clone)]
+pub struct NewAdaptiveBaseline {
+    pub domain: String,
+    pub payload: String,
+    pub learned_at_secs: i64,
+}
+
 /// Everything the control plane stores.
 ///
 /// One trait rather than several, because the swap-out is all-or-nothing: a driver that
@@ -683,6 +708,30 @@ pub trait ControlPlaneStore: Send + Sync {
     ) -> Result<()>;
     /// Mark a node reaped. Idempotent — a second sweep over the same node is a no-op.
     async fn reap_node_status(&self, node: &str, now: i64) -> Result<()>;
+
+    // ---- adaptive baselines --------------------------------------------------------
+    //
+    // Derived aggregates the learner restores across a restart. Upsert-shaped: each
+    // domain's row is replaced as new baselines land, so there is one row per domain —
+    // never a growing history of them.
+
+    /// Every persisted baseline, for the restore sweep that runs at startup.
+    async fn list_adaptive_baselines(
+        &self,
+    ) -> Result<Vec<AdaptiveBaselineRecord>>;
+    /// A single domain's baseline, for an on-demand restore of a cold learner.
+    async fn find_adaptive_baseline(
+        &self,
+        domain: &str,
+    ) -> Result<Option<AdaptiveBaselineRecord>>;
+    /// Replace a domain's baseline with the latest aggregate.
+    async fn upsert_adaptive_baseline(
+        &self,
+        baseline: NewAdaptiveBaseline,
+        now: i64,
+    ) -> Result<()>;
+    /// Drop a domain's baseline — the learner asked to forget it, or the domain went away.
+    async fn delete_adaptive_baseline(&self, domain: &str) -> Result<()>;
 }
 
 #[cfg(test)]

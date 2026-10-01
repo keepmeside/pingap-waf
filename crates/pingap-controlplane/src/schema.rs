@@ -244,6 +244,27 @@ pub const MIGRATIONS: &[Migration] = &[
             "CREATE INDEX IF NOT EXISTS idx_config_versions_status ON config_versions(status, created_at)",
         ],
     },
+    Migration {
+        version: 3,
+        statements: &[
+            // ---- adaptive baselines ---------------------------------------------------
+            //
+            // The learned hourly aggregate the adaptive baseline keeps per domain —
+            // derived data only, no client information, ~1.3 KB a row. Persisted so a
+            // process restart does not discard days of calibration; `learned_at_secs`
+            // carries the timestamp the caller decides is stale against (default 14 days).
+            // The payload is the serialised `Baseline` — the schema does not know its
+            // shape, the adaptive crate owns it, and the restore path re-validates it —
+            // which is also what keeps this table out of the append-only question: a
+            // baseline is upserted as new aggregates land, never appended.
+            "CREATE TABLE IF NOT EXISTS adaptive_baselines (
+            domain TEXT NOT NULL PRIMARY KEY,
+            payload TEXT NOT NULL,
+            learned_at_secs INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        ],
+    },
 ];
 
 /// The version a fully-migrated store is at.
@@ -264,7 +285,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_schema_declares_all_sixteen_tables() {
+    fn the_schema_declares_every_table_the_repository_uses() {
         let sql = MIGRATIONS
             .iter()
             .flat_map(|m| m.statements.iter())
@@ -288,6 +309,7 @@ mod tests {
             "node_status",
             "waf_events",
             "config_versions",
+            "adaptive_baselines",
         ] {
             assert!(
                 sql.contains(&format!("CREATE TABLE IF NOT EXISTS {table} (")),
