@@ -71,8 +71,9 @@ refusals the tier ever originates are the loop direction and the saturation poli
 The `ladder` maps failure counts onto tiers — `[2, 4, 8]` means the fourth failure raises
 the tier to 1, the eighth to 2 — and the tier decides the page: odd tiers serve the silent
 fingerprint page, even tiers serve the proof-of-work page at `difficulty` plus the tier.
-The marker's level is the maximum of what the originating policy, the behavioural snapshot
-and the adaptive decision each contribute, and the ladder's escalation raises it further.
+The marker arrives from the originating policy at level zero; the behavioural snapshot and the
+adaptive decision add onto it, and the ladder's escalation then raises it to at least the
+escalation's own level.
 A solve lowers the tier, and an idle entry decays back toward the floor after `decay`, so
 a client that stops and comes back later is not fighting its own past.
 

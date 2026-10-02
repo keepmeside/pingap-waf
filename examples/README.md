@@ -20,7 +20,7 @@ The key points of configuration are as follows:
 - [locations.grpc-server] should enable grpc_web
 
 ```bash
-cargo run -- -c=~/github/pingap/examples/grpc-web.toml --admin=127.0.0.1:3018
+cargo run -- -c=examples/grpc-web/grpc-web.toml --admin=127.0.0.1:3018
 ```
 
 ## Transparent Proxy
@@ -30,7 +30,7 @@ cargo run -- -c=~/github/pingap/examples/grpc-web.toml --admin=127.0.0.1:3018
 - Certificate should be set as default for all domains
 
 ```bash
-sudo cargo run -- -c=~/github/pingap/examples/transparent-proxy.toml --admin=127.0.0.1:3018
+sudo cargo run -- -c=examples/transparent-proxy/transparent-proxy.toml --admin=127.0.0.1:3018
 ```
 
 ```bash

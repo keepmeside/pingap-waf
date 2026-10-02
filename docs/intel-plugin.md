@@ -38,13 +38,20 @@ address only; use a CIDR feed when the complete range is required.
 
 Feed and manual entries are matched against the same resolved client address
 `ip_list` uses, and the construction gate covers `ip_list` alone, so a feed
-config constructs without `basic.trusted_proxies`. That leaves the address's
-trustworthiness to the operator: on a directly exposed node the peer address
-is the client's own, while behind a proxy an unset `basic.trusted_proxies`
-makes the match evadable with a forged `X-Forwarded-For` — set it, or the
-explicit peer assertion, when a feed's denial must actually deny. The
-challenge, behavioural and adaptive controls have a separate identity
-contract.
+config constructs without `basic.trusted_proxies` — though a feed-bearing entry
+still needs one static deny source (`ip_list`, `intel.manual`, or a request
+category with `mode = "block"`), or construction refuses it as selecting feeds
+but denying nothing. What the gate leaves to the operator is the address's
+trustworthiness: without `basic.trusted_proxies`, `X-Forwarded-For` is honoured
+from any peer, so even a directly connected client that sends the header
+chooses the address the match runs on — direct exposure is no remedy on this
+path. Only the trusted-proxy list changes the resolution: a peer not on it has
+its forwarded headers ignored and resolves to its own address. Set it to the
+addresses of the proxies in front of the node — or, on a directly exposed
+node, to any list that matches no real peer — when a feed's denial must
+actually deny. The challenge, behavioural and adaptive controls have a
+separate identity contract, where `client_ip_from_peer` asserts the peer
+address directly.
 
 ## Defaults
 

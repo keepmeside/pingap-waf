@@ -182,6 +182,10 @@ function guideSidebar(prefix: string, labels: {
           text: "Body forwarding",
           link: `${prefix}/guide/spikes/body-forwarding-finding`,
         },
+        {
+          text: "Egress guard",
+          link: `${prefix}/guide/spikes/egress-guard-finding`,
+        },
       ],
     },
   ];
