@@ -258,6 +258,16 @@ fn build() -> Vec<Route> {
             access: Access::Needs(Capability::ViewMetrics),
             handler: handler!(routes::metrics::dashboard),
         },
+        // The detection stack's per-domain counters, assembled by the provider
+        // the binary injects. Same capability as the routes above it: it is a
+        // window onto telemetry, never onto intent, and nothing about it is
+        // writable.
+        Route {
+            method: Method::GET,
+            path: "/metrics/detection",
+            access: Access::Needs(Capability::ViewMetrics),
+            handler: handler!(routes::metrics::detection),
+        },
         Route {
             method: Method::GET,
             path: "/alerts/channels",

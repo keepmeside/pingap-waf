@@ -105,11 +105,76 @@ async fn the_challenge_outcome_renders_into_an_access_log_line() {
     // The allow path with no marker writes nothing, which a log format must tolerate —
     // the field renders empty rather than as a stray literal `{:challenge_status}`.
     let mut ctx = Ctx::default();
-    let mut session = session_for("GET / HTTP/1.1\r\nHost: a.test\r\n\r\n").await;
+    let mut session =
+        session_for("GET / HTTP/1.1\r\nHost: a.test\r\n\r\n").await;
     plugin
         .handle_request(PluginStep::Request, &mut session, &mut ctx)
         .await
         .expect("handle_request is total");
     let rendered = parser.format(&session, &ctx);
     assert_eq!("status=", String::from_utf8_lossy(&rendered));
+}
+
+#[tokio::test]
+async fn the_key_identifier_travels_with_the_status_into_the_log_line() {
+    // Two nodes sharing traffic with two different pass-cookie secrets produce
+    // the same client-visible loop — solve on one, fail on the other — and the
+    // only honest in-log discriminator is which secret's authority each node
+    // acted under. `challenge_key_id` is this node's key identifier, published
+    // beside every status so the mismatch reads as two different ids in the two
+    // nodes' logs rather than as an unexplained solve rate.
+    use pingap_logger::Parser;
+
+    // A registered host of this test's own: the loop detector keys its counts
+    // by classified label, and every other test in this binary lands in the
+    // shared overflow bucket with the same mock identity — without a label of
+    // our own, this test's two issues are what tips that shared bucket over
+    // its threshold and a sibling's interstitial turns into a loop refusal.
+    pingap_domainstate::set_registered_hosts(["key.test"]);
+    let kid = pingap_challenge::cookie::key_id(b"test-secret");
+    let plugin = plugin();
+
+    let mut ctx = Ctx::default();
+    ctx.extensions
+        .insert(pingap_acl::ChallengeMarker::new("acl", "test"));
+    let mut session =
+        session_for("GET /account HTTP/1.1\r\nHost: key.test\r\n\r\n").await;
+    plugin
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("handle_request is total");
+    assert_eq!(
+        ctx.get_variable("challenge_key_id"),
+        Some(kid.as_str()),
+        "the key id is published beside the status"
+    );
+
+    // It renders as a log field, not just a variables-map entry.
+    let parser: Parser = "key={:challenge_key_id}".into();
+    let rendered = parser.format(&session, &ctx);
+    assert_eq!(format!("key={kid}"), String::from_utf8_lossy(&rendered));
+
+    // A different secret yields a different id, which is the entire signal: the
+    // second node of the mismatched pair logs this row with the other value.
+    let other = Challenge::new(ChallengeConfig {
+        enabled: true,
+        secret: "other-secret".into(),
+        client_ip_from_peer: true,
+        ..Default::default()
+    })
+    .expect("a valid challenge config builds");
+    let mut ctx = Ctx::default();
+    ctx.extensions
+        .insert(pingap_acl::ChallengeMarker::new("acl", "test"));
+    let mut session =
+        session_for("GET /account HTTP/1.1\r\nHost: key.test\r\n\r\n").await;
+    other
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("handle_request is total");
+    assert_ne!(
+        ctx.get_variable("challenge_key_id"),
+        Some(kid.as_str()),
+        "two secrets must yield two key ids, or the mismatch is invisible"
+    );
 }

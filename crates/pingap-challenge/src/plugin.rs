@@ -21,27 +21,36 @@ use pingap_core::{
 use pingap_domainstate::ClientIdentity;
 use pingap_plugin::{Error, get_plugin_factory, get_step_conf_in};
 use pingora::proxy::Session;
+use serde::Serialize;
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
+use tracing::debug;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 const CATEGORY: &str = "challenge";
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Default)]
+/// One domain's challenge counters, in the `Observation` shape: fixed-name fields,
+/// aggregate only, none keyed by client identity.
+///
+/// The key a row lives under is the *classified* domain label, never a raw `Host`
+/// value, so the map's cardinality is the registered host set plus one overflow
+/// row — a flood of generated `Host` headers grows counts, not keys.
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct ChallengeCounters {
-    pub issued: AtomicUsize,
-    pub solved: AtomicUsize,
-    pub failed: AtomicUsize,
-    pub expired: AtomicUsize,
-    pub bypassed: AtomicUsize,
-    pub saturated: AtomicUsize,
-    pub saturated_domains: AtomicUsize,
-    pub saturated_entries: AtomicUsize,
-    pub stateless_fallback: AtomicUsize,
-    pub exempt_hit: AtomicUsize,
+    pub issued: u64,
+    pub solved: u64,
+    pub failed: u64,
+    pub expired: u64,
+    pub bypassed: u64,
+    pub saturated: u64,
+    pub saturated_domains: u64,
+    pub saturated_entries: u64,
+    pub stateless_fallback: u64,
+    pub exempt_hit: u64,
 }
 
 #[derive(Debug)]
@@ -49,10 +58,25 @@ struct GlobalState {
     tokens: TokenStore,
     escalator: Escalator,
     loops: LoopDetector,
-    counters: ChallengeCounters,
+    counters: Mutex<BTreeMap<String, ChallengeCounters>>,
 }
 
 static GLOBAL: OnceLock<Arc<GlobalState>> = OnceLock::new();
+
+impl GlobalState {
+    /// Count one event for one domain label.
+    ///
+    /// One lock per bump, held for a map entry and a field increment — shorter than
+    /// the token-store lock the same paths already take, and taken after it, so the
+    /// two never nest in opposite orders.
+    fn count(&self, domain: &str, bump: impl FnOnce(&mut ChallengeCounters)) {
+        let mut rows = self
+            .counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        bump(rows.entry(domain.to_string()).or_default());
+    }
+}
 
 fn global(
     max_domains: usize,
@@ -65,16 +89,46 @@ fn global(
                 tokens: TokenStore::with_limits(max_domains, max_entries),
                 escalator: Escalator::new(max_entries),
                 loops: LoopDetector::with_capacity(loop_threshold, max_entries),
-                counters: ChallengeCounters::default(),
+                counters: Mutex::new(BTreeMap::new()),
             })
         })
         .clone()
+}
+
+/// The process-global per-domain counters, for the metrics surface to publish.
+///
+/// Empty until the first challenge plugin is constructed, which is the honest
+/// reading of a deployment with no challenge configured: there is nothing to count.
+/// `expired` is mirrored from the token store because the store is the only place
+/// an expiry is observed — a record is dropped the moment it is found stale, so the
+/// count lives where the drop happens and is attributed to the domain that owned
+/// the record.
+pub fn counters_snapshot() -> BTreeMap<String, ChallengeCounters> {
+    let Some(state) = GLOBAL.get() else {
+        return BTreeMap::new();
+    };
+    let mut rows = state
+        .counters
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    for (domain, expired) in state.tokens.expired_by_domain() {
+        rows.entry(domain).or_default().expired += expired;
+    }
+    rows
 }
 
 pub struct Challenge {
     plugin_step: PluginStep,
     config: ChallengeConfig,
     secret: Vec<u8>,
+    /// This node's pass-cookie key identifier: the first hex of the secret's
+    /// SHA-256, the same value baked into every pass cookie this node signs.
+    /// Published as an access-log variable beside `challenge_status` so a
+    /// solve loop caused by two nodes sharing traffic with two different
+    /// secrets reads as two different `challenge_key_id` values in the two
+    /// nodes' logs, rather than as an unexplained solve rate.
+    key_id: String,
     identity: Option<ClientIdentity>,
     exemptions: Exemptions,
     state: Arc<GlobalState>,
@@ -119,6 +173,7 @@ impl TryFrom<&PluginConf> for Challenge {
             })?;
         Ok(Self {
             plugin_step,
+            key_id: cookie::key_id(config.secret.as_bytes()),
             secret: config.secret.as_bytes().to_vec(),
             state: global(
                 config.max_domains,
@@ -134,6 +189,33 @@ impl TryFrom<&PluginConf> for Challenge {
 }
 
 impl Challenge {
+    /// Publish one challenge status with this node's key identifier beside it.
+    ///
+    /// The two travel together because the pair is what a cross-node secret
+    /// mismatch reads from: the status says what this node did with the
+    /// request, the key id says which secret's authority it did it under.
+    fn note(&self, ctx: &mut Ctx, status: &str) {
+        ctx.add_variable("challenge_status", status);
+        ctx.add_variable("challenge_key_id", &self.key_id);
+    }
+
+    /// Record one challenge decision as a log line naming the domain and the
+    /// reason, on the solved paths as well as the refused ones. The counters
+    /// are the aggregate record; the access-log variables are the per-request
+    /// one; this line is the attributable one an operator reads when asking
+    /// why a domain is challenging — at the same `debug` level the ACL and
+    /// WAF record their own per-request decisions, so turning it on is the
+    /// same act for all three.
+    fn record(&self, domain: &str, outcome: &str, reason: &str) {
+        debug!(
+            target: "challenge",
+            domain = domain,
+            outcome = outcome,
+            reason = reason,
+            "a challenge decision was recorded"
+        );
+    }
+
     pub fn new(config: ChallengeConfig) -> Result<Self> {
         let table =
             toml::Value::try_from(&config).map_err(|e| Error::Invalid {
@@ -144,22 +226,15 @@ impl Challenge {
         Self::try_from(&conf)
     }
 
-    pub fn counters(&self) -> &ChallengeCounters {
-        // The store owns the authoritative expiry count — it is the only place a stale
-        // record is observed and dropped. Mirror it into the read-only counter so the
-        // `expired` figure reflects what the store actually evicted rather than a field
-        // that was declared and never written.
-        self.state
-            .counters
-            .expired
-            .store(self.state.tokens.expired_count(), Ordering::Relaxed);
-        &self.state.counters
-    }
-
     fn domain(&self, session: &Session, ctx: &Ctx) -> String {
-        get_host(session.req_header())
-            .unwrap_or(ctx.upstream.location.as_ref())
-            .to_ascii_lowercase()
+        // Classified, not raw: the label is the registered host's canonical spelling
+        // or the one shared overflow label, so a flood of `Host` values cannot mint
+        // state keys, and every stateful component below — tokens, escalation, loop
+        // detection, the signed cookie — keys the same label for the same request.
+        pingap_domainstate::label(
+            get_host(session.req_header())
+                .unwrap_or(ctx.upstream.location.as_ref()),
+        )
     }
 
     fn identity(&self, session: &Session, ctx: &mut Ctx) -> String {
@@ -188,10 +263,7 @@ impl Challenge {
         identity: &str,
     ) -> Option<crate::escalation::EscalationState> {
         if self.exemptions.contains(identity) {
-            self.state
-                .counters
-                .exempt_hit
-                .fetch_add(1, Ordering::Relaxed);
+            self.state.count(domain, |row| row.exempt_hit += 1);
             return None;
         }
         Some(self.state.escalator.failure(
@@ -258,7 +330,8 @@ impl Challenge {
         if self.state.loops.looping(count)
             && self.config.bypass_on_loop == LoopBypass::Refuse
         {
-            self.state.counters.bypassed.fetch_add(1, Ordering::Relaxed);
+            self.state.count(domain, |row| row.bypassed += 1);
+            self.record(domain, "bypassed", "loop-detected");
             return HttpResponse::builder(http::StatusCode::FORBIDDEN)
                 .body(Bytes::from_static(b"Challenge loop detected"))
                 .finish();
@@ -280,14 +353,11 @@ impl Challenge {
         let token = match self.state.tokens.issue(token_id.clone(), record) {
             Ok(()) => token_id,
             Err(TokenError::FullDomains) => {
-                self.state
-                    .counters
-                    .saturated
-                    .fetch_add(1, Ordering::Relaxed);
-                self.state
-                    .counters
-                    .saturated_domains
-                    .fetch_add(1, Ordering::Relaxed);
+                self.state.count(domain, |row| {
+                    row.saturated += 1;
+                    row.saturated_domains += 1;
+                });
+                self.record(domain, "saturated", "domain-capacity");
                 return HttpResponse::builder(
                     http::StatusCode::SERVICE_UNAVAILABLE,
                 )
@@ -297,18 +367,12 @@ impl Challenge {
                 .finish();
             },
             Err(TokenError::FullEntries) => {
-                self.state
-                    .counters
-                    .saturated
-                    .fetch_add(1, Ordering::Relaxed);
-                self.state
-                    .counters
-                    .saturated_entries
-                    .fetch_add(1, Ordering::Relaxed);
-                self.state
-                    .counters
-                    .stateless_fallback
-                    .fetch_add(1, Ordering::Relaxed);
+                self.state.count(domain, |row| {
+                    row.saturated += 1;
+                    row.saturated_entries += 1;
+                    row.stateless_fallback += 1;
+                });
+                self.record(domain, "saturated", "entry-capacity");
                 token::stateless(
                     &self.secret,
                     domain,
@@ -320,7 +384,11 @@ impl Challenge {
                 )
             },
         };
-        self.state.counters.issued.fetch_add(1, Ordering::Relaxed);
+        self.state.count(domain, |row| row.issued += 1);
+        // The marker's reason is the originating policy's reason — which rule
+        // challenged, or which threshold tripped — and it is what makes this
+        // line answer "why was this domain challenging", not only "that it was".
+        self.record(domain, "issued", &marker.reason);
         let body = match kind {
             ChallengeKind::Pow => page::pow(
                 &token,
@@ -359,7 +427,8 @@ impl Challenge {
             }
         }
         let Some(token_value) = token_value else {
-            self.state.counters.failed.fetch_add(1, Ordering::Relaxed);
+            self.state.count(domain, |row| row.failed += 1);
+            self.record(domain, "failed", "missing-token");
             return HttpResponse::bad_request("missing challenge token");
         };
         let stateful = self.state.tokens.get(
@@ -378,7 +447,8 @@ impl Challenge {
             )
         });
         let Some(record) = record else {
-            self.state.counters.failed.fetch_add(1, Ordering::Relaxed);
+            self.state.count(domain, |row| row.failed += 1);
+            self.record(domain, "failed", "invalid-token");
             return HttpResponse::builder(http::StatusCode::FORBIDDEN)
                 .body(Bytes::from_static(b"Invalid or expired challenge"))
                 .finish();
@@ -400,7 +470,8 @@ impl Challenge {
                     self.state.tokens.remove(token_value);
                 }
             }
-            self.state.counters.failed.fetch_add(1, Ordering::Relaxed);
+            self.state.count(domain, |row| row.failed += 1);
+            self.record(domain, "failed", "proof-failed");
             return HttpResponse::builder(http::StatusCode::FORBIDDEN)
                 .body(Bytes::from_static(b"Challenge proof failed"))
                 .finish();
@@ -416,7 +487,8 @@ impl Challenge {
             let prefix = format!("{token_value}|");
             let Some(raw) = raw.filter(|value| value.starts_with(&prefix))
             else {
-                self.state.counters.failed.fetch_add(1, Ordering::Relaxed);
+                self.state.count(domain, |row| row.failed += 1);
+                self.record(domain, "failed", "fingerprint-missing");
                 return HttpResponse::builder(http::StatusCode::FORBIDDEN)
                     .body(Bytes::from_static(
                         b"Missing silent challenge fingerprint",
@@ -439,7 +511,8 @@ impl Challenge {
                 .take(token_value, domain, identity, SystemTime::now())
                 .is_none()
         {
-            self.state.counters.failed.fetch_add(1, Ordering::Relaxed);
+            self.state.count(domain, |row| row.failed += 1);
+            self.record(domain, "failed", "token-consumed");
             return HttpResponse::builder(http::StatusCode::FORBIDDEN)
                 .body(Bytes::from_static(
                     b"Challenge token was already consumed",
@@ -450,7 +523,11 @@ impl Challenge {
         self.state
             .escalator
             .success(domain, identity, self.config.decay);
-        self.state.counters.solved.fetch_add(1, Ordering::Relaxed);
+        self.state.count(domain, |row| row.solved += 1);
+        // The token's kind is the honest reason on this path: the marker that
+        // originated the challenge belonged to the earlier request, and what
+        // this decision records is which proof the client satisfied.
+        self.record(domain, "solved", &record.kind);
         let value = cookie::sign(
             &self.secret,
             domain,
@@ -480,7 +557,7 @@ impl Challenge {
         if let Some(value) = location {
             response = response.header((header::LOCATION, value));
         }
-        ctx.add_variable("challenge_status", "solved");
+        self.note(ctx, "solved");
         response.finish()
     }
 }
@@ -521,7 +598,8 @@ impl Plugin for Challenge {
         })
         .is_some()
         {
-            ctx.add_variable("challenge_status", "solved");
+            self.note(ctx, "solved");
+            self.record(&domain, "solved", "pass-cookie");
             return Ok(RequestPluginResult::Continue);
         }
         let Some(mut marker) = ctx.extensions.get::<ChallengeMarker>().cloned()
@@ -547,13 +625,14 @@ impl Plugin for Challenge {
                 .saturating_add(snapshot.decision.challenge_level);
         }
         let Some(escalation) = self.escalation_for(&domain, &identity) else {
-            ctx.add_variable("challenge_status", "exempt");
+            self.note(ctx, "exempt");
+            self.record(&domain, "exempt", "exempt");
             return Ok(RequestPluginResult::Continue);
         };
         marker.level = marker.level.max(escalation.level);
         let response =
             self.issue(&marker, &domain, &identity, Self::target(session));
-        ctx.add_variable("challenge_status", "issued");
+        self.note(ctx, "issued");
         Ok(RequestPluginResult::Respond(response))
     }
 }

@@ -377,7 +377,45 @@ impl AdminServe {
                     )
                     .map_err(|e| e.to_string())?,
                 ))
-                .with_optional_backup_dir(self.backup_dir.clone()))
+                .with_optional_backup_dir(self.backup_dir.clone())
+                .with_detection_metrics(Arc::new(|| {
+                    // The one place the detection crates' published
+                    // snapshots meet: the admin API holds no
+                    // detection-crate dependency, so the vocabulary —
+                    // counter names, reason strings, feed names — is
+                    // assembled here, on the process that produces it.
+                    // Every snapshot is already classified and bounded:
+                    // keys are the registered domain set plus the
+                    // overflow label, never a raw Host, and the intel
+                    // half carries counts, not rules.
+                    serde_json::json!({
+                        "challenge":
+                            pingap_challenge::counters_snapshot(),
+                        // Markers the waf/acl entries wrote, by classified
+                        // domain label — the write-side half of the
+                        // ordering-gap signal: a row here that moves while the
+                        // same label's `challenge.issued` stays at zero means
+                        // markers are being written that no challenge entry
+                        // ever reads.
+                        "challenge_markers":
+                            pingap_acl::marker::counters_snapshot(),
+                        "behaviour":
+                            pingap_behaviour::counters_snapshot(),
+                        // Distinct identities each domain label currently
+                        // tracks. The counters above count events; this
+                        // counts clients. When every request lands on one
+                        // identity — the shape a false
+                        // `client_ip_from_peer` assertion produces — this
+                        // gauge pins at 1 while the same label's request
+                        // counters climb.
+                        "behaviour_tracked":
+                            pingap_behaviour::tracked_snapshot(),
+                        "adaptive":
+                            pingap_adaptive::domain_state_snapshot(),
+                        "intel": pingap_intel::feed_stats_snapshot(),
+                        "generated_at": pingap_core::now_sec(),
+                    })
+                })))
             })
             .await
     }

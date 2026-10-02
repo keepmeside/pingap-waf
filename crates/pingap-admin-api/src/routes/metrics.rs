@@ -78,6 +78,27 @@ pub async fn dashboard(
     ApiResponse::json(&json!({"metrics": metrics, "drift": drift(state).await}))
 }
 
+/// The detection stack's published snapshots, assembled by the provider the
+/// binary injected. The provider owns the vocabulary — this crate never names
+/// a counter — so the handler is one access decision and one call.
+pub async fn detection(
+    state: &AppState,
+    _request: &ApiRequest,
+    _params: &[String],
+) -> Result<ApiResponse> {
+    let Some(source) = &state.detection_metrics else {
+        // No provider wired in means the detection stack is not part of this
+        // deployment. `Unavailable` rather than an empty object: `{}` would
+        // read as "nothing detected", which is a different and false claim.
+        return Err(ApiError::Unavailable {
+            reason: "the detection metrics provider is not wired into this \
+                     deployment, so there is nothing to publish"
+                .to_string(),
+        });
+    };
+    ApiResponse::json(&source())
+}
+
 async fn drift(state: &AppState) -> Value {
     let Some(source) = &state.config_source else {
         return json!({"status": "unavailable"});

@@ -14,5 +14,5 @@ pub mod silent;
 pub mod token;
 
 pub use config::{ChallengeConfig, ChallengeKind, ConfigError};
-pub use plugin::Challenge;
+pub use plugin::{Challenge, ChallengeCounters, counters_snapshot};
 pub use token::{ChallengeRecord, TokenStore};

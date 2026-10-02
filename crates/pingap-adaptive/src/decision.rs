@@ -1,3 +1,11 @@
+//! The ratio ladder: current traffic against the learned hourly expectation,
+//! one named branch per step.
+//!
+//! Ported from mango-waf `detection/adaptive.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for a ladder that only ever tightens within the operator's configured
+//! bounds, with loosening behind an explicit opt-in; a reason string on every
+//! branch is preserved from the donor deliberately.
+
 use crate::config::AdaptiveConfig;
 
 #[derive(Debug, Clone, PartialEq)]

@@ -56,7 +56,6 @@ crc32fast = { workspace = true }
 tempfile = { workspace = true }
 # Session and refresh tokens are stored hashed, never in the clear.
 sha2 = { workspace = true }
-hex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 snafu = { workspace = true }

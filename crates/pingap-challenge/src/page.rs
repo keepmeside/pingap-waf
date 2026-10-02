@@ -1,3 +1,10 @@
+//! The rendered challenge surfaces: the proof-of-work interstitial and the silent
+//! challenge's injected snippet.
+//!
+//! Ported from mango-waf `fingerprint/silent_js.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for fixed assets whose inputs are read back from the DOM, so no
+//! request-derived value can reach an inline script position.
+
 const HTML: &str = include_str!("../assets/challenge.html");
 const SILENT: &str = include_str!("../assets/silent.js");
 const POW_SOLVER: &str = include_str!("../assets/pow-solver.js");

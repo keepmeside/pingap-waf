@@ -8,9 +8,7 @@
 
 mod common;
 
-use common::{
-    TRUSTED_PROXY, session, set_trusted_proxies, trusted_proxy_lock,
-};
+use common::{TRUSTED_PROXY, session, set_trusted_proxies, trusted_proxy_lock};
 use pingap_domainstate::IdentitySource;
 use pingap_domainstate::identity::ClientIdentity;
 

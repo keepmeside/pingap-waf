@@ -1067,6 +1067,39 @@ paths:
         '503':
           $ref: '#/components/responses/StoreUnavailable'
 
+  /metrics/detection:
+    get:
+      tags: [metrics]
+      operationId: getDetectionMetrics
+      summary: The detection stack's per-domain counters
+      description: |
+        One JSON document assembled from the detection crates' published
+        snapshots: challenge, behaviour and adaptive counters keyed by
+        classified domain label, the per-domain count of challenge markers
+        the waf/acl entries wrote, and intel feed refresh stats. Keys outside
+        the configured host set collapse into a single overflow label, so the
+        document's key set is bounded by configuration, not by traffic.
+
+        Counters are aggregate and per-domain; none is keyed by client
+        identity, and no rule content or request content appears. A
+        deployment without the detection stack wired in answers 503 naming
+        the missing provider, never an empty object that would read as
+        "nothing detected".
+      x-required-capability: view_metrics
+      responses:
+        '200':
+          description: The detection snapshots, generated at request time.
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+
   /alerts/channels:
     get:
       tags: [alerts]

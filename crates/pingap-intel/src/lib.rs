@@ -12,6 +12,7 @@ pub mod task;
 pub use config::{Definition, FeedConf, IntelConf, Limits, Plan};
 pub use feed::{FeedError, FeedResult, fetch};
 pub use set::{
-    FeedMatch, FeedRegistry, FeedSnapshot, RefreshStats, global_registry,
+    FeedEntryStats, FeedMatch, FeedRegistry, FeedSnapshot, FeedStatsSnapshot,
+    RefreshStats, feed_stats_snapshot, global_registry,
     install_global_registry,
 };

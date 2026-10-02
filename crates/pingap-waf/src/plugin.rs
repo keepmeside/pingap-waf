@@ -20,6 +20,7 @@ use bytes::Bytes;
 use ctor::ctor;
 use http::StatusCode;
 use pingap_acl::ChallengeMarker;
+use pingap_acl::marker::count_write;
 use pingap_config::PluginConf;
 use pingap_core::{
     Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
@@ -309,6 +310,12 @@ impl Waf {
         state.blocked = true;
     }
 
+    /// The threat-intelligence registry this policy matches against, for the
+    /// surfaces that need to observe what the policy selected.
+    pub fn intel_registry(&self) -> Option<&Arc<FeedRegistry>> {
+        self.intel.as_ref()
+    }
+
     /// Build the IP filter, refusing the two configurations that would be worse than
     /// having none.
     fn build_ip_filter(
@@ -573,6 +580,14 @@ impl Plugin for Waf {
 
         if blocking {
             if evaluation.verdict.is_challenge() {
+                // Counted beside the write, in the challenge plugin's own
+                // classified-label space: the read side cannot observe a
+                // challenge entry that never runs, so the write is the side
+                // that moves. See `pingap-acl/src/marker.rs` for the argument.
+                count_write(&pingap_domainstate::label(
+                    pingap_core::get_host(session.req_header())
+                        .unwrap_or(ctx.upstream.location.as_ref()),
+                ));
                 ctx.extensions.insert(ChallengeMarker::new(
                     CATEGORY,
                     "anomaly-threshold".to_string(),
@@ -978,6 +993,46 @@ categories = { sql_injection = "challenge" }
             ctx.extensions
                 .get::<WafState>()
                 .is_some_and(|state| state.challenged)
+        );
+    }
+
+    #[tokio::test]
+    async fn challenge_mode_counts_its_marker_write_beside_the_write() {
+        // Same argument as the ACL side: the counter must move at the write,
+        // because an out-of-order or missing challenge entry never reads the
+        // marker. The registered host keeps this test's writes alone in their
+        // row — nothing else in this module sends that `Host`.
+        pingap_domainstate::set_registered_hosts(["verify.test"]);
+        let waf = plugin(
+            r#"category = "waf"
+anomaly_threshold = 1
+categories = { sql_injection = "challenge" }
+"#,
+        );
+        let before = pingap_acl::marker::counters_snapshot()
+            .get("verify.test")
+            .copied()
+            .unwrap_or(0);
+        let mut ctx = Ctx::default();
+        let mut session = session_for(
+            "GET /s?q=%27+UNION+SELECT+pw+FROM+users+--+ HTTP/1.1\r\nHost: verify.test\r\n\r\n",
+        )
+        .await;
+        let result = waf
+            .handle_request(PluginStep::Request, &mut session, &mut ctx)
+            .await
+            .expect("evaluation is total");
+        assert!(matches!(result, RequestPluginResult::Continue));
+        assert!(
+            ctx.extensions.get::<ChallengeMarker>().is_some(),
+            "the request was challenged, so the marker was written"
+        );
+        let after = pingap_acl::marker::counters_snapshot();
+        assert_eq!(
+            after.get("verify.test"),
+            Some(&(before + 1)),
+            "the waf marker write is counted under the request's classified \
+             label"
         );
     }
 

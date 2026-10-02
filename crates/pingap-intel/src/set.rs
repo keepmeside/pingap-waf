@@ -1,4 +1,9 @@
 //! Atomic, attributable publication of feed contributions.
+//!
+//! Ported from mango-waf `intelligence/feeds.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for build-then-swap publication with per-feed attribution, because the
+//! donor accumulated into a map nothing evicted from, so an address that left a
+//! feed stayed blocked forever.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -7,6 +12,7 @@ use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
 use pingap_util::IpRules;
+use serde::Serialize;
 
 use crate::config::{Definition, Plan};
 use crate::feed::{FeedError, FeedResult, fetch};
@@ -17,7 +23,7 @@ pub struct FeedMatch {
     pub category: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RefreshStats {
     pub fetch_errors: u64,
     pub stale_drops: u64,
@@ -41,6 +47,62 @@ pub struct FeedContribution {
     pub rules: IpRules,
     pub entries: usize,
     pub fetched_at: SystemTime,
+}
+
+/// One feed's published stats: the category, the entry count and when it was
+/// last fetched. The rules themselves are the request-path artefact — not
+/// serialisable, and not a metric.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedEntryStats {
+    pub category: String,
+    pub entries: usize,
+    pub fetched_at: u64,
+}
+
+/// The serialisable projection of a [`FeedSnapshot`] for the metrics surface:
+/// generation, refresh stats, and per-feed stats. The rule maps are dropped —
+/// what is published is aggregate counts, never the rules.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedStatsSnapshot {
+    pub generation: u64,
+    /// Unix seconds; `None` until the first refresh completes.
+    pub refreshed_at: Option<u64>,
+    pub stats: RefreshStats,
+    pub feeds: BTreeMap<String, FeedEntryStats>,
+}
+
+impl FeedSnapshot {
+    /// The serialisable projection of this snapshot for the metrics surface.
+    /// The feed names are the configured, fixed enumeration — never a value
+    /// read from a request — and the BTreeMap ordering makes the projection
+    /// deterministic for the same snapshot.
+    pub fn stats_projection(&self) -> FeedStatsSnapshot {
+        FeedStatsSnapshot {
+            generation: self.generation,
+            refreshed_at: self.refreshed_at.map(unix_secs),
+            stats: self.stats.clone(),
+            feeds: self
+                .feeds
+                .iter()
+                .map(|(name, contribution)| {
+                    (
+                        name.clone(),
+                        FeedEntryStats {
+                            category: contribution.category.clone(),
+                            entries: contribution.entries,
+                            fetched_at: unix_secs(contribution.fetched_at),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+fn unix_secs(at: SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(Debug)]
@@ -136,12 +198,19 @@ impl FeedRegistry {
     pub fn apply(
         &self,
         result: Result<FeedResult, FeedError>,
+        opt_outs: u64,
         now: SystemTime,
     ) {
         let mut state = match self.inner.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
+        // Accumulated before the outcome is inspected: the opt-out count is the
+        // audit signal for `allow_private_targets`, and a fetch that reached a
+        // private mirror before failing permitted the same decision a successful
+        // one did.
+        state.stats.allow_private_targets =
+            state.stats.allow_private_targets.saturating_add(opt_outs);
         let (name, fetched) = match result {
             Ok(result) => {
                 if let Some(feed) = self
@@ -239,8 +308,9 @@ impl FeedRegistry {
             return false;
         }
         for definition in definitions {
-            let result = fetch(&definition, self.inner.limits, now).await;
-            self.apply(result, now);
+            let (result, opt_outs) =
+                fetch(&definition, self.inner.limits, now).await;
+            self.apply(result, opt_outs, now);
         }
         true
     }
@@ -281,6 +351,13 @@ pub fn global_registry() -> Option<Arc<FeedRegistry>> {
             .iter()
             .find_map(Weak::upgrade)
     })
+}
+
+/// The process-global feed stats, for the metrics surface to publish. `None`
+/// when no registry is installed, which is the honest reading of a deployment
+/// with no intel feeds configured: there is nothing to publish.
+pub fn feed_stats_snapshot() -> Option<FeedStatsSnapshot> {
+    global_registry().map(|registry| registry.snapshot().stats_projection())
 }
 
 pub async fn refresh_all() -> bool {

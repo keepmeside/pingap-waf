@@ -8,8 +8,8 @@
 
 use super::hash::canonical_toml;
 use super::{
-    Certificate, Domain, Intent, Listener, Projected, ProjectionError, Result,
-    Upstream,
+    Certificate, Domain, Intent, Listener, PolicyBinding, Projected,
+    ProjectionError, Result, Upstream,
 };
 use bytesize::ByteSize;
 use pingap_config::{
@@ -194,6 +194,36 @@ fn certificate_conf(
 }
 
 fn location_conf(name: &str, domain: &Domain) -> Result<LocationConf> {
+    // A challenge entry reads the marker a waf/acl entry writes, and plugins run
+    // in list order — a challenge listed before its marker-writer never sees the
+    // marker, so the policy the operator believes is enforcing is a silent no-op.
+    // Refused naming both entries rather than projected into an unprotected
+    // Location. Behaviour and adaptive are advisory readers of the same walk and
+    // cannot originate a refusal, so their ordering degrades advice, never
+    // protection, and is not refused here.
+    for (at, binding) in domain.policies.iter().enumerate() {
+        if let PolicyBinding::Challenge(_) = binding {
+            // A writer anywhere *after* the challenge runs later in list order,
+            // so the marker it writes is not there when the challenge reads.
+            for writer in &domain.policies[at + 1..] {
+                if matches!(
+                    writer,
+                    PolicyBinding::Waf(_) | PolicyBinding::Acl(_)
+                ) {
+                    return Err(ProjectionError::BadValue {
+                        field: format!("domain `{name}`.policies"),
+                        value: binding.entry_name(),
+                        reason: format!(
+                            "precedes `{}`: plugins run in list order and a \
+                             challenge entry reads the marker the waf/acl \
+                             entry writes, so this order never challenges",
+                            writer.entry_name(),
+                        ),
+                    });
+                }
+            }
+        }
+    }
     let client_max_body_size = match &domain.client_max_body_size {
         Some(value) => Some(ByteSize::from_str(value).map_err(|e| {
             ProjectionError::BadValue {

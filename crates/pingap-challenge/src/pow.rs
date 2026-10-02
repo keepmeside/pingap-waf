@@ -1,3 +1,11 @@
+//! The proof-of-work digest and its difficulty check: SHA-256 over salt and
+//! nonce, solved when enough leading bits are zero.
+//!
+//! Ported from mango-waf `challenge/challenge.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for difficulty bounds enforced at config load; the token store's
+//! single-use, identity-bound semantics are this fork's own, written from
+//! observable behaviour rather than ported (see ./NOTICE).
+
 use sha2::{Digest, Sha256};
 
 pub fn digest(salt: &str, nonce: u64) -> [u8; 32] {

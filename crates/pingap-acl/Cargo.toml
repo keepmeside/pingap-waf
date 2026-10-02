@@ -26,6 +26,7 @@ plugin = [
     "dep:http",
     "dep:pingap-config",
     "dep:pingap-core",
+    "dep:pingap-domainstate",
     "dep:pingora",
     "dep:toml",
     "dep:tracing",
@@ -58,6 +59,10 @@ ctor = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 pingap-config = { workspace = true, optional = true }
 pingap-core = { workspace = true, optional = true }
+# The classified domain label the marker-written counter keys its rows by. The
+# marker itself stays pure; only the plugin's write site classifies, so the
+# label space cannot drift from the one the challenge plugin counts in.
+pingap-domainstate = { workspace = true, optional = true }
 pingora = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }

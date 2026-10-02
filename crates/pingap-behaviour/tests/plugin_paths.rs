@@ -93,7 +93,8 @@ async fn the_score_and_profile_render_into_an_access_log_line() {
     let fields: Vec<&str> = line.split('|').collect();
     assert_eq!(fields.len(), 2, "expected two fields: {line}");
     assert!(
-        !fields[0].is_empty() && fields[0].chars().all(|c| c.is_ascii_digit() || c == '.'),
+        !fields[0].is_empty()
+            && fields[0].chars().all(|c| c.is_ascii_digit() || c == '.'),
         "behaviour_score did not render a number: {line}"
     );
     assert!(

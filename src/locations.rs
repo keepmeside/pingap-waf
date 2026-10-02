@@ -79,5 +79,20 @@ pub fn try_init_locations(
         locations.insert(name.to_string(), Arc::new(lo));
     }
     LOCATION_PROVIDER.store(locations);
+    // The registered-host set every stateful subsystem classifies a request's Host
+    // against, derived here because a Location's `host` restriction is the one place
+    // the config names the hosts it serves. Deriving it in the same pass as the
+    // locations themselves is what keeps classification and routing on the same
+    // config — boot and every reload both come through this function. A Location
+    // with no host restriction matches every host, so it registers nothing: its
+    // traffic is exactly the traffic that lands in the shared overflow bucket, the
+    // trade the domain-state design records, made visible by the overflow counters.
+    pingap_domainstate::set_registered_hosts(
+        location_configs
+            .values()
+            .filter_map(|conf| conf.host.as_deref())
+            .flat_map(|hosts| hosts.split(','))
+            .map(str::trim),
+    );
     Ok(updated_locations)
 }

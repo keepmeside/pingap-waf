@@ -10,7 +10,6 @@ publish = false
 
 [dependencies]
 pingora = { version = "0.8.1", default-features = false, features = ["lb"] }
-pingora-core = "0.8.1"
 pingora-proxy = "0.8.1"
 async-trait = "0.1"
 bytes = "1"

@@ -1,4 +1,9 @@
 //! Fetch one feed under the Tier-1 egress guard.
+//!
+//! Ported from mango-waf `intelligence/feeds.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for a fetch that must refuse where it connects, cap what it reads and
+//! count every failure, because the donor's bare `httpClient.Get` shipped none of
+//! the three.
 
 use std::time::SystemTime;
 
@@ -38,13 +43,29 @@ pub struct FeedResult {
 
 /// Fetch and parse one configured feed. The URL is checked before the request because
 /// reqwest never calls a resolver for an IP literal.
+///
+/// Returns the outcome beside the guard's opt-out count, so the caller can record
+/// how many reserved-address decisions the `allow_private_targets` opt-out permitted.
+/// The count rides on both arms: a fetch that reached a private mirror and then
+/// failed still made the permitted decision, and the audit signal is the connection,
+/// not the parse.
 pub async fn fetch(
     definition: &Definition,
     limits: Limits,
     fetched_at: SystemTime,
-) -> Result<FeedResult, FeedError> {
+) -> (Result<FeedResult, FeedError>, u64) {
     let guard =
         Guard::new(definition.allow_private_targets, limits.redirect_hops);
+    let outcome = fetch_under(&guard, definition, limits, fetched_at).await;
+    (outcome, guard.opt_outs())
+}
+
+async fn fetch_under(
+    guard: &Guard,
+    definition: &Definition,
+    limits: Limits,
+    fetched_at: SystemTime,
+) -> Result<FeedResult, FeedError> {
     guard
         .check_url(&definition.url)
         .map_err(|source| FeedError::Egress {

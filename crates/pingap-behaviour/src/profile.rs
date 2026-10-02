@@ -1,3 +1,9 @@
+//! The bounded per-client observation window every signal reads from.
+//!
+//! Ported from mango-waf `detection/behavior.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for a cap on every map with an overflow counter in its place, and for
+//! storage on the domain-scoped container rather than a process-global map.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 

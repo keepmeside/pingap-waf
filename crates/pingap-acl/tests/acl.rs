@@ -198,6 +198,33 @@ async fn a_challenge_rule_writes_a_marker_and_does_not_reach_upstream() {
     );
 }
 
+#[tokio::test]
+async fn a_challenge_rule_counts_its_marker_write_under_the_classified_label() {
+    // The write is counted beside the write itself because the read cannot
+    // observe its own gap: a challenge entry that is out of order or missing
+    // never reads the marker, so a moving write-count beside a still
+    // `challenge.issued` row under the same label is what makes that visible
+    // from metrics. A registered host keeps this test's writes alone in their
+    // row — no other test in this binary sends that `Host`.
+    pingap_domainstate::set_registered_hosts(["verify.test"]);
+    let acl = plugin(
+        "category = \"acl\"\nrules = [ { field = \"method\", operator = \"equals\", values = [\"GET\"], action = \"challenge\" } ]\n",
+    );
+    let before = pingap_acl::marker::counters_snapshot()
+        .get("verify.test")
+        .copied()
+        .unwrap_or(0);
+    let (status, _) =
+        status_of(&acl, "GET /x HTTP/1.1\r\nHost: verify.test\r\n\r\n").await;
+    assert_eq!(status, None);
+    let after = pingap_acl::marker::counters_snapshot();
+    assert_eq!(
+        after.get("verify.test"),
+        Some(&(before + 1)),
+        "the marker write is counted under the request's classified label"
+    );
+}
+
 /// SHA-256 of `hunter2`, which is what the access-list config stores instead of the
 /// password itself.
 const HUNTER2: &str =

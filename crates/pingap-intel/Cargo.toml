@@ -56,7 +56,6 @@ snafu = { workspace = true }
 tokio = { workspace = true, features = ["net", "time"] }
 # The plugin conf this crate's config is read out of is a `toml::Map`.
 toml = { workspace = true }
-tracing = { workspace = true }
 # Parsing the configured feed URL, and the per-hop URL a redirect policy is handed.
 # `reqwest::Url` is this type, so the two are the same value.
 url = { workspace = true }
@@ -90,6 +89,10 @@ tokio = { workspace = true, features = [
     "io-util",
 ] }
 toml = { workspace = true }
+# The stats-projection test asserts the published projection serialises into
+# the JSON the metrics route serves — asserted on serde_json itself, not on a
+# shape that merely looks serialisable.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

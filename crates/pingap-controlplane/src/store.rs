@@ -1934,10 +1934,8 @@ mod tests {
         // The bundle outlives its schedule: deleting the schedule detaches the file's
         // reference rather than deleting the record, because the bundle still exists on
         // disk and is still restorable.
-        let files = store
-            .list_backup_files()
-            .await
-            .expect("files after delete");
+        let files =
+            store.list_backup_files().await.expect("files after delete");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].schedule_id, None);
         // Deleting it again is a NotFound, not a quiet second success.

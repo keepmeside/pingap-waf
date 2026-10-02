@@ -30,5 +30,18 @@ pingap-logger = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tokio-test = "0.4.4"
 
+# `harness = false` with no framework: like the detector latency bench, this times
+# single calls and reads percentiles off the sorted samples, because the decision
+# the measurement owes (does recording stay per-request?) reads p99, and a batch
+# mean is not a p99.
+[[bench]]
+name = "sampling"
+harness = false
+
 [lints]
 workspace = true
+
+# `humantime-serde` is used only inside `#[serde(with = …)]` attributes, which
+# cargo-machete cannot see.
+[package.metadata.cargo-machete]
+ignored = ["humantime-serde"]

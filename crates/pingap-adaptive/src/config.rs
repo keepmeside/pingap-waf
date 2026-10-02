@@ -35,6 +35,8 @@ pub struct AdaptiveConfig {
     pub min_factor: f64,
     #[serde(default)]
     pub allow_loosening: bool,
+    #[serde(default = "default_modulate_rate_limit")]
+    pub modulate_rate_limit: bool,
     #[serde(default = "default_persist")]
     pub persist: bool,
     #[serde(default = "default_age_days")]
@@ -87,6 +89,12 @@ const fn default_factor_extreme() -> f64 {
 const fn default_min_factor() -> f64 {
     0.1
 }
+/// The rate-limit dial defaults to on because the landed behaviour is that a
+/// calibrated decision modulates the configured limiter's ceiling; an
+/// operator who never wants that must say so once, explicitly.
+const fn default_modulate_rate_limit() -> bool {
+    true
+}
 const fn default_persist() -> bool {
     true
 }
@@ -116,6 +124,7 @@ impl Default for AdaptiveConfig {
             factor_extreme: default_factor_extreme(),
             min_factor: default_min_factor(),
             allow_loosening: false,
+            modulate_rate_limit: default_modulate_rate_limit(),
             persist: default_persist(),
             max_baseline_age_days: default_age_days(),
             sample_window: default_window(),

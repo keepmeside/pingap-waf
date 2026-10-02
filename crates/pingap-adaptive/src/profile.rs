@@ -1,3 +1,10 @@
+//! One hour's bounded sample window: the learned expectation a ratio is taken
+//! against.
+//!
+//! Ported from mango-waf `detection/adaptive.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! The bounded sample window is the one memory property the donor gets right here
+//! and is preserved exactly; serde is added so the aggregate persists.
+
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 

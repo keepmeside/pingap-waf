@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -26,6 +26,11 @@ pub struct TokenStore {
     inner: Arc<Mutex<HashMap<String, ChallengeRecord>>>,
     domains: Arc<Mutex<HashSet<String>>>,
     expired: Arc<AtomicUsize>,
+    /// The same expiries the total counts, attributed to the domain each dropped
+    /// record belonged to. A per-domain counter with no per-domain source would
+    /// be a field that can never be written honestly, so the attribution is
+    /// collected where the drop is observed.
+    expired_by_domain: Arc<Mutex<BTreeMap<String, u64>>>,
     max_domains: usize,
     max_entries: usize,
 }
@@ -40,6 +45,7 @@ impl TokenStore {
             inner: Arc::new(Mutex::new(HashMap::new())),
             domains: Arc::new(Mutex::new(HashSet::new())),
             expired: Arc::new(AtomicUsize::new(0)),
+            expired_by_domain: Arc::new(Mutex::new(BTreeMap::new())),
             max_domains: max_domains.max(1),
             max_entries: max_entries.max(1),
         }
@@ -55,18 +61,45 @@ impl TokenStore {
         self.expired.load(Ordering::Relaxed)
     }
 
-    /// Drop every record whose `expires_at` is at or before `now`, counting each.
-    /// Called inside `issue`'s sweep so expiry is measured, not silent.
+    /// Evictions attributed per domain, so the published per-domain `expired`
+    /// counter has a per-domain source. The caller merges this into the row keyed
+    /// by the label the record's domain was classified under.
+    pub fn expired_by_domain(&self) -> BTreeMap<String, u64> {
+        self.expired_by_domain
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Record `count` expiries against `domain`: the total, and the per-domain
+    /// attribution that mirrors it.
+    fn count_expired(&self, domain: &str, count: u64) {
+        self.expired.fetch_add(count as usize, Ordering::Relaxed);
+        let mut by_domain = self
+            .expired_by_domain
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *by_domain.entry(domain.to_string()).or_default() += count;
+    }
+
+    /// Drop every record whose `expires_at` is at or before `now`, counting each
+    /// drop and attributing it to the domain that owned the record. Called inside
+    /// `issue`'s sweep so expiry is measured, not silent.
     fn sweep_expired(
+        &self,
         guard: &mut HashMap<String, ChallengeRecord>,
-        expired: &AtomicUsize,
         now: SystemTime,
     ) {
-        let before = guard.len();
-        guard.retain(|_, value| value.expires_at > now);
-        let dropped = before - guard.len();
-        if dropped > 0 {
-            expired.fetch_add(dropped, Ordering::Relaxed);
+        let mut dropped: BTreeMap<String, u64> = BTreeMap::new();
+        guard.retain(|_, value| {
+            if value.expires_at > now {
+                return true;
+            }
+            *dropped.entry(value.domain.clone()).or_default() += 1;
+            false
+        });
+        for (domain, count) in dropped {
+            self.count_expired(&domain, count);
         }
     }
 
@@ -80,7 +113,7 @@ impl TokenStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = SystemTime::now();
-        Self::sweep_expired(&mut guard, &self.expired, now);
+        self.sweep_expired(&mut guard, now);
         let mut domains = self
             .domains
             .lock()
@@ -168,14 +201,16 @@ impl TokenStore {
             }
             result
         } else {
-            if guard
+            if let Some(stale) = guard
                 .get(token)
-                .is_some_and(|record| record.expires_at <= now)
+                .filter(|record| record.expires_at <= now)
+                .cloned()
             {
                 guard.remove(token);
                 // A token the client held out for verification is now proven stale:
-                // it expired in hand, so it counts here, not only in the issue sweep.
-                self.expired.fetch_add(1, Ordering::Relaxed);
+                // it expired in hand, so it counts here, not only in the issue sweep,
+                // attributed to the domain that owned it.
+                self.count_expired(&stale.domain, 1);
             }
             None
         }

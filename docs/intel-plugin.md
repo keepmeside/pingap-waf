@@ -58,5 +58,14 @@ link-local metadata address — is enforced at connection time and is not a conf
 `staleness`, `max_body_bytes` and `max_entries` are chosen limits, not figures measured against
 production traffic; treat them as starting points to tune, not as validated values.
 
+## Published state
+
+Per-feed statistics — generation, refresh outcome counts, and per configured feed its
+category, accepted entry count and last successful fetch time — are published as JSON on the
+admin API at `GET /api/metrics/detection` (capability `view_metrics`). The published
+projection carries counts only: no feed rule, no address list, and no fetched content leaves
+the process through it. The feed names in it are the configured, fixed enumeration — an
+unconfigured name cannot appear.
+
 No admin UI exists for this fork-owned subsystem; configure it in the policy TOML or through the
 control-plane projection as `waf:<profile>.intel`.

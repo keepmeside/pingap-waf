@@ -193,6 +193,7 @@ subsystem behind them exists.
 | `GET /api/config-versions`, `POST /api/config-versions/:id/rollback` | The reference has no versioned config; it has files and a reload. Here every write produces a version that is only called `applied` once the data plane has been read back and found to be enforcing it, and rollback regenerates from a stored intent rather than restoring a file |
 | `GET /api/activity` | One row per mutation, with actor, action, target and the config version it produced |
 | `GET /api/policies[/:name]` | See "Why three reference mounts are one route here" |
+| `GET /api/metrics/detection` | The detection stack's per-domain counters — challenge, behaviour, adaptive and threat-feed statistics, plus the count of challenge markers the waf/acl entries wrote — assembled by the binary from the crates that produce them. The marker-written count is the write-side half of a mis-ordering signal: a row that moves while the same label's `challenge.issued` stays at zero means markers are being written that no challenge entry ever reads. Aggregate and per-domain only, keyed by the classified domain label, never client identity; `view_metrics`-gated, and it answers 503 naming the missing provider rather than an empty object when the detection stack is not wired in |
 
 ## The retained raw-config surface
 

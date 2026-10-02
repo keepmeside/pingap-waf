@@ -20,7 +20,7 @@ use http::{HeaderValue, StatusCode};
 use pingap_config::PluginConf;
 use pingap_core::{
     Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
-    ensure_client_ip,
+    ensure_client_ip, get_host,
 };
 use pingap_plugin::{
     Error, get_hash_key, get_plugin_factory, get_step_conf_in,
@@ -198,6 +198,17 @@ impl Acl {
     }
 }
 
+/// The classified domain label for a request: the registered host's canonical
+/// spelling, or the one shared overflow label. The same derivation the
+/// challenge, behaviour and adaptive plugins key their state by, so a marker
+/// written here lands in the row the challenge plugin's counters live in.
+fn domain_label(session: &Session, ctx: &Ctx) -> String {
+    pingap_domainstate::label(
+        get_host(session.req_header())
+            .unwrap_or(ctx.upstream.location.as_ref()),
+    )
+}
+
 #[async_trait]
 impl Plugin for Acl {
     fn config_key(&self) -> Cow<'_, str> {
@@ -268,6 +279,12 @@ impl Plugin for Acl {
         }
 
         if outcome.challenged {
+            // Counted beside the write, in the same classified-label space the
+            // challenge plugin keys its rows by: the marker read cannot observe
+            // a challenge entry that never runs, so the write is the side that
+            // moves, and this row against the same label's `challenge.issued`
+            // is the comparison that finds an out-of-order or missing entry.
+            crate::marker::count_write(&domain_label(session, ctx));
             ctx.extensions.insert(ChallengeMarker::new(
                 CATEGORY,
                 format!("rule:{}", outcome.decided_by.unwrap_or_default()),

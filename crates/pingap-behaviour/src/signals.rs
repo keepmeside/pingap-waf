@@ -1,5 +1,23 @@
+//! The six per-client humanness signals, each with its own minimum sample count.
+//!
+//! Ported from mango-waf `detection/behavior.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for humanness credits averaged per signal rather than a verdict that
+//! subtracts penalties from 100, and for bounded key sets with overflow counters
+//! where the donor kept unbounded maps.
+
 use crate::profile::Profile;
 
+/// The humanness credit of a client's request timing.
+///
+/// The signal family is *timing regularity* — the name the config weight and the
+/// published docs carry — and what it measures is the spread of inter-request
+/// intervals. The donor's verdict started at 100 and subtracted a regularity
+/// penalty, because a metronomic client is the machine-like shape; this port
+/// averages per-signal humanness credits instead, so the credit here is the
+/// coefficient of variation: a metronomic client earns none, and human
+/// irregularity earns up to full credit at a spread equal to the mean. A
+/// zero-mean interval sequence (a burst with no spacing at all) is the most
+/// machine-like shape there is and earns zero.
 pub fn timing_regularity(profile: &Profile, min: usize) -> Option<f64> {
     if profile.samples.len() < min {
         return None;
@@ -24,7 +42,7 @@ pub fn timing_regularity(profile: &Profile, min: usize) -> Option<f64> {
         .map(|value| (value - mean).powi(2))
         .sum::<f64>()
         / intervals.len() as f64;
-    Some((1.0 - variance.sqrt() / mean).clamp(0.0, 1.0) * 100.0)
+    Some((variance.sqrt() / mean).clamp(0.0, 1.0) * 100.0)
 }
 
 pub fn url_entropy(profile: &Profile, min: usize) -> Option<f64> {

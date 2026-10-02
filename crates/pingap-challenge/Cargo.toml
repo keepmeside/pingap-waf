@@ -40,8 +40,17 @@ tracing = { workspace = true }
 # bytes a log format emits, not on the variables map — the assertion that catches a
 # variable that was set but never reached a line. Dev-only, not in the shipped binary.
 pingap-logger = { workspace = true }
+# Captures the plugin's `debug` decision lines so the recorded verdict is
+# asserted on emitted bytes — the same argument as `pingap-logger` above, for
+# the log lines instead of the log variables.
+tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 tokio-test = "0.4.4"
 
 [lints]
 workspace = true
+
+# `humantime-serde` is used only inside `#[serde(with = …)]` attributes, which
+# cargo-machete cannot see.
+[package.metadata.cargo-machete]
+ignored = ["humantime-serde"]

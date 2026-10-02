@@ -869,6 +869,34 @@ impl ControlPlaneStore for UnavailableStore {
     ) -> pingap_controlplane::repository::Result<()> {
         self.refuse()
     }
+    async fn list_adaptive_baselines(
+        &self,
+    ) -> pingap_controlplane::repository::Result<
+        Vec<pingap_controlplane::repository::AdaptiveBaselineRecord>,
+    > {
+        self.refuse()
+    }
+    async fn find_adaptive_baseline(
+        &self,
+        _: &str,
+    ) -> pingap_controlplane::repository::Result<
+        Option<pingap_controlplane::repository::AdaptiveBaselineRecord>,
+    > {
+        self.refuse()
+    }
+    async fn upsert_adaptive_baseline(
+        &self,
+        _: pingap_controlplane::repository::NewAdaptiveBaseline,
+        _: i64,
+    ) -> pingap_controlplane::repository::Result<()> {
+        self.refuse()
+    }
+    async fn delete_adaptive_baseline(
+        &self,
+        _: &str,
+    ) -> pingap_controlplane::repository::Result<()> {
+        self.refuse()
+    }
 }
 
 #[cfg(test)]

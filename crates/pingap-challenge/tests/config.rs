@@ -1,3 +1,4 @@
+use pingap_challenge::plugin::Challenge;
 use pingap_challenge::{ChallengeConfig, ChallengeKind};
 
 #[test]
@@ -36,6 +37,34 @@ fn enabled_challenge_requires_a_secret_and_a_trust_anchor() {
         ..Default::default()
     };
     assert!(missing_anchor.validate().is_err());
+}
+
+/// The missing secret fails construction, not just validation: an enabled
+/// challenge with no secret would sign its pass cookies with an empty key,
+/// which is a key anyone can forge, so there is no default to fall back to —
+/// the plugin refuses to exist and the location fails toward its configured
+/// refusal rather than serving a challenge tier no secret protects.
+#[test]
+fn an_enabled_challenge_with_no_secret_fails_construction() {
+    let err = match Challenge::new(ChallengeConfig {
+        enabled: true,
+        client_ip_from_peer: true,
+        ..Default::default()
+    }) {
+        Ok(_) => {
+            panic!("an enabled challenge with no secret must not construct")
+        },
+        Err(err) => err,
+    };
+    let message = err.to_string();
+    assert!(message.contains("secret"), "names the key: {message}");
+    // A disabled challenge constructs without one: the tier is off, so no
+    // cookie is ever signed and there is no key to require.
+    Challenge::new(ChallengeConfig {
+        client_ip_from_peer: true,
+        ..Default::default()
+    })
+    .expect("a disabled challenge constructs without a secret");
 }
 
 #[test]

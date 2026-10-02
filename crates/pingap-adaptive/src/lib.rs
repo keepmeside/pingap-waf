@@ -8,5 +8,8 @@ pub mod task;
 pub use config::{AdaptiveConfig, ConfigError};
 pub use decision::Decision;
 pub use learner::{AdaptiveLearner, Baseline, SampleDisposition};
-pub use plugin::{Adaptive, AdaptiveSnapshot};
+pub use plugin::{
+    Adaptive, AdaptiveDomainState, AdaptiveSnapshot, RestoreOutcome, baselines,
+    domain_state_snapshot, restore_baseline,
+};
 pub use profile::HourlyProfile;

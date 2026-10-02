@@ -34,7 +34,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
-tracing = { workspace = true }
 urlencoding = { workspace = true }
 
 [dev-dependencies]

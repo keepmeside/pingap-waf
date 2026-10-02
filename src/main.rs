@@ -938,7 +938,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
         simple_background_service.add_task(
             "alert_evaluation",
-            projection::new_alert_evaluation_task(store_path),
+            projection::new_alert_evaluation_task(store_path.clone()),
+        );
+        // The adaptive learner's own memory: restore every stored baseline
+        // once at startup, then write a domain's baseline back only when it
+        // changed. Without this a restart re-learns from zero while
+        // yesterday's baseline sits unread in the store next door.
+        simple_background_service.add_task(
+            "adaptive_baseline_persist",
+            projection::new_adaptive_baseline_task(store_path),
         );
     }
 

@@ -1,8 +1,17 @@
+//! The hourly-baseline learner: calibration state, sample intake and the
+//! persisted aggregate.
+//!
+//! Ported from mango-waf `detection/adaptive.go` and the anomaly half of
+//! `detection/detection.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for samples that exclude traffic this node denied, challenged or
+//! classified as bot, for tighten-only modulation, and for a baseline that
+//! persists as derived aggregate data across a restart.
+
 use crate::config::AdaptiveConfig;
 use crate::decision::{self, Decision};
 use crate::profile::HourlyProfile;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleDisposition {
@@ -185,7 +194,16 @@ impl AdaptiveLearner {
                 profile
             })
             .collect();
-        self.learned_at = Some(now);
+        // The baseline keeps its own timestamp, not the restore time: stamping
+        // `now` here would make every restart refresh the baseline's freshness,
+        // so a baseline cycling through restarts would never age out and the
+        // max-age check above would only ever fire for a process that stayed
+        // up. Preserving the learned time keeps the age honest across restarts.
+        // A stored timestamp past the end of time falls back to `now` rather
+        // than panicking on a corrupted row.
+        self.learned_at = UNIX_EPOCH
+            .checked_add(Duration::from_secs(baseline.learned_at_secs))
+            .or(Some(now));
         self.samples = 0;
         self.calibrated = false;
         self.confidence = 0.0;

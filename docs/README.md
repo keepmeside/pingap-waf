@@ -9,6 +9,9 @@
 - **ACL and domains** (this fork) — [plugin reference](./acl-plugin.md),
   [domain model](./domain-model.md)
 - **Bot management** (this fork) — [JA4 support and the `bot` plugin](./ja4-support.md)
+- **Detection and feeds** (this fork) — [threat-intelligence feeds](./intel-plugin.md),
+  [challenge tier](./challenge-plugin.md), [behavioural scoring](./behaviour-plugin.md),
+  [adaptive baseline](./adaptive-plugin.md)
 - **Control plane** (this fork) — [store, per-user admin auth, driver constraints](./control-plane-store.md),
   [config projection and versioning](./config-projection.md),
   [admin API and its parity with the reference product](./api-parity.md),
@@ -56,6 +59,26 @@ configured and where it sits in the dependency graph.
 | [pingap-pyroscope](../pingap-pyroscope/README.md) | Continuous CPU profiling |
 | [pingap-webhook](../pingap-webhook/README.md) | Operational notifications to WeCom / DingTalk / HTTP |
 | [pingap-proxy](../pingap-proxy/README.md) | The proxy engine: lifecycle, routing, server configuration |
+
+The fork adds its own crates under `crates/`. Their READMEs are read on GitHub, **not
+published to the documentation site** — `build-website.sh` only resolves `pingap-*`
+crate READMEs at the repository root, and a `crates/`-prefixed README never reaches the
+site (deliberate: publishing them would need a second resolver that no phase owns). The
+user-facing documentation for each lives in the `docs/*-plugin.md` pages above.
+
+| Crate | What it does |
+| --- | --- |
+| `crates/pingap-waf` | The native WAF rule engine and its plugin |
+| `crates/pingap-acl` | Per-domain ACL rules and access lists, with the `challenge` marker |
+| `crates/pingap-bot` | JA4H client fingerprinting and the `bot` plugin |
+| `crates/pingap-controlplane` | Users, sessions, audit log, RBAC, config projection, the Turso store |
+| `crates/pingap-admin-api` | The admin-API route table over the control plane |
+| `crates/pingap-domainstate` | Bounded domain-keyed expiring state and the client-identity contract |
+| `crates/pingap-events` | The shared WAF event queue every verdict offers to |
+| `crates/pingap-intel` | Threat-feed fetch, the Tier-1 egress guard, the threat set |
+| `crates/pingap-challenge` | Proof-of-work and silent-JS challenge tier, tokens, escalation |
+| `crates/pingap-behaviour` | Per-client behavioural signals and scoring |
+| `crates/pingap-adaptive` | Hourly baselines, calibration, the limit multiplier |
 
 ## Plugin documentation
 

@@ -877,6 +877,40 @@ async fn dashboard_reads_rollups_not_raw_findings_and_never_guesses_drift() {
     );
 }
 
+#[tokio::test]
+async fn detection_publishes_the_provider_and_names_the_missing_one() {
+    // The API this crate serves never builds a provider of its own — the
+    // binary injects it — so the provider here is a stand-in asserting the
+    // route is a passthrough, not a second aggregation of anything.
+    let provided = serde_json::json!({
+        "challenge": {"site.test": {"issued": 1, "verified": 1, "expired": 0}},
+    });
+    let mut wired = api().await;
+    wired.state = wired
+        .state
+        .with_detection_metrics(Arc::new(move || provided.clone()));
+    let response =
+        send_query(&wired, Method::GET, "/metrics/detection", "").await;
+    assert_eq!(response.status, StatusCode::OK, "{response:?}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    assert_eq!(body["challenge"]["site.test"]["issued"], 1);
+
+    // The same route on the same store with no provider wired in.
+    let api = api().await;
+    let response =
+        send_query(&api, Method::GET, "/metrics/detection", "").await;
+    assert_eq!(
+        response.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{response:?}"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body).expect("json");
+    let reason = body["error"].as_str().expect("reason").to_string();
+    assert!(reason.contains("detection metrics provider"), "{reason}");
+}
+
 struct ConfigFile(std::path::PathBuf);
 
 #[async_trait::async_trait]

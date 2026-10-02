@@ -228,3 +228,164 @@ async fn alternating_hosts_through_one_instance_do_not_move_a_verdict() {
         );
     }
 }
+
+/// A policy that selects intelligence, and one that selects none. The pair the
+/// feed-isolation criterion needs: the same client address, refused by the
+/// policy that selected it and passed by the policy that did not.
+const INTEL_TENANT: &str = r#"
+category = "waf"
+profile = "intel-tenant"
+[intel]
+manual = ["198.51.100.7"]
+"#;
+
+/// A policy that both selects a named feed and blocks on static rules, so one
+/// instance can produce the two refusal kinds the verdict has to tell apart.
+const FEED_TENANT: &str = r#"
+category = "waf"
+profile = "feed-tenant"
+anomaly_threshold = 1
+budget_ms = 5000
+categories = { sql_injection = "block", xss = "block" }
+[[intel.feed]]
+name = "blocklist"
+url = "https://feeds.example.test/blocklist"
+category = "drop"
+"#;
+
+/// Intelligence selected by one tenant's policy is not enforced against a
+/// request routed to another tenant's policy. The refresh task is
+/// process-global — every installed registry is refreshed — but matching
+/// reads the instance's own registry, so an address one tenant's policy
+/// selected can never refuse a request another tenant's policy serves. The
+/// registry content here is a manual entry, which lands in the same snapshot
+/// a feed's results are swapped into and is matched by the same call; the
+/// feed-shaped half — results landing per-registry — is the refresh tests'
+/// own criterion in `pingap-intel`.
+#[tokio::test]
+async fn intelligence_selected_by_one_policy_is_not_enforced_against_another() {
+    let intel_tenant = plugin(INTEL_TENANT);
+    let audit = plugin(AUDIT_ONLY);
+
+    // The address is refused by the policy that selected it, and the refusal
+    // is attributed to the intelligence rather than to a rule hit — the
+    // request is benign, so a rule hit would mean the wrong thing moved.
+    let mut ctx = Ctx::default();
+    ctx.conn.client_ip = Some("198.51.100.7".to_string());
+    let mut session = session_for(BENIGN).await;
+    let result = intel_tenant
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("evaluation is total");
+    assert!(
+        matches!(result, RequestPluginResult::Respond(_)),
+        "the policy that selected the address did not refuse it"
+    );
+    let state = ctx.extensions.get::<WafState>().expect("state recorded");
+    assert_eq!(state.intel_category.as_deref(), Some("manual"));
+    assert!(
+        state.hits.is_empty(),
+        "a rule hit was recorded for a benign request: {state:?}"
+    );
+
+    // The same address through the policy that selected nothing passes. The
+    // client IP is seeded the way the gateway's own resolver would leave it,
+    // so both policies enforce on the same address — the only difference is
+    // which registry they consult.
+    let mut ctx = Ctx::default();
+    ctx.conn.client_ip = Some("198.51.100.7".to_string());
+    let mut session = session_for(BENIGN).await;
+    let result = audit
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("evaluation is total");
+    assert!(
+        matches!(result, RequestPluginResult::Continue),
+        "an address another policy selected was enforced against this one"
+    );
+}
+
+/// A feed-sourced refusal is distinguishable from a static one in the recorded
+/// verdict, and names its feed. Asserted on the emitted log variables — the
+/// strings an operator's `{:waf_intel_feed}` tag resolves — rather than on the
+/// structured state, because the variable names are the contract: a rename
+/// that moved a constant and the state together would still pass, but the
+/// operator's log field would silently empty.
+#[tokio::test]
+async fn a_feed_sourced_refusal_names_its_feed_in_the_verdict() {
+    let waf = plugin(FEED_TENANT);
+    // The refresh half lands a feed's results; here the same swap is driven
+    // by hand so the verdict, not the fetch, is what is under test.
+    let registry = waf
+        .intel_registry()
+        .expect("a policy with a feed holds a registry");
+    registry.apply(
+        Ok(pingap_intel::feed::FeedResult {
+            name: "blocklist".into(),
+            parsed: pingap_intel::parse::Parsed::parse("203.0.113.9\n", 100),
+            fetched_at: std::time::SystemTime::now(),
+        }),
+        0,
+        std::time::SystemTime::now(),
+    );
+
+    // A benign request from the feed's address: nothing but the feed can
+    // refuse it, so the refusal is attributable to the feed and nothing else.
+    let mut ctx = Ctx::default();
+    ctx.conn.client_ip = Some("203.0.113.9".to_string());
+    let mut session = session_for(BENIGN).await;
+    let result = waf
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("evaluation is total");
+    assert!(
+        matches!(result, RequestPluginResult::Respond(_)),
+        "the feed-sourced address was not refused"
+    );
+    assert_eq!(
+        ctx.get_variable("waf_intel_feed"),
+        Some("blocklist"),
+        "the verdict does not name the feed"
+    );
+    assert_eq!(
+        ctx.get_variable("waf_intel_category"),
+        Some("drop"),
+        "the verdict does not carry the configured category"
+    );
+    assert!(
+        ctx.get_variable("waf_rules").is_none(),
+        "a rule set was named beside the feed attribution"
+    );
+
+    // The static refusal on the same instance: the intel variables stay
+    // absent, so the two refusal kinds are distinguishable in the log line
+    // an operator actually reads.
+    let mut ctx = Ctx::default();
+    let mut session = session_for(MALICIOUS).await;
+    let result = waf
+        .handle_request(PluginStep::Request, &mut session, &mut ctx)
+        .await
+        .expect("evaluation is total");
+    assert!(
+        matches!(result, RequestPluginResult::Respond(_)),
+        "the static rule did not refuse the malicious request"
+    );
+    assert_eq!(
+        ctx.get_variable("waf_action"),
+        Some("block"),
+        "the static refusal is not recorded as a block"
+    );
+    assert!(
+        ctx.get_variable("waf_intel_feed").is_none(),
+        "a static refusal carries a feed attribution"
+    );
+    assert!(
+        ctx.get_variable("waf_intel_category").is_none(),
+        "a static refusal carries an intel category"
+    );
+    assert_ne!(
+        ctx.get_variable("waf_rules"),
+        Some(""),
+        "the static refusal names no rule"
+    );
+}

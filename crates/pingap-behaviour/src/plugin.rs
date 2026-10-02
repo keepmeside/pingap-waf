@@ -13,12 +13,79 @@ use pingap_domainstate::ClientIdentity;
 use pingap_plugin::{Error, get_plugin_factory, get_step_conf_in};
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
+use serde::Serialize;
 use std::borrow::Cow;
-use std::sync::{Arc, OnceLock};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 const CATEGORY: &str = "behaviour";
 static GLOBAL: OnceLock<Arc<BehaviourStore>> = OnceLock::new();
+
+/// One domain's behaviour counters: fixed-name fields, aggregate only, none
+/// keyed by client identity. The names are the values the `behaviour_profile`
+/// log variable writes, so the published vocabulary and the log vocabulary are
+/// one set.
+///
+/// The key a row lives under is the *classified* domain label, never a raw
+/// `Host` value, so the map's cardinality is the registered host set plus one
+/// overflow row.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct BehaviourCounters {
+    pub human: u64,
+    pub suspicious: u64,
+    pub bot: u64,
+    pub ddos: u64,
+    pub insufficient: u64,
+}
+
+/// The process-global per-domain counters, for the metrics surface to publish.
+/// Empty until the first request is classified, which is the honest reading of
+/// a deployment with no behaviour plugin configured: there is nothing to count.
+static COUNTERS: OnceLock<Mutex<BTreeMap<String, BehaviourCounters>>> =
+    OnceLock::new();
+
+/// Count one classified request under its domain label.
+fn count(domain: &str, score: &Score) {
+    let mut rows = COUNTERS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let row = rows.entry(domain.to_string()).or_default();
+    if score.contributing_signals == 0 {
+        row.insufficient += 1;
+    } else {
+        match score.classification {
+            Classification::Human => row.human += 1,
+            Classification::Suspicious => row.suspicious += 1,
+            Classification::Bot => row.bot += 1,
+            Classification::DdosShaped => row.ddos += 1,
+        }
+    }
+}
+
+/// The process-global per-domain behaviour counters, for the metrics surface to
+/// publish.
+pub fn counters_snapshot() -> BTreeMap<String, BehaviourCounters> {
+    let Some(counters) = COUNTERS.get() else {
+        return BTreeMap::new();
+    };
+    counters
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Distinct identities tracked per domain label, from the process-global
+/// store — the published observable that makes a false `client_ip_from_peer`
+/// assertion detectable: when every request maps to one identity, this gauge
+/// pins at 1 while the same label's request counters keep climbing.
+pub fn tracked_snapshot() -> BTreeMap<String, u64> {
+    let Some(store) = GLOBAL.get() else {
+        return BTreeMap::new();
+    };
+    store.tracked_per_domain(Instant::now())
+}
 
 /// Whether the work done so far this request has overrun the per-request
 /// scoring budget. Pure so the degrade direction is assertable without a
@@ -101,9 +168,14 @@ impl TryFrom<&PluginConf> for Behaviour {
 
 impl Behaviour {
     fn domain(&self, session: &Session, ctx: &Ctx) -> String {
-        get_host(session.req_header())
-            .unwrap_or(ctx.upstream.location.as_ref())
-            .to_ascii_lowercase()
+        // Classified, not raw: the label is the registered host's canonical
+        // spelling or the one shared overflow label, so the store's key set and
+        // the counters' key set are the registered host set plus one overflow
+        // entry, whatever `Host` values arrive.
+        pingap_domainstate::label(
+            get_host(session.req_header())
+                .unwrap_or(ctx.upstream.location.as_ref()),
+        )
     }
     fn identity(&self, session: &Session, ctx: &mut Ctx) -> String {
         match self.identity.as_ref().map(ClientIdentity::source) {
@@ -166,6 +238,12 @@ impl Plugin for Behaviour {
             ctx.add_variable("behaviour_status", "budget_exhausted");
             return Ok(RequestPluginResult::Continue);
         }
+        // The published per-domain counter for the classification this request
+        // settled on — the same fixed name set the `behaviour_profile` log
+        // variable writes. Counted before `domain` and `score` move into the
+        // request's extensions, and not at all on the budget-exhausted path
+        // above, where no classification settled.
+        count(&domain, &score);
         let observation = Observation {
             at: Instant::now(),
             uri: session.req_header().uri.path().to_string(),

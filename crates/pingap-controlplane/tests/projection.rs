@@ -599,6 +599,52 @@ fn a_policy_binding_with_no_matching_policy_is_refused() {
 }
 
 #[test]
+fn a_challenge_binding_preceding_its_marker_writer_is_refused() {
+    // Plugins run in list order and a challenge entry reads the marker the
+    // waf/acl entry writes, so a challenge listed first never sees one and
+    // never challenges — the Location proxies unprotected while the control
+    // plane reports it protected. The refusal must name both entries: the
+    // challenge in `value`, the writer it precedes in the reason.
+    let mut bad = intent();
+    bad.policies.insert(
+        "challenge:strict".to_string(),
+        toml::toml! {
+            category = "challenge"
+            secret = "0123456789abcdef0123456789abcdef"
+        },
+    );
+    let domain = bad.domains.get_mut("api").expect("api");
+    domain.policies = vec![
+        PolicyBinding::Challenge("strict".to_string()),
+        PolicyBinding::Acl("internal".to_string()),
+        PolicyBinding::Waf("strict".to_string()),
+    ];
+    let err = generate(&bad).expect_err("a challenge before its writer");
+    let reason = err.to_string();
+    assert!(reason.contains("challenge:strict"), "{reason}");
+    assert!(reason.contains("acl:internal"), "{reason}");
+    assert!(reason.contains("precedes"), "{reason}");
+
+    // The same three entries with the writer first generate: the refusal is
+    // about the order, not the combination.
+    let mut good = intent();
+    good.policies.insert(
+        "challenge:strict".to_string(),
+        toml::toml! {
+            category = "challenge"
+            secret = "0123456789abcdef0123456789abcdef"
+        },
+    );
+    let domain = good.domains.get_mut("api").expect("api");
+    domain.policies = vec![
+        PolicyBinding::Acl("internal".to_string()),
+        PolicyBinding::Waf("strict".to_string()),
+        PolicyBinding::Challenge("strict".to_string()),
+    ];
+    generate(&good).expect("the writer-first order generates");
+}
+
+#[test]
 fn the_generated_config_passes_pingap_own_validation() {
     // Not the full gate — that is a subprocess `pingap-waf -t` — but the in-crate check
     // pingap-config offers, so a structurally impossible config fails here before it

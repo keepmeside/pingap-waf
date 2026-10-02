@@ -51,9 +51,13 @@
 //! The honest residual: a domain that receives *no* traffic keeps its expired entries until
 //! its own cap forces reclaim. That is bounded by the cap, which is what makes it survivable.
 
+pub mod hosts;
 pub mod identity;
 pub mod store;
 
+pub use hosts::{
+    OVERFLOW_LABEL, classify, label, registered_hosts, set_registered_hosts,
+};
 pub use identity::{ClientIdentity, IdentityError, IdentitySource};
 pub use store::{
     Clock, Counters, Domain, Full, HostPolicy, Limits, ManualClock, Millis,

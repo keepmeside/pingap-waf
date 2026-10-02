@@ -1,5 +1,5 @@
 use crate::profile::{Observation, Profile};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -87,6 +87,32 @@ impl BehaviourStore {
             Some(profile.clone())
         }
     }
+    /// Distinct identities currently tracked, per domain label, after the
+    /// same pruning `snapshot` applies — a gauge, not an event counter. It
+    /// answers "how many clients does this domain hold right now", which
+    /// the request counters cannot: every request one client sends moves
+    /// those while this stays where it is.
+    pub fn tracked_per_domain(
+        &self,
+        now: std::time::Instant,
+    ) -> BTreeMap<String, u64> {
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tracked = BTreeMap::new();
+        map.retain(|(domain, _), profile| {
+            profile.prune(now);
+            if profile.is_empty() {
+                false
+            } else {
+                *tracked.entry(domain.clone()).or_insert(0u64) += 1;
+                true
+            }
+        });
+        tracked
+    }
+
     pub fn get(&self, domain: &str, identity: &str) -> Option<Profile> {
         self.inner
             .lock()

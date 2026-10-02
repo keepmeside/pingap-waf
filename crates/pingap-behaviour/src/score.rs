@@ -1,3 +1,11 @@
+//! The weighted score and its classification, with the contributor count that
+//! keeps a low-evidence score legible as one.
+//!
+//! Ported from mango-waf `detection/behavior.go` at commit 7f2c30c (MIT); see ./NOTICE.
+//! Rewritten for weights validated to sum to one hundred at config load, and for a
+//! classification that will not read confidently off fewer than two contributing
+//! signals.
+
 use crate::config::{SignalWeights, Thresholds};
 use crate::profile::Profile;
 use crate::signals;

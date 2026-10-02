@@ -41,6 +41,18 @@ use pingap_controlplane::projection::{Applier, ConfigSource};
 use pingap_controlplane::{AuthError, TotpGuard};
 use std::sync::Arc;
 
+/// The detection-metrics provider the binary injects: one closure assembling
+/// the detection crates' published snapshots into a single JSON value.
+///
+/// The crate holds no detection-crate dependencies on purpose — the vocabulary
+/// (counter names, reason strings, feed names) belongs to the crates that
+/// produce it, so the provider is opaque here and this crate never names a
+/// counter. What the crate does own is the access decision: the route is
+/// metrics-gated, and an absent provider is an explicit status rather than an
+/// empty object that would read as "nothing detected".
+pub type DetectionMetricsSource =
+    Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
+
 /// What every handler is given.
 ///
 /// The store and the applier are supplied by the binary. The store is the control plane's own
@@ -71,6 +83,11 @@ pub struct AppState {
     /// store — there is no file to copy, and exporting one would produce a bundle with no
     /// store in it, which reads as success while being empty.
     pub(crate) store_file: Option<std::path::PathBuf>,
+    /// The detection-metrics provider, assembled by the binary from the
+    /// detection crates' published snapshots. `None` when the binary serves the
+    /// API without the detection stack wired in, and the route says so rather
+    /// than publishing an empty object.
+    pub(crate) detection_metrics: Option<DetectionMetricsSource>,
     totp: Arc<TotpGuard>,
     /// Private and exposed only as `Option<&str>`, because it is the one secret this crate
     /// holds. A `pub` field would put it in every struct literal and every debug print.
@@ -91,6 +108,7 @@ impl AppState {
             cluster: None,
             backup_dir: None,
             store_file: None,
+            detection_metrics: None,
             totp,
             totp_key,
         }
@@ -130,6 +148,17 @@ impl AppState {
     /// The store's backing file, for export to snapshot.
     pub fn with_store_file(mut self, path: std::path::PathBuf) -> Self {
         self.store_file = Some(path);
+        self
+    }
+
+    /// The detection-metrics provider — the detection crates' published
+    /// snapshots assembled by the binary, so this crate needs no
+    /// detection-crate dependency to serve them.
+    pub fn with_detection_metrics(
+        mut self,
+        source: DetectionMetricsSource,
+    ) -> Self {
+        self.detection_metrics = Some(source);
         self
     }
 

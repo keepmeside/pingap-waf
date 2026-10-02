@@ -177,3 +177,82 @@ fn disabled_behaviour_does_not_require_an_identity_anchor() {
     let conf: PluginConf = "enabled = false".parse().expect("config");
     Behaviour::try_from(&conf).expect("disabled detector is a no-op");
 }
+
+/// A machine-like client — metronomic intervals, one URL, one user agent —
+/// scores well below a human-shaped one — varied intervals, varied paths — on
+/// synthetic sequences, with a gap wide enough that the classification itself
+/// differs, not only the number. This is the test that pins the direction of
+/// every signal: the heaviest-weighted one (timing) pays its credit for
+/// *irregularity*, so a metronomic client earns nothing from it, exactly the
+/// shape a fixed-interval scraper presents.
+#[test]
+fn a_machine_like_client_scores_below_a_human_shaped_one() {
+    let start = Instant::now();
+    let mut machine = Profile::new(32, 64, 8, Duration::from_secs(900));
+    for index in 0..24 {
+        machine.record(Observation {
+            at: start + Duration::from_millis(index * 1_000),
+            uri: "/price".into(),
+            user_agent: "scraper/1.0".into(),
+            status: 200,
+            denied: false,
+            challenged: false,
+            bot: false,
+        });
+    }
+    let mut human = Profile::new(32, 64, 8, Duration::from_secs(900));
+    // Varied intervals and varied paths: the shape a person browsing produces.
+    let intervals = [
+        400, 2_100, 900, 3_400, 700, 1_800, 500, 2_600, 1_200, 800, 3_100, 600,
+        1_500, 2_400, 950, 1_750, 450, 2_850, 1_100, 650, 3_250, 850, 1_350,
+        2_050,
+    ];
+    let mut at = start;
+    for (index, gap) in intervals.iter().enumerate() {
+        at += Duration::from_millis(*gap);
+        human.record(Observation {
+            at,
+            uri: format!("/page/{}/{}", index % 5, index % 3),
+            user_agent: "browser".into(),
+            status: 200,
+            denied: false,
+            challenged: false,
+            bot: false,
+        });
+    }
+
+    let machine_score = score::score(
+        &machine,
+        SignalWeights::default(),
+        Thresholds::default(),
+        6,
+    );
+    let human_score = score::score(
+        &human,
+        SignalWeights::default(),
+        Thresholds::default(),
+        6,
+    );
+
+    // Both scores are confident (all six signals clear their floors), so the
+    // comparison is between verdicts, not between noise.
+    assert_eq!(machine_score.contributing_signals, 6);
+    assert_eq!(human_score.contributing_signals, 6);
+    assert!(
+        machine_score.value + 20 <= human_score.value,
+        "the machine-like client scored within {} of the human-shaped one: \
+         machine {} vs human {}",
+        20,
+        machine_score.value,
+        human_score.value
+    );
+    assert!(
+        machine_score.classification != human_score.classification,
+        "the two shapes classified the same: machine {:?} vs human {:?}",
+        machine_score.classification,
+        human_score.classification
+    );
+    // And the direction the whole score depends on: the human-shaped client
+    // is the one that reads human.
+    assert_eq!(human_score.classification, Classification::Human);
+}

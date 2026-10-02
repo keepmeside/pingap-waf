@@ -69,7 +69,8 @@ async fn the_reason_and_ratio_render_into_an_access_log_line() {
         "adaptive_reason rendered empty: {line}"
     );
     assert!(
-        !fields[1].is_empty() && fields[1].chars().all(|c| c.is_ascii_digit() || c == '.'),
+        !fields[1].is_empty()
+            && fields[1].chars().all(|c| c.is_ascii_digit() || c == '.'),
         "adaptive_ratio did not render a number: {line}"
     );
 }

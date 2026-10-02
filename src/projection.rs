@@ -37,7 +37,7 @@ use pingap_controlplane::projection::{
     PluginCheck, Validator,
 };
 use pingap_controlplane::repository::{
-    ControlPlaneStore, TimeRange, WafEventFilter,
+    ControlPlaneStore, NewAdaptiveBaseline, TimeRange, WafEventFilter,
 };
 use pingap_core::{
     BackgroundTask, Notification, NotificationData, NotificationSender,
@@ -169,6 +169,183 @@ pub fn new_alert_evaluation_task(
     Box::new(AlertEvaluationTask {
         store: LazyStore::at(store_path),
         suppression: tokio::sync::Mutex::new(Suppression::new(300)),
+    })
+}
+
+/// The adaptive learner's persistence half: restore at startup, write back
+/// on every cycle after.
+///
+/// Restoring runs first and once per domain per process. A learner that
+/// resumed from nothing would re-learn from zero while its own yesterday
+/// sat in the store, and re-restoring a domain that has already taken live
+/// samples would throw the newer learning away. A row past its maximum age
+/// is still marked swept: the learner counted the discard, and re-offering
+/// the same stale row every minute would only count it again.
+///
+/// The write-back only upserts a domain whose serialized baseline changed
+/// since the last one this task wrote, so an idle-but-calibrated learner
+/// costs one map comparison a cycle, not a row write. The payload is the
+/// learner's own export, opaque here: this module never interprets a
+/// profile, it only moves the bytes the learner vouched for.
+pub struct AdaptiveBaselineTask {
+    store: LazyStore,
+    restored: std::sync::Mutex<std::collections::HashSet<String>>,
+    persisted: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+#[async_trait::async_trait]
+impl BackgroundTask for AdaptiveBaselineTask {
+    async fn execute(&self, _count: u32) -> Result<bool, pingap_core::Error> {
+        let invalid = |message: String| pingap_core::Error::Invalid { message };
+        let store = self.store.get().await.map_err(invalid)?.clone();
+        let did_work = self
+            .restore_sweep(&*store)
+            .await
+            .map_err(|e| invalid(e.to_string()))?;
+        let wrote = self
+            .write_back(&*store)
+            .await
+            .map_err(|e| invalid(e.to_string()))?;
+        Ok(did_work || wrote)
+    }
+}
+
+impl AdaptiveBaselineTask {
+    /// The next value of a poison-tolerant lock read, matched to the
+    /// convention every fork crate uses: a poisoned lock is a panic that
+    /// happened elsewhere while holding it, and the sets this task keeps
+    /// are bookkeeping, not invariants — better a possibly-stale sweep
+    /// set than a persistence task that dies with the panicking thread.
+    fn swept(&self, domain: &str) -> bool {
+        self.restored
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(domain)
+    }
+
+    fn mark_swept(&self, domain: &str) {
+        self.restored
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(domain.to_string());
+    }
+
+    fn already_persisted(&self, domain: &str, payload: &str) -> bool {
+        self.persisted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(domain)
+            .is_some_and(|last| last == payload)
+    }
+
+    fn mark_persisted(&self, domain: &str, payload: String) {
+        self.persisted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(domain.to_string(), payload);
+    }
+
+    /// Offer every stored baseline to the registry, once per process.
+    async fn restore_sweep(
+        &self,
+        store: &dyn ControlPlaneStore,
+    ) -> Result<bool, pingap_controlplane::StoreError> {
+        let mut did_work = false;
+        for row in store.list_adaptive_baselines().await? {
+            if self.swept(&row.domain) {
+                continue;
+            }
+            let outcome = match serde_json::from_str::<pingap_adaptive::Baseline>(
+                &row.payload,
+            ) {
+                Ok(baseline) => pingap_adaptive::restore_baseline(
+                    &row.domain,
+                    baseline,
+                    std::time::SystemTime::now(),
+                ),
+                Err(error) => {
+                    // A row that no longer parses was written by an older
+                    // shape or corrupted in place; either way, re-reading it
+                    // every minute cannot fix it. Counted as swept and
+                    // reported, not silently retried.
+                    warn!(
+                        target: LOG_TARGET,
+                        domain = row.domain,
+                        %error,
+                        "a stored adaptive baseline no longer parses and was skipped"
+                    );
+                    did_work = true;
+                    self.mark_swept(&row.domain);
+                    continue;
+                },
+            };
+            match outcome {
+                // The adaptive plugin is not constructed in this deployment.
+                // Left unswept rather than marked: a reload that enables it
+                // should find its baselines on the next cycle.
+                pingap_adaptive::RestoreOutcome::Disabled => continue,
+                pingap_adaptive::RestoreOutcome::Restored => info!(
+                    target: LOG_TARGET,
+                    domain = row.domain,
+                    "an adaptive baseline was restored into a cold learner"
+                ),
+                pingap_adaptive::RestoreOutcome::Discarded => info!(
+                    target: LOG_TARGET,
+                    domain = row.domain,
+                    "a stored adaptive baseline was past its maximum age and discarded"
+                ),
+                pingap_adaptive::RestoreOutcome::Capacity => warn!(
+                    target: LOG_TARGET,
+                    domain = row.domain,
+                    "the adaptive registry is at capacity; a stored baseline was not restored"
+                ),
+            }
+            did_work = true;
+            self.mark_swept(&row.domain);
+        }
+        Ok(did_work)
+    }
+
+    /// Persist every learner's current baseline, when it changed.
+    async fn write_back(
+        &self,
+        store: &dyn ControlPlaneStore,
+    ) -> Result<bool, pingap_controlplane::StoreError> {
+        let mut did_work = false;
+        let now = pingap_core::now_sec() as i64;
+        for (domain, baseline) in pingap_adaptive::baselines() {
+            let payload = serde_json::to_string(&baseline).map_err(|e| {
+                pingap_controlplane::StoreError::Backend {
+                    message: format!("a baseline would not serialise: {e}"),
+                }
+            })?;
+            if self.already_persisted(&domain, &payload) {
+                continue;
+            }
+            store
+                .upsert_adaptive_baseline(
+                    NewAdaptiveBaseline {
+                        domain: domain.clone(),
+                        payload: payload.clone(),
+                        learned_at_secs: baseline.learned_at_secs as i64,
+                    },
+                    now,
+                )
+                .await?;
+            did_work = true;
+            self.mark_persisted(&domain, payload);
+        }
+        Ok(did_work)
+    }
+}
+
+pub fn new_adaptive_baseline_task(
+    store_path: String,
+) -> Box<dyn BackgroundTask> {
+    Box::new(AdaptiveBaselineTask {
+        store: LazyStore::at(store_path),
+        restored: std::sync::Mutex::new(std::collections::HashSet::new()),
+        persisted: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 
@@ -342,6 +519,11 @@ impl LazyStore {
 
     /// `TursoStore::shared` rather than `open`: every writer in the process must be the one
     /// writer, and a second handle on the same file would serialise nothing.
+    ///
+    /// Migrated on open, because the admin auth opens its own handle lazily — on the
+    /// first admin request — and a task's first cycle can beat it there. Without this,
+    /// every store-backed task errors once on a fresh store with `no such table`
+    /// until an admin request happens to migrate.
     async fn get(&self) -> Result<&Arc<dyn ControlPlaneStore>, String> {
         self.opened
             .get_or_try_init(|| async {
@@ -349,6 +531,7 @@ impl LazyStore {
                     pingap_controlplane::store::TursoStore::shared(&self.path)
                         .await
                         .map_err(|e| e.to_string())?;
+                store.migrate().await.map_err(|e| e.to_string())?;
                 Ok(store as Arc<dyn ControlPlaneStore>)
             })
             .await
@@ -1321,5 +1504,108 @@ gzip_level = 6
             "validation changed how this process resolves a spoofed client IP"
         );
         pingap_core::set_trusted_proxies(&None);
+    }
+
+    /// The adaptive persistence task, end to end against a real store: a
+    /// stored baseline is restored into a learner once, a corrupted row is
+    /// reported and never retried, the restored baseline is written back,
+    /// and a second cycle with nothing changed does no work at all.
+    ///
+    /// The "did work" boolean is the assertion for the once-only halves: a
+    /// second cycle that re-restored or re-wrote would return `true` and
+    /// fail here without needing a spy inside the task.
+    ///
+    /// The process-global registry is installed by this test and outlives
+    /// it; nothing else in this binary reads it, and the domains are
+    /// spelled so no other test's learner could collide with them.
+    #[tokio::test]
+    async fn test_adaptive_baselines_restore_once_then_persist_only_changes() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let store = TursoStore::open(
+            dir.path().join("cp.db").to_str().expect("utf8 path"),
+        )
+        .await
+        .expect("store opens");
+        store.migrate().await.expect("migrates");
+        let store: Arc<dyn ControlPlaneStore> = Arc::new(store);
+
+        // The enabled plugin installs the process registry the restore path
+        // restores into. Without it every outcome is `Disabled` and the
+        // sweep would rightly do nothing.
+        let conf: PluginConf = toml::from_str(
+            r#"
+category = "adaptive"
+enabled = true
+client_ip_from_peer = true
+max_baseline_age_days = 30
+"#,
+        )
+        .expect("parses");
+        pingap_adaptive::Adaptive::try_from(&conf).expect("builds");
+
+        let now = pingap_core::now_sec() as i64;
+        let fresh = pingap_adaptive::Baseline {
+            profiles: (0..24)
+                .map(|_| pingap_adaptive::HourlyProfile::new(64))
+                .collect(),
+            learned_at_secs: now.unsigned_abs(),
+        };
+        let seeded =
+            serde_json::to_string(&fresh).expect("the baseline serialises");
+        for (domain, payload) in [
+            ("a.test", seeded.clone()),
+            // A row that no longer parses: written by an older shape, or
+            // corrupted in place. The sweep must say so and stop offering
+            // it, not retry it every cycle.
+            ("bad.test", "{ not a baseline".to_string()),
+        ] {
+            store
+                .upsert_adaptive_baseline(
+                    NewAdaptiveBaseline {
+                        domain: domain.to_string(),
+                        payload,
+                        learned_at_secs: now,
+                    },
+                    now,
+                )
+                .await
+                .expect("seeds");
+        }
+
+        let task = AdaptiveBaselineTask {
+            store: LazyStore::ready(store.clone()),
+            restored: Mutex::new(std::collections::HashSet::new()),
+            persisted: Mutex::new(std::collections::HashMap::new()),
+        };
+
+        let first = task.execute(1).await.expect("the first cycle runs");
+        assert!(first, "a restore, a skip and a write-back all happened");
+
+        // The valid row became a learner; the corrupted one did not.
+        assert!(
+            pingap_adaptive::baselines().contains_key("a.test"),
+            "the stored baseline was not restored into a learner"
+        );
+        assert!(
+            !pingap_adaptive::baselines().contains_key("bad.test"),
+            "a corrupted row minted a learner"
+        );
+
+        // What was written back round-trips and keeps its own learned time.
+        let row = store
+            .find_adaptive_baseline("a.test")
+            .await
+            .expect("reads back")
+            .expect("the write-back persisted it");
+        let written: pingap_adaptive::Baseline =
+            serde_json::from_str(&row.payload).expect("parses back");
+        assert_eq!(written.learned_at_secs, fresh.learned_at_secs);
+
+        let second = task.execute(2).await.expect("the second cycle runs");
+        assert!(
+            !second,
+            "nothing changed between cycles, so the sweep must not have \
+             re-restored and the write-back must not have re-written"
+        );
     }
 }
