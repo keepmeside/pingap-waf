@@ -47,6 +47,22 @@ inherited starting values, not figures measured against this product's traffic. 
 `max_entries` and `max_domains` caps are chosen bounds that bound memory, not tuned limits.
 Tune them per domain.
 
+## Scope
+
+Challenge state is keyed per domain, not per Location: the key is the
+classified domain label plus the client identity — the same label the
+behavioural tier and the WAF and ACL marker counts key on. Escalation and
+token state are one store per domain and identity, shared by every entry
+under the host: failures accrued under either of two Locations raise the
+tier both read, and the pass cookie is host-scoped and identity-bound, so
+two entries under one host should share one secret — with different secrets
+each entry refuses the other's cookie and the client solves in a loop.
+Per-entry settings — kind, difficulty, ladder, decay — still apply per
+Location, and the store caps come from the first-constructed entry. An
+operator wanting independently escalating challenge state per path needs a
+separate hostname; wanting `/admin` challenged harder than `/` is two
+entries with different difficulty under the one host.
+
 ## Escalation
 
 Consecutive failures raise a client's challenge tier, and a tier changes the page, never

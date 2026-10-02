@@ -8,7 +8,6 @@ and access-log variables (`waf_intel_feed` and `waf_intel_category`).
 ```toml
 [plugins.waf-strict]
 category = "waf"
-ip_list = ["203.0.113.0/24"]
 
 [plugins.waf-strict.intel]
 manual = ["198.51.100.10"]
@@ -37,8 +36,15 @@ The parser accepts bare addresses, CIDR ranges, comment headers, CRLF, and the f
 DShield-style tab-separated lines. DShield ranges are intentionally represented by their start
 address only; use a CIDR feed when the complete range is required.
 
-Feeds do not use client identity, so the WAF trusted-proxy construction gate is not needed for
-this feature. The challenge, behavioural and adaptive controls have a separate identity contract.
+Feed and manual entries are matched against the same resolved client address
+`ip_list` uses, and the construction gate covers `ip_list` alone, so a feed
+config constructs without `basic.trusted_proxies`. That leaves the address's
+trustworthiness to the operator: on a directly exposed node the peer address
+is the client's own, while behind a proxy an unset `basic.trusted_proxies`
+makes the match evadable with a forged `X-Forwarded-For` — set it, or the
+explicit peer assertion, when a feed's denial must actually deny. The
+challenge, behavioural and adaptive controls have a separate identity
+contract.
 
 ## Defaults
 
