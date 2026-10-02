@@ -215,12 +215,15 @@ build_en() {
   done
 
   cp "${ROOT}/examples/README.md" "${EN}/guide/examples.md"
-  rewrite_links "${EN}/guide/examples.md" guide
+  # The GitHub-URL rewrite must run before rewrite_links: strip_md_links (called
+  # inside it) folds (./<name>/README.md) down to (./<name>/) first, and this
+  # sed's pattern never matches afterwards.
   sed -E -i.bak \
     -e 's|\(\./([a-z0-9-]+)/README\.md\)|(https://github.com/keepmeside/pingap-waf/tree/main/examples/\1)|g' \
     -e 's|\(\./([a-z0-9-]+)/([a-z0-9.-]+)\)|(https://github.com/keepmeside/pingap-waf/tree/main/examples/\1/\2)|g' \
     "${EN}/guide/examples.md"
   rm -f "${EN}/guide/examples.md.bak"
+  rewrite_links "${EN}/guide/examples.md" guide
   strip_md_links "${EN}/guide/examples.md"
   append_source_footer "${EN}/guide/examples.md" "examples/README.md" \
     "https://github.com/keepmeside/pingap-waf/blob/main/examples/README.md"
