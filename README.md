@@ -86,27 +86,33 @@ These are design decisions, not gaps to be filled quietly.
 
 ## Latency
 
-Measured on `x86_64-unknown-linux-gnu`, release profile, with 153 native request rules
+Measured on `x86_64-unknown-linux-gnu`, release profile, with 116 native request rules
 and 40 response rules compiled from the ported detector set. p99 added latency, 2000
 timed calls after a 200-call warmup:
 
 | Shape | p50 | p99 |
 | --- | --- | --- |
-| request: headers + URI + query | 769 µs | **815 µs** |
-| request: same, plus a 1 KB body | 2.80 ms | **2.87 ms** |
-| response: 1 KB body, one hook | 1.34 ms | **1.39 ms** |
-| response: 1 KB body, both hooks (cache miss) | 2.69 ms | **2.74 ms** |
+| request: headers + URI + query | 124 µs | **137 µs** |
+| request: same, plus a 1 KB body | 524 µs | **581 µs** |
+| response: 1 KB body, one hook | 73 µs | **83 µs** |
+| response: 1 KB body, both hooks (cache miss) | 146 µs | **173 µs** |
 
 Worst realistic request — a `POST` with a 1 KB body to a cacheable Location, on a cache
-miss, paying both the request-body scan and both response scans: **≈ 5.6 ms p99**.
+miss, paying both the request-body scan and both response scans: **≈ 0.75 ms p99**
+(5.5 ms before the prefilter; verdicts pinned identical by a frozen-corpus equivalence
+test).
 
-The distributions are tight: p99 sits within 6% of p50 on every shape and the maximum
-within 20%. Cost is proportional to rules × fields × bytes, not driven by a backtracking
-tail. Zero budget cuts at the shipped 10 ms budget, so these are the rules' real cost
-rather than the budget's ceiling.
+The distributions are tight: p99 sits within 20% of p50 on every shape and every maximum
+is sub-millisecond. Cost is proportional to rules × fields × bytes, not driven by a
+backtracking tail. Zero budget cuts at the shipped 10 ms budget, so these are the rules'
+real cost rather than the budget's ceiling.
 
-**Whether the defaults should ship as-is or behind a prefilter is an open decision, not
-a settled one.** Reproduce both tables and read the structural cause in
+A literal prefilter runs ahead of the regex engine: one Aho-Corasick pass over the
+request's field texts, and a rule whose required literals are all absent is skipped
+without running its regex. Always on, no config knob, and a frozen-corpus equivalence
+test pins that no verdict, hit or score changes on any input. The defaults question
+this section used to leave open is closed by that measurement — body inspection stays
+on at ≈ 0.75 ms worst-case p99. Reproduce both tables and read the design in
 [WAF latency](./docs/waf-benchmark.md):
 
 ```bash

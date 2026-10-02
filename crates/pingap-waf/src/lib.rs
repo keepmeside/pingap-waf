@@ -26,6 +26,7 @@ pub mod inspect;
 pub mod ip_filter;
 #[cfg(feature = "plugin")]
 pub mod plugin;
+pub mod prefilter;
 pub mod rule;
 
 pub use budget::{Budget, Exhausted, ExhaustedPolicy};

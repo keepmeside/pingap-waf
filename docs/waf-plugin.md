@@ -30,7 +30,7 @@ configuration. Divergent policy means two named entries, not one name listed twi
 | `paranoia` | `1` | `1`–`4`. Rules above the level do not participate. Higher finds more and costs more |
 | `anomaly_threshold` | `5` | Accumulated score at which a request in `block` mode is refused |
 | `budget_ms` | `10` | Per-request evaluation budget |
-| `on_budget_exhausted` | `allow` | `allow` or `block`, for an evaluation that could not finish |
+| `on_budget_exhausted` | `allow` | `allow` or `block`, for an evaluation that could not finish — a rule the literal prefilter proves absent counts as finished, so `block` fires less often than it would without the prefilter (see [waf-benchmark.md](./waf-benchmark.md)) |
 | `body_inspect_limit` | `131072` | Request-body bytes to inspect. Capped independently of `client_max_body_size` so the two cannot silently disagree. `0` is refused — there is no "inspect nothing" setting |
 | `over_cap` | `inspect_prefix` | `inspect_prefix` or `reject`, for a body past that limit |
 | `response_prefix_limit` | `65536` | Response-body prefix to inspect. The response hook is synchronous, so a whole body is never buffered |
@@ -129,10 +129,12 @@ The cost is a double scan on a cache miss, and it is measured rather than assume
 ## Before you enable body inspection
 
 Inspection is not free, and the cost lands on the **allow** path — blocking is cheaper,
-because evaluation stops at the threshold crossing. Measured p99 added latency: 815 µs
-for headers and query only, 2.87 ms with a 1 KB body, and ~5.6 ms for a `POST` to a
-cacheable Location on a cache miss. Full numbers, the structural cause, and the options
-for reducing it are in [waf-benchmark.md](./waf-benchmark.md).
+because evaluation stops at the threshold crossing. A literal prefilter now skips every
+rule whose required literals are provably absent before its regex runs, with verdicts
+pinned identical by a frozen-corpus equivalence test. Measured p99 added latency after
+it: 137 µs for headers and query only, 581 µs with a 1 KB body, and ≈ 0.75 ms for a
+`POST` to a cacheable Location on a cache miss. Full numbers, the structural cause, and
+the options for reducing it are in [waf-benchmark.md](./waf-benchmark.md).
 
 ## Logging
 

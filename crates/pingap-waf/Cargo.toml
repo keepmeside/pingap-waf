@@ -57,6 +57,13 @@ pingap-util = { workspace = true }
 # reaches the origin as `'`, so a detector that inspects only the raw field is
 # bypassed by the cheapest possible encoding trick.
 urlencoding = { workspace = true }
+# The prefilter: one Aho-Corasick pass over the request fields decides which
+# rules could possibly match, so the absent majority is skipped before any
+# regex runs. `regex-syntax` extracts the literal set each pattern implies —
+# sound because a prefix/suffix literal of a pattern is contained in every
+# match of that pattern (see `prefilter.rs` for the full contract).
+aho-corasick = { workspace = true }
+regex-syntax = { workspace = true }
 
 # --- `plugin` feature only -------------------------------------------------------
 async-trait = { workspace = true, optional = true }

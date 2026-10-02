@@ -261,6 +261,20 @@ pub trait Rule: Send + Sync {
     fn action_override(&self) -> Option<crate::config::RawMode> {
         None
     }
+
+    /// The literal set every match of this rule must contain, lowercased and
+    /// deduplicated, or `None` when no usable set exists.
+    ///
+    /// This is the prefilter's contract, and it is the implementor's to keep:
+    /// the returned set must be such that a match of this rule always
+    /// contains at least one of its members somewhere in the bytes the rule
+    /// inspects. `None` means ungated — the rule is always treated as present
+    /// and always evaluated, which is the safe direction and the default for
+    /// any rule whose matching is not literal-bounded. See
+    /// [`crate::prefilter`] for how the set is extracted and used.
+    fn required_literals(&self) -> Option<&[String]> {
+        None
+    }
 }
 
 /// Request-side rule.

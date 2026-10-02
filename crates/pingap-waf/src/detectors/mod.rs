@@ -113,6 +113,9 @@ pub struct PatternRule {
     paranoia: Paranoia,
     scope: Scope,
     pattern: fancy_regex::Regex,
+    /// The prefilter's needle set, extracted once here rather than per
+    /// evaluation. `None` leaves the rule ungated.
+    needles: Option<Vec<String>>,
 }
 
 impl PatternRule {
@@ -143,6 +146,7 @@ impl PatternRule {
             paranoia: s.paranoia,
             scope: s.scope,
             pattern,
+            needles: crate::prefilter::required_needles(&s.pattern),
         }
     }
 
@@ -179,6 +183,9 @@ impl Rule for PatternRule {
     }
     fn paranoia(&self) -> Paranoia {
         self.paranoia
+    }
+    fn required_literals(&self) -> Option<&[String]> {
+        self.needles.as_deref()
     }
 }
 

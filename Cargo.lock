@@ -5083,6 +5083,7 @@ dependencies = [
 name = "pingap-waf"
 version = "0.13.10"
 dependencies = [
+ "aho-corasick",
  "arc-swap",
  "async-trait",
  "bytes",
@@ -5102,6 +5103,7 @@ dependencies = [
  "pingap-plugin",
  "pingap-util",
  "pingora",
+ "regex-syntax",
  "serde",
  "serde_json",
  "sha2 0.11.0",

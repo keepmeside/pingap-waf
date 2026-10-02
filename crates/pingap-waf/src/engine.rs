@@ -230,7 +230,10 @@ impl Scorer {
 /// match would span an invalid byte will not fire. Detectors that need to see
 /// past that (the encoding-aware matchers that arrive with the detectors) work on
 /// the raw bytes instead.
-fn text_prefix(bytes: &[u8]) -> &str {
+/// Crate-visible for the prefilter, which must see the exact body prefix the
+/// rules see — its own clamping logic would be a second definition of
+/// "inspectable bytes" that can drift.
+pub(crate) fn text_prefix(bytes: &[u8]) -> &str {
     match std::str::from_utf8(bytes) {
         Ok(s) => s,
         Err(e) => {
@@ -255,17 +258,52 @@ fn clamp(body: Option<&[u8]>, limit: usize) -> (Option<&[u8]>, bool) {
     }
 }
 
-/// Run `find` against a field value in every form it could reach the origin as.
+/// Visit every form of `value` that a rule could match in, in the order the
+/// engine tries them. Three forms, not one: the raw bytes; the
+/// percent-decoded bytes, only when decoding actually changed something
+/// (because `%27` reaches the origin as `'`); and the form-urlencoded
+/// reading where `+` is a space, only when the value contains one (because
+/// that is what a query string and a form body are). Matching only the raw
+/// form is bypassed by the cheapest possible trick, and matching only the
+/// decoded form would miss a pattern written against an encoded sequence
+/// such as `%2e%2e%2f`.
 ///
-/// Three forms, not one. The raw bytes; the percent-decoded bytes, because `%27`
-/// reaches the origin as `'`; and the form-urlencoded reading where `+` is a space,
-/// because that is what a query string and a form body are. Matching only the raw
-/// form is bypassed by the cheapest possible trick, and matching only the decoded form
-/// would miss a pattern written against an encoded sequence such as `%2e%2e%2f`.
+/// The visitor returns `true` to stop; forms after the stop are not even
+/// computed, so the extra scans cost nothing on a path that has already
+/// answered.
 ///
-/// The extra scans cost nothing on the common path: `urlencoding::decode` borrows when
-/// there is nothing to decode, and the `+` variant is skipped unless the value
-/// contains one.
+/// One definition of "the forms of a field", shared by the matching path
+/// ([`find_both_forms`]) and the prefilter's prescan. Two copies would
+/// drift, and drift is unsound in both directions: a form only the rules
+/// scan is a needle the gate never sees, so an absent rule would be skipped
+/// while it could match; a form only the prescan scans is wasted work.
+pub(crate) fn each_form(value: &str, visit: &mut dyn FnMut(&str) -> bool) {
+    if visit(value) {
+        return;
+    }
+    if let Ok(std::borrow::Cow::Owned(decoded)) = urlencoding::decode(value)
+        && visit(&decoded)
+    {
+        return;
+    }
+    // `+` is a space in `application/x-www-form-urlencoded`, which is what a
+    // query string and a form body are. Percent-decoding alone leaves it
+    // literal, so `?q=UNION+SELECT+pw` reads as one long token and every
+    // pattern that requires whitespace between keywords misses it — while the
+    // origin sees the spaces. This is the cheapest bypass after
+    // percent-encoding, and it costs a third scan only for values that
+    // actually contain a `+`.
+    if value.contains('+') {
+        let spaced = value.replace('+', " ");
+        let decoded = urlencoding::decode(&spaced)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or(spaced);
+        visit(&decoded);
+    }
+}
+
+/// Run `find` against a field value in every form it could reach the origin
+/// as ([`each_form`]), reporting the first match.
 ///
 /// The returned range is only meaningful when the match was on the raw form; a
 /// decoded match reports the range within the decoded string, which does not map back
@@ -275,28 +313,14 @@ fn find_both_forms(
     value: &str,
     find: &dyn Fn(&str) -> Option<std::ops::Range<usize>>,
 ) -> Option<std::ops::Range<usize>> {
-    if let Some(at) = find(value) {
-        return Some(at);
-    }
-    if let Ok(std::borrow::Cow::Owned(decoded)) = urlencoding::decode(value)
-        && let Some(at) = find(&decoded)
-    {
-        return Some(at);
-    }
-    // `+` is a space in `application/x-www-form-urlencoded`, which is what a query
-    // string and a form body are. Percent-decoding alone leaves it literal, so
-    // `?q=UNION+SELECT+pw` reads as one long token and every pattern that requires
-    // whitespace between keywords misses it — while the origin sees the spaces. This
-    // is the cheapest bypass after percent-encoding, and it costs a third scan only
-    // for values that actually contain a `+`.
-    if value.contains('+') {
-        let spaced = value.replace('+', " ");
-        let decoded = urlencoding::decode(&spaced)
-            .map(std::borrow::Cow::into_owned)
-            .unwrap_or(spaced);
-        return find(&decoded);
-    }
-    None
+    let mut at = None;
+    each_form(value, &mut |form| {
+        if at.is_none() {
+            at = find(form);
+        }
+        at.is_some()
+    });
+    at
 }
 
 /// Walk every field of a request a rule may inspect, in evaluation order, and
@@ -394,6 +418,9 @@ struct CompiledCustomRule {
     severity: Severity,
     paranoia: Paranoia,
     pattern: fancy_regex::Regex,
+    /// The prefilter's needle set, extracted from the same pattern string
+    /// that was compiled above. `None` leaves the rule ungated.
+    needles: Option<Vec<String>>,
     /// Explicit per-rule action, overriding the category mode when set.
     action: Option<RawMode>,
 }
@@ -413,6 +440,9 @@ impl Rule for CompiledCustomRule {
     }
     fn action_override(&self) -> Option<RawMode> {
         self.action
+    }
+    fn required_literals(&self) -> Option<&[String]> {
+        self.needles.as_deref()
     }
 }
 
@@ -513,6 +543,19 @@ pub struct RuleEngine {
     config: ValidatedConfig,
     request_rules: Vec<Box<dyn RequestRule>>,
     response_rules: Vec<Box<dyn ResponseRule>>,
+    /// One literal gate per surface, built from the same rule lists. A rule
+    /// whose needles are absent from a request is skipped before its regex
+    /// runs — see [`crate::prefilter`] for the soundness contract.
+    request_prefilter: crate::prefilter::Prefilter,
+    response_prefilter: crate::prefilter::Prefilter,
+    /// Each rule's gate, resolved once at build rather than per evaluation:
+    /// it depends only on the config and the rule, never on the input.
+    /// `None` means the rule does not participate — its category is `off` or
+    /// its own action is, or it sits above the configured paranoia level.
+    /// The prescan's present-marking and the evaluation loop read the same
+    /// answer here, so the two can never disagree about which rules run.
+    request_gates: Vec<Option<Gate>>,
+    response_gates: Vec<Option<Gate>>,
 }
 
 impl std::fmt::Debug for RuleEngine {
@@ -559,10 +602,26 @@ impl RuleEngine {
                 request_rules.push(Box::new(compiled));
             }
         }
+        // Built after the custom rules land in their lists, so the gate sees
+        // the same rules evaluation will walk.
+        let request_prefilter =
+            crate::prefilter::Prefilter::build(&request_rules);
+        let response_prefilter =
+            crate::prefilter::Prefilter::build(&response_rules);
+        // Resolved once, read per evaluation: the gate is config-and-rule
+        // state, so resolving it per request would pay the same lookups
+        // twice — once to mark non-participating rules present for the
+        // prescan, once to skip them in the loop.
+        let request_gates = resolve_gates(&config, &request_rules, false);
+        let response_gates = resolve_gates(&config, &response_rules, true);
         Ok(Self {
             config,
             request_rules,
             response_rules,
+            request_prefilter,
+            response_prefilter,
+            request_gates,
+            response_gates,
         })
     }
 
@@ -594,6 +653,7 @@ fn build_custom(
         severity: spec.severity,
         paranoia: spec.paranoia,
         pattern: validated.pattern().clone(),
+        needles: crate::prefilter::required_needles(&spec.pattern),
         action: spec.action,
     }
 }
@@ -651,6 +711,40 @@ fn resolve_gate(
     }
 }
 
+/// Every rule's gate for one surface, `None` for a rule that does not
+/// participate.
+///
+/// Input-independent by construction — mode, action override and paranoia are
+/// all config-and-rule state — so this is resolved once at build and both the
+/// prescan and the evaluation loop read the same answer, one array read per
+/// rule per evaluation instead of a mode lookup and a trait call.
+fn resolve_gates<R: Rule + ?Sized>(
+    config: &ValidatedConfig,
+    rules: &[Box<R>],
+    response_side: bool,
+) -> Vec<Option<Gate>> {
+    rules
+        .iter()
+        .map(|rule| {
+            let gate = if response_side {
+                resolve_gate(
+                    config.response_mode(rule.category()).into(),
+                    rule.action_override(),
+                    true,
+                )
+            } else {
+                resolve_gate(
+                    config.request_mode(rule.category()).into(),
+                    rule.action_override(),
+                    false,
+                )
+            };
+            (gate != Gate::Skip && rule.paranoia() <= config.paranoia)
+                .then_some(gate)
+        })
+        .collect()
+}
+
 impl RuleEngine {
     /// Evaluate a request. Total: no panic path, no allocation proportional to
     /// input size, and it always returns a verdict — including when the budget
@@ -662,17 +756,46 @@ impl RuleEngine {
         let cfg = &self.config;
         let (body, clamped) = clamp(input.body, cfg.body_inspect_limit);
         let scoped = RequestInput { body, ..*input };
-        let mut budget = Budget::new(cfg.budget, cfg.on_budget_exhausted);
         let mut scorer = Scorer::new(cfg.anomaly_threshold);
         let mut exhausted = None;
 
-        for rule in &self.request_rules {
-            let gate = resolve_gate(
-                cfg.request_mode(rule.category()).into(),
-                rule.action_override(),
-                false,
-            );
-            if gate == Gate::Skip || rule.paranoia() > cfg.paranoia {
+        // One literal pass over the inspectable bytes decides which rules can
+        // possibly match; the absent rest is skipped below, before the budget.
+        // `rules_checked` will read lower than an unfiltered run — by design,
+        // skipped rules checked nothing — and exhaustion can only lift, never
+        // newly appear: a rule proven absent is a completed evaluation, not an
+        // unfinished one, so evaluations finish more often than the
+        // unfiltered engine's, and with `on_budget_exhausted = block` a body
+        // whose absent rules would have spent the budget is allowed as
+        // verified rather than blocked as unfinished. That direction is the
+        // documented behaviour, not a regression to hide.
+        //
+        // Rules the loop below cannot run read as present here, so the walk
+        // can early-exit once every rule it could run is accounted for, and a
+        // config with every category off pays no scan at all. The gates were
+        // resolved at build; marking them present changes no verdict because
+        // the loop skips them before it consults the mask.
+        let mut present = self.request_prefilter.present_mask();
+        for (index, gate) in self.request_gates.iter().enumerate() {
+            if gate.is_none() {
+                present[index] = true;
+            }
+        }
+        self.request_prefilter.mark_request(&scoped, &mut present);
+
+        // The budget clock starts after the prescan: charging the scan to the
+        // rule budget would spend it before the first rule runs, and an input
+        // that marks most rules present — no skip savings, full scan cost —
+        // could lose late rules that the unfiltered engine still reached. The
+        // budget bounds rule evaluation, exactly as it did before the
+        // prefilter; `elapsed` reports rule time, not prescan time.
+        let mut budget = Budget::new(cfg.budget, cfg.on_budget_exhausted);
+
+        for (index, rule) in self.request_rules.iter().enumerate() {
+            let Some(gate) = self.request_gates[index] else {
+                continue;
+            };
+            if !present[index] {
                 continue;
             }
             // Between rules, not only after the loop: one catastrophic pattern
@@ -716,17 +839,30 @@ impl RuleEngine {
             body_chunk,
             ..*input
         };
-        let mut budget = Budget::new(cfg.budget, cfg.on_budget_exhausted);
         let mut scorer = Scorer::new(cfg.anomaly_threshold);
         let mut exhausted = None;
 
-        for rule in &self.response_rules {
-            let gate = resolve_gate(
-                cfg.response_mode(rule.category()).into(),
-                rule.action_override(),
-                true,
-            );
-            if gate == Gate::Skip || rule.paranoia() > cfg.paranoia {
+        // Same shape as the request loop: one raw-only literal pass — header
+        // values, then the body prefix, mirroring `find_in_response` — and
+        // rules the loop below cannot run read as present so the walk can
+        // early-exit. See the request-side prescan comment for the budget
+        // interaction; it is the same here.
+        let mut present = self.response_prefilter.present_mask();
+        for (index, gate) in self.response_gates.iter().enumerate() {
+            if gate.is_none() {
+                present[index] = true;
+            }
+        }
+        self.response_prefilter.mark_response(&scoped, &mut present);
+
+        // Off the prescan, as on the request side.
+        let mut budget = Budget::new(cfg.budget, cfg.on_budget_exhausted);
+
+        for (index, rule) in self.response_rules.iter().enumerate() {
+            let Some(gate) = self.response_gates[index] else {
+                continue;
+            };
+            if !present[index] {
                 continue;
             }
             if let Err(e) = budget.check() {
@@ -987,5 +1123,536 @@ mod tests {
             "names both rules: {msg}"
         );
         assert!(msg.contains("rename"), "says what to do about it: {msg}");
+    }
+
+    #[test]
+    fn the_prefilter_never_changes_a_verdict_on_the_frozen_corpus() {
+        // The prefilter's promise is narrow and absolute: skipping a rule
+        // whose literals are absent must never change what the engine
+        // decides. A present rule marked absent is an attack walking
+        // through, which is why this test exists rather than trusting the
+        // extraction heuristics. It runs the frozen corpus — the same tree
+        // and hash the regression gate in `tests/corpus.rs` freezes —
+        // through the same engine twice, once with the real literal gate
+        // and once with the gate forced open for every rule, and requires
+        // the two runs to agree on everything an operator or a log can
+        // see: verdict (which carries the hits), enforcing score,
+        // exhaustion, truncation.
+        //
+        // `rules_checked` and `elapsed` are excluded by design. A skipped
+        // rule checks nothing — that is the point — and timing is not a
+        // behaviour. Everything else must be identical.
+        use std::path::{Path, PathBuf};
+
+        const FROZEN_TREE_HASH: &str =
+            "ea65120d61d1b7b727944697c53df0ed9e6ae61975e8f3e6fc69d45fc88e1822";
+        const FROZEN_FILE_COUNT: usize = 726;
+
+        /// What one evaluation looked like, minus the two fields the
+        /// prefilter is allowed to change.
+        #[derive(Debug, Clone, PartialEq)]
+        struct Snap<V> {
+            verdict: V,
+            enforcing_score: u32,
+            exhausted: Option<Exhausted>,
+            truncated: bool,
+        }
+
+        fn snap<V: Clone + PartialEq>(e: &Evaluation<V>) -> Snap<V> {
+            Snap {
+                verdict: e.verdict.clone(),
+                enforcing_score: e.enforcing_score,
+                exhausted: e.exhausted.clone(),
+                truncated: e.truncated,
+            }
+        }
+
+        /// Every corpus file, verified as the frozen tree first: an
+        /// equivalence run over an edited corpus would still prove the
+        /// property, but over fewer cases than anyone believed.
+        fn corpus_cases(root: &Path) -> Vec<(String, String)> {
+            use sha2::Digest;
+            let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                let mut children: Vec<PathBuf> = std::fs::read_dir(&dir)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .collect();
+                children.sort();
+                for path in children {
+                    if path.is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    let name =
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if name == "MANIFEST.sha256" || name == "TREE_HASH" {
+                        continue;
+                    }
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let body = std::fs::read(&path).unwrap_or_else(|e| {
+                        panic!("read {}: {e}", path.display())
+                    });
+                    entries.push((rel, body));
+                }
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut h = sha2::Sha256::new();
+            for (rel, body) in &entries {
+                h.update(rel.as_bytes());
+                h.update([0u8]);
+                h.update(body);
+                h.update([0u8]);
+            }
+            let hash = hex::encode(h.finalize());
+            assert_eq!(
+                entries.len(),
+                FROZEN_FILE_COUNT,
+                "corpus file count changed; the equivalence run would not \
+                 cover what it claims to"
+            );
+            assert_eq!(
+                hash, FROZEN_TREE_HASH,
+                "corpus contents changed; re-run against the frozen tree"
+            );
+            entries
+                .into_iter()
+                .map(|(rel, body)| {
+                    let case = String::from_utf8(body)
+                        .unwrap_or_else(|e| panic!("{rel} is not UTF-8: {e}"));
+                    (rel, case)
+                })
+                .collect()
+        }
+
+        /// One corpus case through all three walks the gates perform:
+        /// request-side as a query value (the regression gate's shape),
+        /// request-side as a body (the clamped text prefix), and
+        /// response-side as a header plus body prefix. The response arm is
+        /// equivalence-only by nature: corpus text is request-shaped, so it
+        /// walks real bytes but rarely fires a response rule. Firing
+        /// coverage of every carrier — response ones included — is pinned
+        /// by the probe test below.
+        fn run_case(
+            engine: &RuleEngine,
+            case: &str,
+        ) -> (
+            Snap<RequestVerdict>,
+            Snap<RequestVerdict>,
+            Snap<ResponseVerdict>,
+        ) {
+            let query = [("q", case)];
+            let as_query = RequestInput {
+                method: "GET",
+                uri: "/",
+                headers: &[],
+                query: &query,
+                body: None,
+                client_ip: None,
+                body_truncated: false,
+            };
+            let as_body = RequestInput {
+                method: "POST",
+                uri: "/",
+                headers: &[],
+                query: &[],
+                body: Some(case.as_bytes()),
+                client_ip: None,
+                body_truncated: false,
+            };
+            let headers = [("x-note", case)];
+            let as_response = ResponseInput {
+                status: 200,
+                headers: &headers,
+                body_chunk: Some(case.as_bytes()),
+                request_score: 0,
+                body_truncated: false,
+            };
+            (
+                snap(&engine.evaluate_request(&as_query)),
+                snap(&engine.evaluate_request(&as_body)),
+                snap(&engine.evaluate_response(&as_response)),
+            )
+        }
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../spikes/detector-baseline/corpus");
+        assert!(
+            root.is_dir(),
+            "the frozen corpus is missing at {} — this test cannot run \
+             without it",
+            root.display()
+        );
+        let cases = corpus_cases(&root);
+
+        let cfg = crate::config::WafConfig {
+            categories: Category::ALL
+                .iter()
+                .map(|c| (c.key().to_string(), RawMode::Detect))
+                .collect(),
+            paranoia: Paranoia::MIN,
+            // Generous, same as the regression gate: a corpus case
+            // exhausting the budget would make the two runs differ for a
+            // reason that is not the prefilter.
+            budget_ms: 10_000,
+            ..Default::default()
+        };
+        let mut engine = RuleEngine::build(
+            cfg.validate().expect("corpus config is valid"),
+            crate::detectors::request_rules(),
+            crate::detectors::response_rules(),
+        )
+        .expect("native ruleset builds");
+
+        // Pass one: the real gate.
+        let real: Vec<_> = cases
+            .iter()
+            .map(|(_, case)| run_case(&engine, case))
+            .collect();
+
+        // The vacuity guard: an equivalence test where nothing ever fires,
+        // or everything fires, proves nothing about the skip path. It counts
+        // the request arms only — corpus text is request-shaped, and firing
+        // coverage of the response carriers is pinned per carrier by the
+        // probe test below, not by corpus text.
+        let firing = real
+            .iter()
+            .filter(|(q, b, _)| {
+                !q.verdict.hits().is_empty() || !b.verdict.hits().is_empty()
+            })
+            .count();
+        let clean = real
+            .iter()
+            .filter(|(q, b, _)| {
+                q.verdict.hits().is_empty() && b.verdict.hits().is_empty()
+            })
+            .count();
+        assert!(firing > 0, "no corpus case fired; the gate is untested");
+        assert!(
+            clean > 0,
+            "every corpus case fired; the skip path is untested"
+        );
+
+        // Pass two: both gates forced open for every rule, which is
+        // byte-for-byte the engine as it ran before the prefilter existed.
+        engine.request_prefilter =
+            crate::prefilter::Prefilter::always(engine.request_rules.len());
+        engine.response_prefilter =
+            crate::prefilter::Prefilter::always(engine.response_rules.len());
+
+        for (i, (rel, case)) in cases.iter().enumerate() {
+            let (q, b, r) = &real[i];
+            let (q2, b2, r2) = run_case(&engine, case);
+            assert_eq!(
+                &q2, q,
+                "the gate changed the query-form verdict on {rel}"
+            );
+            assert_eq!(
+                &b2, b,
+                "the gate changed the body-form verdict on {rel}"
+            );
+            assert_eq!(
+                &r2, r,
+                "the gate changed the response verdict on {rel}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_the_gate_proves_absent_checks_nothing() {
+        // What the skip costs the budget: a rule the gate proves absent never
+        // reaches `budget.check`, so an evaluation finishes more often than
+        // the unfiltered engine's — `exhausted` can lift, never newly appear,
+        // and `on_budget_exhausted = block` fires less because a body whose
+        // rules are all provably absent is allowed as verified rather than
+        // blocked as unfinished. `rules_checked` is the deterministic
+        // witness; pinning exhaustion itself would need a wall-clock budget,
+        // which is flaky by nature.
+        let cfg = crate::config::WafConfig {
+            categories: Category::ALL
+                .iter()
+                .map(|c| (c.key().to_string(), RawMode::Detect))
+                .collect(),
+            paranoia: Paranoia::MIN,
+            budget_ms: 10_000,
+            custom_rules: [
+                (
+                    "present".to_string(),
+                    CustomRule {
+                        category: Category::ProtocolEnforcement,
+                        pattern: r"(?i)unionselectprobe".to_string(),
+                        severity: Severity::Notice,
+                        paranoia: Paranoia::MIN,
+                        action: None,
+                    },
+                ),
+                (
+                    "absent".to_string(),
+                    CustomRule {
+                        category: Category::ProtocolEnforcement,
+                        pattern: r"(?i)neverpresentprobe".to_string(),
+                        severity: Severity::Notice,
+                        paranoia: Paranoia::MIN,
+                        action: None,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let mut engine = RuleEngine::build(
+            cfg.validate().expect("budget config is valid"),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("two custom rules build");
+        let input = RequestInput {
+            method: "POST",
+            uri: "/",
+            headers: &[],
+            query: &[],
+            body: Some(b"unionselectprobe"),
+            client_ip: None,
+            body_truncated: false,
+        };
+        let gated = engine.evaluate_request(&input);
+        assert_eq!(
+            gated.rules_checked, 1,
+            "the absent rule must not spend a check"
+        );
+        assert_eq!(gated.exhausted, None);
+        assert!(
+            !gated.verdict.hits().is_empty(),
+            "the present rule must fire"
+        );
+        engine.request_prefilter =
+            crate::prefilter::Prefilter::always(engine.request_rules.len());
+        let unfiltered = engine.evaluate_request(&input);
+        assert_eq!(
+            unfiltered.rules_checked, 2,
+            "forced open, both rules must check"
+        );
+        // Skipping a rule that matches nothing changes nothing an operator
+        // or a log can see.
+        assert_eq!(gated.verdict, unfiltered.verdict);
+    }
+
+    #[test]
+    fn every_carrier_the_gate_walks_stays_pinned_by_a_firing_probe() {
+        // The corpus run above proves the two gates agree on corpus text, but
+        // agreement alone cannot catch a scan line missing from the walk: the
+        // gated run would skip the rule and the forced-open run would reach
+        // it, and they would disagree — loudly. What the corpus cannot pin is
+        // firing content per carrier, because its text is request-shaped. So
+        // every carrier the prescan walks — request method, URI, query,
+        // header, body; response header, body — gets a probe that fires
+        // through that carrier alone: the real gate must collect the hit, and
+        // the forced-open run must agree. Delete a scan line and its probe
+        // loses the hit the forced-open run still collects.
+        let cfg = crate::config::WafConfig {
+            categories: Category::ALL
+                .iter()
+                .map(|c| (c.key().to_string(), RawMode::Detect))
+                .collect(),
+            paranoia: Paranoia::MIN,
+            budget_ms: 10_000,
+            // The method carrier needs a rule authored for a method token;
+            // the native ruleset is written for path, query, header and body
+            // content.
+            custom_rules: [(
+                "webdav-method".to_string(),
+                CustomRule {
+                    category: Category::ProtocolEnforcement,
+                    pattern: r"(?i)\bpropfind\b".to_string(),
+                    severity: Severity::Error,
+                    paranoia: Paranoia::MIN,
+                    action: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let mut engine = RuleEngine::build(
+            cfg.validate().expect("carrier config is valid"),
+            crate::detectors::request_rules(),
+            crate::detectors::response_rules(),
+        )
+        .expect("native ruleset builds");
+
+        // Payloads already verified to fire elsewhere in the suite: the
+        // User-Agent SQL-injection regression fixture, and the two response
+        // fixtures from the detector lineage test.
+        let sqli = "Mozilla/5.0 ' UNION SELECT pw FROM users --";
+        let leak = "Warning: mysql_connect(): Access denied for user 'root'@'localhost'";
+        let shell = "<?php eval($_POST['cmd']); ?>";
+
+        let uri = format!("/search {sqli}");
+        let query = [("q", sqli)];
+        let request_headers = [("user-agent", sqli)];
+        let request_probes: Vec<(&str, RequestInput)> = vec![
+            (
+                "method",
+                RequestInput {
+                    method: "PROPFIND",
+                    uri: "/",
+                    headers: &[],
+                    query: &[],
+                    body: None,
+                    client_ip: None,
+                    body_truncated: false,
+                },
+            ),
+            (
+                "uri",
+                RequestInput {
+                    method: "GET",
+                    uri: &uri,
+                    headers: &[],
+                    query: &[],
+                    body: None,
+                    client_ip: None,
+                    body_truncated: false,
+                },
+            ),
+            (
+                "query",
+                RequestInput {
+                    method: "GET",
+                    uri: "/",
+                    headers: &[],
+                    query: &query,
+                    body: None,
+                    client_ip: None,
+                    body_truncated: false,
+                },
+            ),
+            (
+                "header",
+                RequestInput {
+                    method: "GET",
+                    uri: "/",
+                    headers: &request_headers,
+                    query: &[],
+                    body: None,
+                    client_ip: None,
+                    body_truncated: false,
+                },
+            ),
+            (
+                "body",
+                RequestInput {
+                    method: "POST",
+                    uri: "/",
+                    headers: &[],
+                    query: &[],
+                    body: Some(sqli.as_bytes()),
+                    client_ip: None,
+                    body_truncated: false,
+                },
+            ),
+        ];
+        let response_headers = [("x-error", leak)];
+        let response_probes: Vec<(&str, ResponseInput)> = vec![
+            (
+                "response header",
+                ResponseInput {
+                    status: 200,
+                    headers: &response_headers,
+                    body_chunk: Some(b"ok"),
+                    request_score: 0,
+                    body_truncated: false,
+                },
+            ),
+            (
+                "response body",
+                ResponseInput {
+                    status: 200,
+                    headers: &[("content-type", "text/html")],
+                    body_chunk: Some(shell.as_bytes()),
+                    request_score: 0,
+                    body_truncated: false,
+                },
+            ),
+        ];
+
+        // Pass one: the real gate must collect a hit through every carrier —
+        // a probe that fires nothing pins nothing.
+        let gated_request: Vec<_> = request_probes
+            .iter()
+            .map(|(_, input)| engine.evaluate_request(input))
+            .collect();
+        let gated_response: Vec<_> = response_probes
+            .iter()
+            .map(|(_, input)| engine.evaluate_response(input))
+            .collect();
+        for ((label, _), e) in request_probes.iter().zip(&gated_request) {
+            assert!(
+                !e.verdict.hits().is_empty(),
+                "the {label} probe fired nothing — a carrier without a \
+                 firing probe cannot catch its scan line going missing"
+            );
+        }
+        for ((label, _), e) in response_probes.iter().zip(&gated_response) {
+            assert!(
+                !e.verdict.hits().is_empty(),
+                "the {label} probe fired nothing — a carrier without a \
+                 firing probe cannot catch its scan line going missing"
+            );
+        }
+
+        // Pass two: both gates forced open, byte-for-byte the unfiltered
+        // engine. Every carrier's observable outcome must agree.
+        engine.request_prefilter =
+            crate::prefilter::Prefilter::always(engine.request_rules.len());
+        engine.response_prefilter =
+            crate::prefilter::Prefilter::always(engine.response_rules.len());
+        for ((label, input), gated) in request_probes.iter().zip(&gated_request)
+        {
+            let open = engine.evaluate_request(input);
+            assert_eq!(
+                open.verdict, gated.verdict,
+                "the gate changed the {label} verdict"
+            );
+            assert_eq!(
+                open.enforcing_score, gated.enforcing_score,
+                "the gate changed the {label} enforcing score"
+            );
+            assert_eq!(
+                open.exhausted, gated.exhausted,
+                "the gate changed the {label} exhaustion"
+            );
+            assert_eq!(
+                open.truncated, gated.truncated,
+                "the gate changed the {label} truncation"
+            );
+        }
+        for ((label, input), gated) in
+            response_probes.iter().zip(&gated_response)
+        {
+            let open = engine.evaluate_response(input);
+            assert_eq!(
+                open.verdict, gated.verdict,
+                "the gate changed the {label} verdict"
+            );
+            assert_eq!(
+                open.enforcing_score, gated.enforcing_score,
+                "the gate changed the {label} enforcing score"
+            );
+            assert_eq!(
+                open.exhausted, gated.exhausted,
+                "the gate changed the {label} exhaustion"
+            );
+            assert_eq!(
+                open.truncated, gated.truncated,
+                "the gate changed the {label} truncation"
+            );
+        }
     }
 }
