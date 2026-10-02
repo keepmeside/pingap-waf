@@ -264,6 +264,10 @@ category = "drop"
 /// own criterion in `pingap-intel`.
 #[tokio::test]
 async fn intelligence_selected_by_one_policy_is_not_enforced_against_another() {
+    // Construction refuses an intel-bearing policy when no trusted-proxy list
+    // is set, so this has to happen before the plugin is built rather than
+    // before the request.
+    pingap_core::set_trusted_proxies(&Some(vec!["192.0.2.10".to_string()]));
     let intel_tenant = plugin(INTEL_TENANT);
     let audit = plugin(AUDIT_ONLY);
 
@@ -313,6 +317,9 @@ async fn intelligence_selected_by_one_policy_is_not_enforced_against_another() {
 /// operator's log field would silently empty.
 #[tokio::test]
 async fn a_feed_sourced_refusal_names_its_feed_in_the_verdict() {
+    // Same construction precondition as the manual-entry policy above: the
+    // intel gate needs a trust anchor before the plugin is built.
+    pingap_core::set_trusted_proxies(&Some(vec!["192.0.2.10".to_string()]));
     let waf = plugin(FEED_TENANT);
     // The refresh half lands a feed's results; here the same swap is driven
     // by hand so the verdict, not the fetch, is what is under test.

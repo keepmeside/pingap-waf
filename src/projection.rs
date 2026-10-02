@@ -446,14 +446,31 @@ impl DataPlane for ProviderDataPlane {
 /// This is the check `pingap-waf -t` cannot do for a category the build lacks, and it runs
 /// against the same registry the reload will use, so a config it accepts is one the reload
 /// can construct.
+///
+/// The construction runs in the candidate's trusted-proxy scope. A plugin whose gate reads
+/// that state — the WAF's intel gate refuses threat intel unless `basic.trusted_proxies` is
+/// set — must judge the config under validation, not the one currently running, or an
+/// apply that adopts intel and trusted proxies together is refused for lacking what it
+/// just set. `pingap-waf -t` reaches the same conclusion by installing the candidate
+/// before any plugin is built.
 pub struct FactoryPluginCheck;
 
 impl PluginCheck for FactoryPluginCheck {
-    fn check(&self, _name: &str, conf: &PluginConf) -> Result<(), String> {
-        get_plugin_factory()
-            .create(conf)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    fn check(
+        &self,
+        _name: &str,
+        conf: &PluginConf,
+        config: &PingapConfig,
+    ) -> Result<(), String> {
+        pingap_core::with_construction_trusted_proxies(
+            &config.basic.trusted_proxies,
+            || {
+                get_plugin_factory()
+                    .create(conf)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            },
+        )
     }
 }
 
@@ -889,6 +906,13 @@ mod tests {
     /// awaits that commit and verify, which is exactly the shape a blocking guard must not
     /// be used for.
     static PROVIDER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Same reasoning as `PROVIDER`, for the process-global trusted-proxy list:
+    /// a test that sets it asserts on it across its whole body, so a concurrent
+    /// flipper — or a concurrent restore to the unset default — would race those
+    /// assertions.
+    static TRUSTED_PROXIES_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
 
     /// The gateway binary this workspace builds.
     ///
@@ -1405,9 +1429,54 @@ gzip_level = 6
         let conf: PluginConf =
             toml::from_str(r#"category = "no_such_category""#).expect("parses");
         let err = FactoryPluginCheck
-            .check("x", &conf)
+            .check("x", &conf, &PingapConfig::default())
             .expect_err("an unknown category must be refused");
         assert!(err.contains("no_such_category"), "{err}");
+    }
+
+    /// The factory check judges the candidate config, not the one running.
+    ///
+    /// Both directions of the same rule, at the check the admin API's apply path
+    /// actually consults. An apply that adopts intel and
+    /// `basic.trusted_proxies` together is accepted while the running config has
+    /// no trusted proxies — the first-adoption case, where judging the running
+    /// config instead would refuse the apply for lacking what it just set. And
+    /// an apply that keeps intel while dropping `trusted_proxies` is refused
+    /// even while the running config has them, because once the candidate is
+    /// running it will not. The refusal names the key, since the operator's
+    /// remedy is in the candidate.
+    #[tokio::test]
+    async fn test_the_factory_check_judges_the_candidate_not_the_running_config()
+     {
+        // Flips the process-global list, so it takes the same lock as the test
+        // above that asserts on it.
+        let _trusted_proxies = TRUSTED_PROXIES_LOCK.lock().await;
+
+        let intel_conf: PluginConf = toml::from_str(
+            r#"
+category = "waf"
+[intel]
+manual = ["198.51.100.7"]
+"#,
+        )
+        .expect("parses");
+
+        // The running config has trusted proxies; the candidate drops them.
+        pingap_core::set_trusted_proxies(&Some(vec!["10.0.0.0/8".to_string()]));
+        let err = FactoryPluginCheck
+            .check("waf", &intel_conf, &PingapConfig::default())
+            .expect_err("a candidate without trusted proxies must be refused");
+        assert!(err.contains("trusted_proxies"), "names the key: {err}");
+
+        // First adoption: the running config has none, the candidate sets both.
+        pingap_core::set_trusted_proxies(&None);
+        let mut adopt_both = PingapConfig::default();
+        adopt_both.basic.trusted_proxies = Some(vec!["10.0.0.0/8".to_string()]);
+        FactoryPluginCheck
+            .check("waf", &intel_conf, &adopt_both)
+            .expect("the candidate's trusted proxies satisfy the gate");
+
+        pingap_core::set_trusted_proxies(&None);
     }
 
     /// The posture is reported, and what is reported is what is in effect.
@@ -1445,6 +1514,10 @@ gzip_level = 6
     async fn test_a_rejected_validation_leaves_client_ip_resolution_untouched()
     {
         use pingap_controlplane::projection::Verdict;
+
+        // Holds the trusted-proxy list for the whole body: the assertions below
+        // read it, and a concurrent test flipping it would race them.
+        let _trusted_proxies = TRUSTED_PROXIES_LOCK.lock().await;
 
         // This process trusts only 10.0.0.0/8, so a request arriving directly must not be
         // able to claim an address via XFF.

@@ -677,6 +677,7 @@ impl PluginCheck for KnownPlugins {
         &self,
         name: &str,
         conf: &pingap_config::PluginConf,
+        _config: &pingap_config::PingapConfig,
     ) -> Result<(), String> {
         let category = conf
             .get("category")

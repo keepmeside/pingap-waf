@@ -5,12 +5,13 @@ one manual blocklist entry, and one declared feed that ships disabled because
 its URL is a placeholder — set a real feed URL and `enabled = true` together. A
 failed refresh keeps the last good set for the configured `staleness` window.
 
-The WAF identity gate fires only when `ip_list` is set, so this config
-validates without `basic.trusted_proxies` — but feed and manual entries are
-matched against the same resolved client address `ip_list` uses, and without
-a trust anchor that address is the client-chosen `X-Forwarded-For`, honoured
-from any peer: direct exposure is no remedy. Set `basic.trusted_proxies`
-when the feed's denial must actually deny.
+The construction gate refuses a policy that selects intel entries without
+`basic.trusted_proxies`, exactly as it refuses a bare `ip_list`: feed and
+manual entries are matched against the same resolved client address, and
+without a trust anchor that address is the client-chosen `X-Forwarded-For`,
+honoured from any peer — direct exposure is no remedy. The `config.toml` in
+this directory sets `10.0.0.0/8` as the shape; put your own proxies'
+addresses there.
 
 Validate the configuration without starting the server:
 

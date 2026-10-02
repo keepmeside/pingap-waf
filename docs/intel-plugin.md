@@ -6,6 +6,9 @@ fetched once per process, published by an atomic snapshot, and attributed in the
 and access-log variables (`waf_intel_feed` and `waf_intel_category`).
 
 ```toml
+[basic]
+trusted_proxies = ["10.0.0.0/8"]   # your own proxies, not the world
+
 [plugins.waf-strict]
 category = "waf"
 
@@ -37,21 +40,33 @@ DShield-style tab-separated lines. DShield ranges are intentionally represented 
 address only; use a CIDR feed when the complete range is required.
 
 Feed and manual entries are matched against the same resolved client address
-`ip_list` uses, and the construction gate covers `ip_list` alone, so a feed
-config constructs without `basic.trusted_proxies` — though a feed-bearing entry
-still needs one static deny source (`ip_list`, `intel.manual`, or a request
-category with `mode = "block"`), or construction refuses it as selecting feeds
-but denying nothing. What the gate leaves to the operator is the address's
-trustworthiness: without `basic.trusted_proxies`, `X-Forwarded-For` is honoured
-from any peer, so even a directly connected client that sends the header
-chooses the address the match runs on — direct exposure is no remedy on this
-path. Only the trusted-proxy list changes the resolution: a peer not on it has
-its forwarded headers ignored and resolves to its own address. Set it to the
-addresses of the proxies in front of the node — or, on a directly exposed
-node, to any list that matches no real peer — when a feed's denial must
-actually deny. The challenge, behavioural and adaptive controls have a
-separate identity contract, where `client_ip_from_peer` asserts the peer
-address directly.
+`ip_list` uses, and construction refuses a policy that selects either without
+`basic.trusted_proxies` — the same gate `ip_list` carries, for the same
+reason. Without a trusted-proxy list, `X-Forwarded-For` is honoured from any
+peer, so even a directly connected client that sends the header chooses the
+address the match runs on — direct exposure is no remedy — and a feed's denial
+would be enforced on an address the blocked party picked. Only the
+trusted-proxy list changes the resolution: a peer not on it has its forwarded
+headers ignored and resolves to its own address. Set it to the addresses of
+the proxies in front of the node — or, on a directly exposed node, to any list
+that matches no real peer.
+
+A feed-bearing entry separately needs one static deny source (`ip_list`,
+`intel.manual`, or a request category with `mode = "block"`), or construction
+refuses it as selecting feeds but denying nothing. The challenge, behavioural
+and adaptive controls have a separate identity contract, where
+`client_ip_from_peer` asserts the peer address directly.
+
+Adoption is judged against the config under validation, not the one running:
+one apply that sets `basic.trusted_proxies` and selects intel together is
+accepted, because the check constructs the candidate and the gate reads the
+candidate's own list. Hot reload is the narrower path — `basic` is read at
+process start and a reload keeps the running value — so on `--autoreload` and
+etcd-watch nodes a first adoption commits but its WAF plugin fails to
+construct at each reload until the process restarts (`--autorestart` or
+manual); each reload logs `reload plugin fail` and raises a
+`reload_config_fail` notification. A node whose
+running `basic.trusted_proxies` is already set adopts intel by reload alone.
 
 ## Defaults
 

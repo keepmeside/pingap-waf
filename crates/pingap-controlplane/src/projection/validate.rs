@@ -23,7 +23,7 @@
 //! it back — every XFF-derived ACL and rate-limit decision would then be silently wrong.
 
 use super::{Projected, Result};
-use pingap_config::PluginConf;
+use pingap_config::{PingapConfig, PluginConf};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -53,10 +53,18 @@ impl Verdict {
 /// binary, where every plugin crate is linked, supplies the real implementation.
 pub trait PluginCheck: Send + Sync {
     /// `Err(reason)` if the plugin named `name` cannot be constructed from `conf`.
+    ///
+    /// `config` is the candidate the plugin conf belongs to — the whole projected
+    /// config under validation, not the one currently running. A construction gate
+    /// may judge state the candidate itself sets: the WAF refuses threat intel
+    /// unless `basic.trusted_proxies` is set, and a candidate that adopts both in
+    /// one apply must be judged against itself, not against the config it will
+    /// replace.
     fn check(
         &self,
         name: &str,
         conf: &PluginConf,
+        config: &PingapConfig,
     ) -> std::result::Result<(), String>;
 }
 
@@ -72,6 +80,7 @@ impl PluginCheck for NoPluginCheck {
         &self,
         _: &str,
         _: &PluginConf,
+        _: &PingapConfig,
     ) -> std::result::Result<(), String> {
         Ok(())
     }
@@ -112,7 +121,7 @@ impl Validator {
         plugins: &dyn PluginCheck,
     ) -> Result<Verdict> {
         for (name, conf) in &projected.config.plugins {
-            if let Err(reason) = plugins.check(name, conf) {
+            if let Err(reason) = plugins.check(name, conf, &projected.config) {
                 return Ok(Verdict::Rejected {
                     reason: format!(
                         "plugin `{name}` cannot be built: {reason}. `pingap-waf -t` does not \

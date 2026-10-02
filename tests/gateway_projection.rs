@@ -698,7 +698,8 @@ impl ConfigSink for DirSink {
 }
 
 /// The real plugin factory, which is the check `pingap-waf -t` cannot perform for a
-/// Location-attached plugin.
+/// Location-attached plugin. Mirrors the binary's `FactoryPluginCheck`, scope included:
+/// construction is judged against the candidate config, not the one running.
 struct FactoryCheck;
 
 impl PluginCheck for FactoryCheck {
@@ -706,11 +707,17 @@ impl PluginCheck for FactoryCheck {
         &self,
         _name: &str,
         conf: &pingap_config::PluginConf,
+        config: &pingap_config::PingapConfig,
     ) -> Result<(), String> {
-        pingap_plugin::get_plugin_factory()
-            .create(conf)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        pingap_core::with_construction_trusted_proxies(
+            &config.basic.trusted_proxies,
+            || {
+                pingap_plugin::get_plugin_factory()
+                    .create(conf)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            },
+        )
     }
 }
 

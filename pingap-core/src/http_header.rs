@@ -23,6 +23,7 @@ use pingora::http::RequestHeader;
 use pingora::proxy::Session;
 use snafu::{ResultExt, Snafu};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::fmt::Write;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -345,6 +346,55 @@ pub fn trusted_proxies_enabled() -> bool {
     TRUSTED_PROXIES_ENABLED.load(Ordering::Relaxed)
 }
 
+// The trusted-proxy state of a *config under construction*, as distinct from the
+// active config's above. A construction gate — a plugin refusing to build unless
+// the config it is being built for trusts forwarded headers — must judge the
+// candidate, not the running config: at admin-API validation time the candidate
+// is not active yet, and on a control-plane node no config ever is. The globals
+// above stay request-path state and are never written by this scope, so scoping
+// a construction can never change how live traffic resolves a client IP.
+thread_local! {
+    static CONSTRUCTION_TRUSTED_PROXIES: Cell<Option<bool>> =
+        const { Cell::new(None) };
+}
+
+/// Runs `f` as a construction of a config whose trusted proxies are `proxies`.
+///
+/// The boot and `-t` paths need no scope: both install the candidate as the
+/// active config before plugins are constructed, so the globals above already
+/// describe it. The scope is for the paths that construct a config that is not —
+/// and may never become — active, the admin API's in-process plugin check being
+/// the one. Nested scopes keep the innermost; unwinding restores the enclosing
+/// one, so a refused construction cannot leave its state behind.
+pub fn with_construction_trusted_proxies<R>(
+    proxies: &Option<Vec<String>>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let enabled = matches!(proxies, Some(list) if !list.is_empty());
+    let enclosing =
+        CONSTRUCTION_TRUSTED_PROXIES.with(|c| c.replace(Some(enabled)));
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONSTRUCTION_TRUSTED_PROXIES.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(enclosing);
+    f()
+}
+
+/// The trusted-proxy state a construction gate should judge: the config under
+/// construction's when a scope is active, the active config's otherwise.
+///
+/// For construction-time refusal decisions only. The request path keeps reading
+/// the active state — a candidate's proxies must never influence how a live
+/// request resolves its client IP.
+pub fn construction_trusted_proxies_enabled() -> bool {
+    CONSTRUCTION_TRUSTED_PROXIES
+        .with(|c| c.get())
+        .unwrap_or_else(trusted_proxies_enabled)
+}
+
 /// Returns true if the direct peer address is a configured trusted proxy.
 fn is_trusted_proxy(peer: &str) -> bool {
     TRUSTED_PROXIES
@@ -533,6 +583,17 @@ mod tests {
     use crate::{ConnectionInfo, UpstreamInfo};
     use pretty_assertions::assert_eq;
     use tokio_test::io::Builder;
+
+    /// Serializes the tests that flip the process-global trusted-proxy list.
+    /// Cargo runs this module's tests as parallel threads of one process, and
+    /// two of them change it, so an unguarded pair would each see the other's
+    /// window as if it were the configured state.
+    ///
+    /// A `tokio` mutex rather than a `std` one: one of the two holds the guard
+    /// across the awaits that read a request, which is exactly the shape a
+    /// blocking guard must not be used for.
+    static TRUSTED_PROXIES_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
 
     #[test]
     fn test_convert_headers() {
@@ -854,6 +915,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_client_ip() {
+        let _guard = TRUSTED_PROXIES_LOCK.lock().await;
         let headers = ["X-Forwarded-For:192.168.1.1"].join("\r\n");
         let input_header =
             format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
@@ -1027,5 +1089,69 @@ mod tests {
         let mut req = RequestHeader::build("GET", b"/path", None).unwrap();
         remove_query_from_header(&mut req, "key").unwrap();
         assert_eq!(req.uri.to_string(), "/path");
+    }
+
+    #[tokio::test]
+    async fn test_construction_scope_overrides_and_restores() {
+        // The scope exists so a construction gate can judge a candidate
+        // config rather than the running one. Both directions matter: a
+        // candidate with proxies must pass while the active config has none
+        // (first adoption through the admin API), and a candidate without
+        // them must refuse while the active config has them (a config that
+        // would strip the trust anchor while keeping what depends on it).
+        let _guard = TRUSTED_PROXIES_LOCK.lock().await;
+        let proxies = Some(vec!["10.0.0.0/8".to_string()]);
+        set_trusted_proxies(&None);
+        assert!(!construction_trusted_proxies_enabled());
+        assert!(
+            with_construction_trusted_proxies(&proxies, || {
+                construction_trusted_proxies_enabled()
+            }),
+            "the candidate's proxies must win over the active config's absence"
+        );
+        assert!(
+            !construction_trusted_proxies_enabled(),
+            "leaving the scope must restore the active config's state"
+        );
+
+        set_trusted_proxies(&proxies);
+        assert!(construction_trusted_proxies_enabled());
+        assert!(
+            !with_construction_trusted_proxies(&None, || {
+                construction_trusted_proxies_enabled()
+            }),
+            "the candidate's absence must win over the active config's proxies"
+        );
+        assert!(construction_trusted_proxies_enabled());
+
+        // An empty list is no list, same as in `set_trusted_proxies`.
+        assert!(!with_construction_trusted_proxies(&Some(vec![]), || {
+            construction_trusted_proxies_enabled()
+        }));
+
+        // The innermost scope wins, and unwinding it restores the enclosing
+        // one rather than clearing it.
+        with_construction_trusted_proxies(&None, || {
+            assert!(
+                !construction_trusted_proxies_enabled(),
+                "the enclosing scope is in force"
+            );
+            assert!(
+                with_construction_trusted_proxies(&proxies, || {
+                    construction_trusted_proxies_enabled()
+                }),
+                "the innermost scope must win over the enclosing one"
+            );
+            assert!(
+                !construction_trusted_proxies_enabled(),
+                "the inner scope's state leaked past its own end"
+            );
+        });
+
+        // The request-path globals are untouched throughout: the scope must
+        // never change how live traffic resolves a client IP.
+        assert!(trusted_proxies_enabled());
+        // Back to the module's default for whatever test runs next.
+        set_trusted_proxies(&None);
     }
 }

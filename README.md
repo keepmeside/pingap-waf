@@ -173,9 +173,10 @@ The three fork plugins attach like any other pingap plugin:
 
 ```toml
 [basic]
-# Required the moment any waf plugin sets `ip_list`: without a trusted-proxy list
-# pingap honours X-Forwarded-For unconditionally, which is fine for logging and not
-# a basis for an access decision, because the address is then one the client chose.
+# Required the moment any waf plugin sets `ip_list` or selects threat intel
+# (`intel.feed`/`intel.manual`): without a trusted-proxy list pingap honours
+# X-Forwarded-For unconditionally, which is fine for logging and not a basis
+# for an access decision, because the address is then one the client chose.
 trusted_proxies = ["10.0.0.0/8"]
 
 [plugins."waf:strict"]

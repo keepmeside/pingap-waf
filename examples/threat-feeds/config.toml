@@ -1,5 +1,10 @@
 # Example only. This directory is not a compiled default.
 
+[basic]
+# Intel entries are matched against the resolved client address; without a
+# trusted-proxy list that address is the client-chosen X-Forwarded-For.
+trusted_proxies = ["10.0.0.0/8"]   # your own proxies, not the world
+
 [plugins.waf-strict]
 category = "waf"
 categories = { sql_injection = "block" }

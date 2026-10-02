@@ -86,15 +86,26 @@ class — `(?=[^&]*etc)` is rejected for the same reason as `(?=.*etc)`. Use a b
 repetition (`(?=.{0,64}etc)`) or, better, split the intent into separate rules whose
 anomaly scores sum to the threshold.
 
-## `ip_list` requires `basic.trusted_proxies`
+## `ip_list` and threat intel require `basic.trusted_proxies`
 
-Construction **fails**, naming the key, if `ip_list` is set while
-`basic.trusted_proxies` is not:
+Construction **fails**, naming the key, if `ip_list` is set — or a policy
+selects `intel.feed`/`intel.manual` — while `basic.trusted_proxies` is not:
 
 ```toml
 [basic]
 trusted_proxies = ["10.0.0.0/8"]   # your own proxies, not the world
 ```
+
+Intel entries are matched against the same resolved client address `ip_list`
+uses, so they carry the same precondition.
+
+The gate judges the config under validation — one apply that sets
+`basic.trusted_proxies` and selects `ip_list` or intel together is accepted.
+`basic` itself is read at process start, not by hot reload: on `--autoreload`
+and etcd-watch nodes a first adoption needs a restart (`--autorestart` or
+manual) before the plugin constructs, and until then each reload logs
+`reload plugin fail`. The [threat-intel doc](intel-plugin.md) carries the feed
+side of the same rule.
 
 With no trusted-proxy list, pingap honours `X-Forwarded-For` unconditionally — fine for
 logging, and not a basis for an access decision, because the address is then one the

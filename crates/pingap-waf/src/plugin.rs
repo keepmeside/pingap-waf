@@ -24,8 +24,8 @@ use pingap_acl::marker::count_write;
 use pingap_config::PluginConf;
 use pingap_core::{
     Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
-    ResponseBodyPluginResult, ensure_client_ip, new_internal_error,
-    trusted_proxies_enabled,
+    ResponseBodyPluginResult, construction_trusted_proxies_enabled,
+    ensure_client_ip, new_internal_error,
 };
 use pingap_events::{Verdict as EventVerdict, WafEvent};
 use pingap_intel::{FeedMatch, FeedRegistry};
@@ -249,6 +249,27 @@ impl TryFrom<&PluginConf> for Waf {
                 validated.profile
             )));
         }
+        // Intel entries are matched against the same resolved client address
+        // `ip_list` uses, so they carry the same precondition. Without a
+        // trusted-proxy list that address is the client-chosen
+        // `X-Forwarded-For`, honoured from any peer, and a feed's denial would
+        // be enforced on an address the blocked party picked. The judged state
+        // is the config under construction's — at admin-API validation the
+        // candidate is not active yet — falling back to the active config's
+        // where construction has no scope, the boot and `-t` paths, which
+        // install the candidate before plugins are built.
+        if (!intel_conf.feed.is_empty() || !intel_conf.manual.is_empty())
+            && !construction_trusted_proxies_enabled()
+        {
+            return Err(invalid(format!(
+                "WAF profile `{}` selects threat intel (`intel.feed`/`intel.manual`) but `basic.trusted_proxies` is not set. Without it, \
+                 `X-Forwarded-For` is trusted unconditionally and any client can \
+                 spoof the address intel entries are matched against. Set \
+                 `basic.trusted_proxies` to your own proxies' addresses, or remove \
+                 the intel entries",
+                validated.profile
+            )));
+        }
         let engine = RuleEngine::build(
             validated,
             crate::detectors::request_rules(),
@@ -339,8 +360,9 @@ impl Waf {
         // unconditionally, so any client can choose its own apparent IP. Enforcing
         // on that value is not access control — it is access control the client
         // configures. Logging on it is fine, which is why this is checked here
-        // rather than globally.
-        if !trusted_proxies_enabled() {
+        // rather than globally. Judged against the config under construction,
+        // same as the intel gate above.
+        if !construction_trusted_proxies_enabled() {
             return Err(
                 "`ip_list` is set but `basic.trusted_proxies` is not. Without it, \
                  `X-Forwarded-For` is trusted unconditionally and any client can \
@@ -1094,7 +1116,79 @@ url = "https://example.invalid/list"
         assert!(err.to_string().contains("no static deny source"));
     }
 
-    /// A blocked request publishes its verdict as access-log variables.
+    #[tokio::test]
+    async fn intel_entries_without_trusted_proxies_fail_to_construct() {
+        // Intel entries are matched against the same resolved client address
+        // `ip_list` uses, so they carry the same precondition. A manual entry
+        // is enough to trip it: the gate is about the address the match runs
+        // on, not about where the list came from. Refusal tests live in this
+        // module's binary because nothing in it sets the process-global
+        // trusted-proxy list, which is what keeps the refusal deterministic.
+        let err = match Waf::try_from(
+            &toml::from_str::<PluginConf>(
+                "category = \"waf\"\n[intel]\nmanual = [\"198.51.100.7\"]\n",
+            )
+            .expect("parses"),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("intel without trusted proxies must fail"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("intel"), "names the feature: {msg}");
+        assert!(msg.contains("trusted_proxies"), "names the key: {msg}");
+        assert!(msg.contains("spoof"), "says why it matters: {msg}");
+    }
+
+    #[tokio::test]
+    async fn a_feed_with_a_static_deny_source_still_needs_trusted_proxies() {
+        // A block-mode category satisfies the static-deny-source gate, so this
+        // is the config shape where only the trusted-proxy gate stands between
+        // a feed policy and a client-chosen match address.
+        let err = match Waf::try_from(
+            &toml::from_str::<PluginConf>(
+                r#"category = "waf"
+categories = { sql_injection = "block" }
+[[intel.feed]]
+name = "example"
+url = "https://example.invalid/list"
+"#,
+            )
+            .expect("parses"),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("a feed without trusted proxies must fail"),
+        };
+        assert!(
+            err.to_string().contains("trusted_proxies"),
+            "names the key: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gate_judges_the_config_under_construction_not_the_active_one()
+    {
+        // First adoption through the admin API: the candidate sets
+        // `basic.trusted_proxies` and selects intel in one apply, while the
+        // config running until then has none. The in-process plugin check
+        // constructs the candidate, so the gate must judge the construction
+        // scope rather than the active config, or the apply is refused for
+        // lacking what it just set — the refusal message prescribing the very
+        // edit the operator already made.
+        //
+        // The reverse direction — a candidate that drops `trusted_proxies`
+        // while keeping intel — is covered where the process global can be
+        // flipped safely. This module's binary leaves it untouched, which is
+        // what the refusal tests above depend on for their determinism.
+        let conf = toml::from_str::<PluginConf>(
+            "category = \"waf\"\n[intel]\nmanual = [\"198.51.100.7\"]\n",
+        )
+        .expect("parses");
+        pingap_core::with_construction_trusted_proxies(
+            &Some(vec!["10.0.0.0/8".to_string()]),
+            || Waf::try_from(&conf),
+        )
+        .expect("the candidate's trusted proxies satisfy the gate");
+    }
     ///
     /// The names are asserted as literals rather than read from a shared constant, because the
     /// literal is what an operator types into an `access_log` format: a rename that moved a
