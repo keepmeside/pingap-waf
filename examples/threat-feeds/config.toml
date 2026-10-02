@@ -3,7 +3,6 @@
 [plugins.waf-strict]
 category = "waf"
 categories = { sql_injection = "block" }
-ip_list = ["192.0.2.0/24"]
 
 [plugins.waf-strict.intel]
 manual = ["198.51.100.7"]

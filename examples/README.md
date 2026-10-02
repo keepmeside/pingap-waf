@@ -5,6 +5,7 @@
 - [web-socket](./web-socket/README.md)
 - [grpc-web](./grpc-web/README.md)
 - [transparent-proxy](./transparent-proxy/README.md)
+- [threat-feeds](./threat-feeds/README.md)
 
 ## Grpc-Web
 
