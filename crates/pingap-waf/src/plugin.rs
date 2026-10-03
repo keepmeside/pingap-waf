@@ -901,10 +901,15 @@ mod tests {
     use tokio_test::io::Builder;
 
     /// A profile in blocking mode with a threshold of one, so a single hit is a 403.
-    /// The shipped default is `detect`; blocking is what these tests are about.
+    /// The shipped default is `detect`; blocking is what these tests are about. The
+    /// budget is generous because the engine checks its real wall-clock budget
+    /// *between* rules: a stall past the 10 ms default under parallel test load
+    /// would exhaust it and flip the verdict, which would read as a missing
+    /// detection.
     const BLOCKING: &str = r#"
 category = "waf"
 anomaly_threshold = 1
+budget_ms = 10_000
 categories = { sql_injection = "block", xss = "block", data_leakage = "redact", web_shell = "redact" }
 "#;
 
@@ -993,6 +998,7 @@ categories = { sql_injection = "block", xss = "block", data_leakage = "redact", 
         let waf = plugin(
             r#"category = "waf"
 anomaly_threshold = 1
+budget_ms = 10_000
 categories = { sql_injection = "challenge" }
 "#,
         );
@@ -1028,6 +1034,7 @@ categories = { sql_injection = "challenge" }
         let waf = plugin(
             r#"category = "waf"
 anomaly_threshold = 1
+budget_ms = 10_000
 categories = { sql_injection = "challenge" }
 "#,
         );

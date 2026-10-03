@@ -22,10 +22,14 @@ use pingora::proxy::Session;
 use tokio_test::io::Builder;
 
 /// Blocking mode with a threshold of one, so a single hit is a refusal. The shipped
-/// default is `detect`; enforcement is what this file is about.
+/// default is `detect`; enforcement is what this file is about. The budget is
+/// generous because the engine checks its real wall-clock budget *between* rules:
+/// a thread stalled past the 10 ms default under parallel test load would exhaust
+/// it and flip the verdict, and that failure would read as a missing detection.
 const BLOCKING: &str = r#"
 category = "waf"
 anomaly_threshold = 1
+budget_ms = 10_000
 categories = { sql_injection = "block", xss = "block" }
 "#;
 
@@ -133,7 +137,7 @@ async fn an_over_cap_body_follows_its_configured_policy() {
     // inspecting less of it. What must never happen is a silent full bypass.
     let waf = plugin(
         "category = \"waf\"\nbody_inspect_limit = 32\nover_cap = \
-         \"inspect_prefix\"\n",
+         \"inspect_prefix\"\nbudget_ms = 10_000\n",
     );
     let mut ctx = Ctx::default();
     let body = vec![b'z'; 200];

@@ -16,19 +16,24 @@ use pingora::proxy::Session;
 use std::sync::Arc;
 use tokio_test::io::Builder;
 
-/// Blocks on a single hit.
+/// Blocks on a single hit. The budget is generous because the engine checks its
+/// real wall-clock budget *between* rules: a stall past the 10 ms default under
+/// parallel test load would exhaust it and flip the verdict, which would read as
+/// a missing detection.
 const WAF_STRICT: &str = r#"
 category = "waf"
 profile = "strict"
 anomaly_threshold = 1
+budget_ms = 5000
 categories = { sql_injection = "block", xss = "block" }
 "#;
 
-/// Same rules, records only.
+/// Same rules, records only, and the same generous budget as `WAF_STRICT`.
 const WAF_AUDIT: &str = r#"
 category = "waf"
 profile = "audit-only"
 anomaly_threshold = 1
+budget_ms = 5000
 categories = { sql_injection = "detect", xss = "detect" }
 "#;
 

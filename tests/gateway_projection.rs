@@ -359,9 +359,13 @@ const POLL_SECS: u64 = 1;
 /// rather than hanging it.
 const RELOAD_WINDOW: Duration = Duration::from_secs(30);
 
-/// A WAF that blocks SQL injection.
+/// A WAF that blocks SQL injection. The budget is generous on purpose: the engine
+/// checks its real wall-clock budget *between* rules, and a stall past the 10 ms
+/// default under load would exhaust it and turn the asserted 403 into a
+/// pass-through, which would read as the projection failing to enforce.
 const WAF_BLOCKING: &str = r#"
 category = "waf"
+budget_ms = 10_000
 [categories]
 sql_injection = "block"
 "#;

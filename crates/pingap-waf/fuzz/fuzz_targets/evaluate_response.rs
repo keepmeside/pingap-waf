@@ -50,14 +50,19 @@ fuzz_target!(|input: Input| {
     // The independence property, stated as an invariant: zeroing the inbound score
     // must not change the outbound verdict. If it ever does, the two surfaces have
     // been coupled and a request allowed inbound is being re-judged on its way out.
+    // The budget is a fuzzed knob (1..=50 ms) on a real clock, so the two runs may
+    // be cut at different rules; only runs the budget treated identically — the
+    // same rules_checked — must agree.
     let zeroed = ResponseInput {
         request_score: 0,
         ..response
     };
     let control = engine.evaluate_response(&zeroed);
-    assert_eq!(
-        out.verdict, control.verdict,
-        "the request score changed the response verdict"
-    );
-    assert_eq!(out.enforcing_score, control.enforcing_score);
+    if out.rules_checked == control.rules_checked {
+        assert_eq!(
+            out.verdict, control.verdict,
+            "the request score changed the response verdict"
+        );
+        assert_eq!(out.enforcing_score, control.enforcing_score);
+    }
 });

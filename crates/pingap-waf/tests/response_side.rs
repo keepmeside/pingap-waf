@@ -22,10 +22,14 @@ use pingora::proxy::Session;
 use tokio_test::io::Builder;
 
 /// Both response-side lineages in their only enforcing mode. `block` is not offered:
-/// see `a_response_side_category_cannot_be_set_to_block`.
+/// see `a_response_side_category_cannot_be_set_to_block`. The budget is generous
+/// because the engine checks its real wall-clock budget *between* rules: a thread
+/// stalled past the 10 ms default under parallel test load would exhaust it and
+/// flip the verdict, and that failure would read as a missing redaction.
 const REDACTING: &str = r#"
 category = "waf"
 anomaly_threshold = 1
+budget_ms = 10_000
 categories = { data_leakage = "redact", web_shell = "redact" }
 "#;
 

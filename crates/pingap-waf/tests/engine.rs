@@ -357,7 +357,7 @@ fn a_custom_rule_action_overrides_its_category_mode() {
     // Category left at the default `detect`; the rule itself asks to block. A
     // config key that parsed but did nothing would be the worse outcome.
     let cfg = with_custom(
-        WafConfig::default(),
+        config(&[]),
         "hard-block-shell",
         Category::RemoteCodeExecution,
         r"/bin/sh",
@@ -478,14 +478,16 @@ fn the_budget_stops_evaluation_early_and_says_so() {
         ex.rules_checked, v.rules_checked,
         "the record must agree with the counter"
     );
-    // The budget is checked *between* rules, so the worst-case overshoot is one
-    // rule's cost. Anything beyond that means a check was skipped. The generous
-    // slack keeps this from flaking on a loaded CI box while still failing if the
-    // loop ran to completion (which would be ~100ms).
+    // Each rule burns at least `cost` of wall clock and the check precedes every
+    // rule, so a prompt stop runs at most `budget / cost` rules — five, six once
+    // clock granularity is allowed for. A deschedule mid-run only stops earlier
+    // and lowers the count; a count past six means a check was skipped, and a run
+    // to completion would be fifty. A rule count, unlike an elapsed bound, cannot
+    // be inflated by an ambient stall on a loaded machine.
     assert!(
-        v.elapsed < std::time::Duration::from_millis(10) + cost * 8,
-        "overshoot beyond one rule's cost: {:?}",
-        v.elapsed
+        v.rules_checked <= 6,
+        "a count this high means a check was skipped: {}",
+        v.rules_checked
     );
     // Fail-open default: an incomplete evaluation with no hits does not block.
     assert_eq!(v.verdict, RequestVerdict::Allow);

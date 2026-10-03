@@ -54,11 +54,17 @@ fuzz_target!(|input: Input| {
 
     // Evaluation is deterministic: the same input and ruleset must produce the
     // same verdict. Without this, a false positive is unreproducible and therefore
-    // untriageable. Timing fields are excluded — those are allowed to differ.
+    // untriageable. Timing fields are excluded — those are allowed to differ. The
+    // budget is a fuzzed knob (1..=50 ms) on a real clock, so the two runs may be
+    // cut at different rules; that is clock noise, not non-determinism. Only runs
+    // the budget treated identically — the same rules_checked, completed or cut
+    // at the same rule — must agree.
     let again = engine.evaluate_request(&request);
-    assert_eq!(
-        out.verdict, again.verdict,
-        "evaluation is not deterministic"
-    );
-    assert_eq!(out.enforcing_score, again.enforcing_score);
+    if out.rules_checked == again.rules_checked {
+        assert_eq!(
+            out.verdict, again.verdict,
+            "evaluation is not deterministic"
+        );
+        assert_eq!(out.enforcing_score, again.enforcing_score);
+    }
 });

@@ -408,9 +408,11 @@ dependencies = [
 name = "pingap-waf"
 version = "0.13.10"
 dependencies = [
+ "aho-corasick",
  "arc-swap",
  "fancy-regex",
  "pingap-util",
+ "regex-syntax",
  "serde",
  "snafu",
  "urlencoding",
