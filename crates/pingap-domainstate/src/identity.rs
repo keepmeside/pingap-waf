@@ -47,7 +47,9 @@
 //! terminating its own TLS has no proxy list and needs none. Refusing it would make every
 //! stateful control unusable in exactly the shape both reference products target.
 
-use pingap_core::{get_client_ip, get_remote_addr, trusted_proxies_enabled};
+use pingap_core::{
+    construction_trusted_proxies_enabled, get_client_ip, get_remote_addr,
+};
 use pingora::proxy::Session;
 
 /// Which trust anchor resolved at construction.
@@ -98,8 +100,16 @@ impl ClientIdentity {
     /// node from directly-exposed to behind-a-proxy adds the second before removing the first.
     ///
     /// The refusal is at construction, not on the request path, so it is loud and pre-startup.
+    /// The judged trusted-proxy state is the config under construction's, not the running
+    /// config's: at admin-API validation the candidate is not active yet, so an apply that
+    /// sets `basic.trusted_proxies` and enables the control together is judged against the
+    /// list it just set, and one that drops the key while keeping the control is refused
+    /// instead of silently keying state on an address the request chose. Where construction
+    /// has no scope — the boot and `-t` paths, which install the candidate before plugins
+    /// are built, and hot reload, which keeps the running value — the active config's state
+    /// is judged, as before.
     pub fn new(client_ip_from_peer: bool) -> Result<Self, IdentityError> {
-        if trusted_proxies_enabled() {
+        if construction_trusted_proxies_enabled() {
             return Ok(Self {
                 source: IdentitySource::TrustedProxies,
             });

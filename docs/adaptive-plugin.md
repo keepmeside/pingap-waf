@@ -22,6 +22,17 @@ or a challenge on an otherwise allowed request.
 | `sample_window` | `1h` (3600 s) |
 | `client_ip_from_peer` | `false` — assert the node is directly exposed when no trusted-proxy list is configured |
 
+Samples are keyed by client identity, so enabling the learner carries the same
+contract: either `basic.trusted_proxies` or the `client_ip_from_peer` assertion
+above, or the plugin refuses to build naming both remedies. Adoption is judged
+against the config under validation, not the one running — one apply that sets
+the key and enables the learner together is accepted, and one that drops the key
+while the learner stays enabled is refused. Hot reload keeps the running value,
+so on `--autoreload` and etcd-watch nodes a first adoption commits but the
+plugin fails to construct at each reload until the process restarts; a node
+whose running `basic.trusted_proxies` is already set adopts the learner by
+reload alone.
+
 Denied, challenged, and bot-classified traffic is excluded from samples so known attacks
 cannot train the baseline to tolerate them. Persistence stores derived hourly aggregates,
 not client identities or raw requests.

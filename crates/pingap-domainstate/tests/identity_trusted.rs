@@ -10,7 +10,7 @@ mod common;
 
 use common::{TRUSTED_PROXY, session, set_trusted_proxies, trusted_proxy_lock};
 use pingap_domainstate::IdentitySource;
-use pingap_domainstate::identity::ClientIdentity;
+use pingap_domainstate::identity::{ClientIdentity, IdentityError};
 
 const SPOOF_XFF: &str =
     "GET / HTTP/1.1\r\nHost: a.example\r\nX-Forwarded-For: 203.0.113.9\r\n\r\n";
@@ -74,5 +74,32 @@ async fn a_proxy_list_takes_precedence_over_a_peer_assertion() {
     // the last hop. Asserting both is not an error, because an operator migrating a node
     // from directly-exposed to behind-a-proxy sets the second before removing the first.
     let identity = ClientIdentity::new(true).expect("an anchor is present");
+    assert_eq!(identity.source(), IdentitySource::TrustedProxies);
+}
+
+#[tokio::test]
+async fn construction_refuses_a_candidate_that_drops_the_proxy_list() {
+    let _g = trusted_proxy_lock().await;
+    set_trusted_proxies();
+
+    // The dangerous direction of the same gate: a candidate that drops
+    // `basic.trusted_proxies` while keeping the control enabled must be refused
+    // at validation, not accepted and left to key live state on an address the
+    // request chose once the running list is gone. The scope installs the
+    // candidate's absent list over this process's configured one for the
+    // construction.
+    let refusal = pingap_core::with_construction_trusted_proxies(&None, || {
+        ClientIdentity::new(false)
+    });
+    assert!(
+        matches!(refusal, Err(IdentityError::NoTrustAnchor)),
+        "a candidate with no anchor must not construct"
+    );
+
+    // And the scope ends with the construction: this process's own list is
+    // judged again, unchanged, so validation cannot drain the running anchor
+    // either.
+    let identity =
+        ClientIdentity::new(false).expect("this process's list still stands");
     assert_eq!(identity.source(), IdentitySource::TrustedProxies);
 }

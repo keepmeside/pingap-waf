@@ -5,6 +5,17 @@ The challenge tier is off by default. Enable it only when the Location also list
 Identity-bound state requires either `basic.trusted_proxies` or the explicit
 `client_ip_from_peer = true` assertion on a directly exposed node.
 
+Adoption is judged against the config under validation, not the one running:
+one apply that sets `basic.trusted_proxies` and enables the tier together is
+accepted, and one that drops the key while the tier stays enabled is refused,
+because the check constructs the candidate and the identity gate reads the
+candidate's own list. Hot reload keeps the running value — `basic` is read at
+process start — so on `--autoreload` and etcd-watch nodes a first adoption
+commits but the plugin fails to construct at each reload until the process
+restarts (`--autorestart` or manual); each reload logs `reload plugin fail`
+and raises a `reload_config_fail` notification. A node whose running
+`basic.trusted_proxies` is already set adopts the tier by reload alone.
+
 The plugin supports a self-contained proof-of-work page and a silent JavaScript
 fingerprint. The PoW page runs a JavaScript solver — the browser searches
 `SHA-256(salt + nonce)` for `difficulty` leading zero bits and submits the result —

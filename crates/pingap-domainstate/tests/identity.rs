@@ -62,6 +62,29 @@ fn an_explicit_peer_assertion_constructs_without_a_proxy_list() {
     assert_eq!(identity.source(), IdentitySource::PeerAddress);
 }
 
+#[test]
+fn construction_judges_the_candidate_s_proxy_list_not_the_running_one() {
+    unset_trusted_proxies();
+
+    // The admin-API validation path constructs a candidate that is not — and on a
+    // control-plane node never becomes — the running config, so the gate must judge
+    // the candidate's own `basic.trusted_proxies`, installed by the construction
+    // scope. Judging the running config's here would refuse an apply that sets the
+    // key and enables the control together, for lacking what it just set.
+    let identity = pingap_core::with_construction_trusted_proxies(
+        &Some(vec!["192.0.2.10".to_string()]),
+        || ClientIdentity::new(false),
+    )
+    .expect("the candidate's own list is an anchor");
+    assert_eq!(identity.source(), IdentitySource::TrustedProxies);
+
+    // The scope is per-construction: once it ends, the running config's state —
+    // unset here — is judged again, so a finished or refused construction cannot
+    // leave its candidate's trust behind in this process.
+    ClientIdentity::new(false)
+        .expect_err("the running config still has no anchor");
+}
+
 #[tokio::test]
 async fn a_spoofed_forwarded_for_never_becomes_the_identity() {
     unset_trusted_proxies();
