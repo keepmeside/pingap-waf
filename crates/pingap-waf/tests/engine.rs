@@ -101,10 +101,16 @@ impl ResponseRule for Needle {
     }
 }
 
-/// A config with the given category modes and everything else at its default.
+/// A config with the given category modes, a budget nothing here can hit, and
+/// everything else at its default. The budget clock is real and checked
+/// *between* rules: a thread stalled mid-evaluation past the 10 ms default on
+/// a loaded machine exhausts it and flips the verdict, and that failure reads
+/// as an engine defect. The two tests that mean to exercise the budget set it
+/// themselves.
 fn config(modes: &[(&str, RawMode)]) -> WafConfig {
     WafConfig {
         categories: modes.iter().map(|(k, m)| ((*k).to_string(), *m)).collect(),
+        budget_ms: 10_000,
         ..Default::default()
     }
 }
