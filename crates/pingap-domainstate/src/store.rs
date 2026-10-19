@@ -618,6 +618,37 @@ impl<V, C: Clock> ScopedStore<V, C> {
         total
     }
 
+    /// Visit values under the domain lock. Callers must keep callbacks bounded,
+    /// without I/O. Used for bounded decision pages and explicit monotonic cleanup.
+    pub fn visit(&self, domain: Domain, mut visit: impl FnMut(&str, &V)) {
+        let now = self.clock.now_ms();
+        let mut inner = self.lock();
+        if let Some(bucket) = self.peek(&mut inner, domain) {
+            for (key, entry) in &bucket.entries {
+                if entry.expires_at > now {
+                    visit(key, &entry.value);
+                }
+            }
+        }
+    }
+
+    /// Retain live payloads selected by an owning subsystem's reset/expiry rules.
+    pub fn retain(
+        &self,
+        domain: Domain,
+        mut keep: impl FnMut(&str, &mut V) -> bool,
+    ) {
+        let now = self.clock.now_ms();
+        let mut inner = self.lock();
+        if let Some(bucket) = self.peek(&mut inner, domain) {
+            bucket.entries.retain(|key, entry| {
+                entry.expires_at > now && keep(key, &mut entry.value)
+            });
+            bucket.earliest = min_expiry(&bucket.entries);
+        }
+        Self::drop_if_empty(&mut inner, domain);
+    }
+
     /// A copy of the published counts.
     pub fn counters(&self) -> Counters {
         self.counters.snapshot()

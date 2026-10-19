@@ -462,6 +462,51 @@ impl PluginCheck for FactoryPluginCheck {
         conf: &PluginConf,
         config: &PingapConfig,
     ) -> Result<(), String> {
+        if conf.get("category").and_then(|v| v.as_str()) == Some("behaviour")
+            && conf
+                .get("abuse")
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        {
+            let namespace = conf
+                .get("abuse_namespace")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.trim().is_empty())
+                .ok_or("abuse_namespace must be present and unique")?;
+            let duplicates = config
+                .plugins
+                .values()
+                .filter(|p| {
+                    p.get("category").and_then(|v| v.as_str())
+                        == Some("behaviour")
+                        && p.get("abuse")
+                            .and_then(|v| v.get("enabled"))
+                            .and_then(|v| v.as_bool())
+                            == Some(true)
+                        && p.get("abuse_namespace").and_then(|v| v.as_str())
+                            == Some(namespace)
+                })
+                .count();
+            if duplicates > 1 {
+                return Err("abuse_namespace must be present and unique".into());
+            }
+            let hosts = pingap_domainstate::HostPolicy::new(
+                config
+                    .locations
+                    .values()
+                    .filter_map(|l| l.host.as_deref())
+                    .flat_map(|host| host.split(',')),
+            );
+            if hosts.registered()
+                > pingap_domainstate::Limits::default().max_domains
+            {
+                return Err(
+                    "native abuse registered domains exceed shared capacity"
+                        .into(),
+                );
+            }
+        }
         pingap_core::with_construction_trusted_proxies(
             &config.basic.trusted_proxies,
             || {

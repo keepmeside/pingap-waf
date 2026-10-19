@@ -734,12 +734,17 @@ impl Server {
                 location_plugins.push((name.clone(), plugin));
                 continue;
             }
-            let PluginMiss::Failed { category, reason } =
-                self.plugin_provider.miss(name)
+            let PluginMiss::Failed {
+                category,
+                reason,
+                enforcement_required,
+            } = self.plugin_provider.miss(name)
             else {
                 continue;
             };
-            if !pingap_core::is_security_enforcing(&category) {
+            if !enforcement_required
+                && !pingap_core::is_security_enforcing(&category)
+            {
                 continue;
             }
             if pingap_core::policy_fails_open() {
@@ -2213,6 +2218,7 @@ plugins = ["stats"]
             if name == self.broken {
                 PluginMiss::Failed {
                     category: self.category.to_string(),
+                    enforcement_required: false,
                     reason: "constructor rejected the config".to_string(),
                 }
             } else {

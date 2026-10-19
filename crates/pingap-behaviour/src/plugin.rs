@@ -106,7 +106,12 @@ struct PendingObservation {
     domain: String,
     identity: String,
     observation: Observation,
+    ticket: Option<crate::decisions::Ticket>,
+    record_score: bool,
 }
+
+#[derive(Debug, Default, Clone)]
+struct PendingObservations(BTreeMap<String, PendingObservation>);
 
 pub struct Behaviour {
     step: PluginStep,
@@ -114,6 +119,8 @@ pub struct Behaviour {
     identity: Option<ClientIdentity>,
     store: Arc<BehaviourStore>,
     hash: String,
+    pending_key: String,
+    native_profile: Option<crate::decisions::ScenarioProfile>,
 }
 
 impl TryFrom<&PluginConf> for Behaviour {
@@ -158,9 +165,30 @@ impl TryFrom<&PluginConf> for Behaviour {
         )?;
         Ok(Self {
             step,
-            config,
+            config: config.clone(),
             identity,
             store,
+            native_profile: if config.enabled && config.abuse.enabled {
+                Some(
+                    crate::decisions::ScenarioProfile::new(
+                        config.abuse_namespace.as_deref().unwrap_or_default(),
+                        config.abuse.clone(),
+                        config.max_clients,
+                        config.max_url_keys,
+                    )
+                    .map_err(|message| Error::Invalid {
+                        category: CATEGORY.into(),
+                        message,
+                    })?,
+                )
+            } else {
+                None
+            },
+            pending_key: format!(
+                "{}:{}",
+                config.abuse_namespace.as_deref().unwrap_or_default(),
+                pingap_plugin::get_hash_key(value)
+            ),
             hash: pingap_plugin::get_hash_key(value),
         })
     }
@@ -214,6 +242,56 @@ impl Plugin for Behaviour {
         let started = Instant::now();
         let domain = self.domain(session, ctx);
         let identity = self.identity(session, ctx);
+        let mut ticket = None;
+        if let Some(native_profile) = &self.native_profile {
+            match crate::decisions::registry().admit_profile(
+                native_profile,
+                &domain,
+                &identity,
+                session.req_header().method.as_str(),
+                session.req_header().uri.path(),
+                domain != pingap_domainstate::OVERFLOW_LABEL,
+            ) {
+                crate::decisions::Admission::Blocked(_) => {
+                    ctx.add_variable("native_abuse_action", "block");
+                    return Ok(RequestPluginResult::Respond(
+                        pingap_core::HttpResponse::builder(
+                            http::StatusCode::FORBIDDEN,
+                        )
+                        .no_store()
+                        .body("Temporarily blocked by abuse policy")
+                        .finish(),
+                    ));
+                },
+                crate::decisions::Admission::Allowed(admitted) => {
+                    ticket = admitted
+                },
+                crate::decisions::Admission::Saturated => {
+                    ctx.add_variable("native_abuse_status", "saturated")
+                },
+                crate::decisions::Admission::Unavailable => {
+                    ctx.add_variable("native_abuse_status", "unavailable");
+                    if self.config.abuse.enforcing()
+                        && pingap_core::policy_fails_open()
+                    {
+                        tracing::warn!(profile=%native_profile.namespace,"native abuse policy unavailable; serving unprotected under explicit fail_open");
+                    }
+                    if self.config.abuse.enforcing()
+                        && !pingap_core::policy_fails_open()
+                    {
+                        return Ok(RequestPluginResult::Respond(
+                            pingap_core::HttpResponse::builder(
+                                http::StatusCode::SERVICE_UNAVAILABLE,
+                            )
+                            .no_store()
+                            .body("Abuse policy is unavailable")
+                            .finish(),
+                        ));
+                    }
+                },
+                crate::decisions::Admission::Unregistered => {},
+            }
+        }
         let profile = self
             .store
             .snapshot(&domain, &identity, started)
@@ -231,19 +309,10 @@ impl Plugin for Behaviour {
             self.config.thresholds,
             self.config.min_samples,
         );
-        if budget_exceeded(
+        let record_score = !budget_exceeded(
             started.elapsed().as_millis() as u64,
             self.config.budget_ms,
-        ) {
-            ctx.add_variable("behaviour_status", "budget_exhausted");
-            return Ok(RequestPluginResult::Continue);
-        }
-        // The published per-domain counter for the classification this request
-        // settled on — the same fixed name set the `behaviour_profile` log
-        // variable writes. Counted before `domain` and `score` move into the
-        // request's extensions, and not at all on the budget-exhausted path
-        // above, where no classification settled.
-        count(&domain, &score);
+        );
         let observation = Observation {
             at: Instant::now(),
             uri: session.req_header().uri.path().to_string(),
@@ -261,11 +330,24 @@ impl Plugin for Behaviour {
             challenged: false,
             bot: false,
         };
-        ctx.extensions.insert(PendingObservation {
-            domain,
+        let pending = PendingObservation {
+            domain: domain.clone(),
             identity,
             observation,
-        });
+            ticket,
+            record_score,
+        };
+        if ctx.extensions.get::<PendingObservations>().is_none() {
+            ctx.extensions.insert(PendingObservations::default());
+        }
+        if let Some(rows) = ctx.extensions.get_mut::<PendingObservations>() {
+            rows.0.insert(self.pending_key.clone(), pending);
+        }
+        if !record_score {
+            ctx.add_variable("behaviour_status", "budget_exhausted");
+            return Ok(RequestPluginResult::Continue);
+        }
+        count(&domain, &score);
         if score.contributing_signals > 0 {
             ctx.extensions.insert(BehaviourSnapshot {
                 score,
@@ -308,7 +390,10 @@ impl Plugin for Behaviour {
         if !self.config.enabled {
             return Ok(ResponsePluginResult::Unchanged);
         }
-        let Some(mut pending) = ctx.extensions.remove::<PendingObservation>()
+        let Some(mut pending) = ctx
+            .extensions
+            .get_mut::<PendingObservations>()
+            .and_then(|rows| rows.0.remove(&self.pending_key))
         else {
             return Ok(ResponsePluginResult::Unchanged);
         };
@@ -326,11 +411,20 @@ impl Plugin for Behaviour {
                     Classification::Bot | Classification::DdosShaped
                 )
             });
-        let _ = self.store.record(
-            &pending.domain,
-            &pending.identity,
-            pending.observation,
-        );
+        if let Some(ticket) = &pending.ticket {
+            crate::decisions::registry().observe(
+                ticket,
+                upstream_response.status.as_u16(),
+                pending.observation.denied || pending.observation.challenged,
+            );
+        }
+        if pending.record_score {
+            let _ = self.store.record(
+                &pending.domain,
+                &pending.identity,
+                pending.observation,
+            );
+        }
         Ok(ResponsePluginResult::Unchanged)
     }
 }

@@ -340,6 +340,22 @@ pub fn parse_plugins(
     let mut plugins: Plugins = AHashMap::new();
     let mut failures: Failures = AHashMap::new();
     let mut errors: Vec<Error> = vec![];
+    let mut namespaces = std::collections::HashMap::<&str, usize>::new();
+    for (_, conf) in &configs {
+        if conf.get("category").and_then(|v| v.as_str()) == Some("behaviour")
+            && conf
+                .get("abuse")
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        {
+            if let Some(namespace) =
+                conf.get("abuse_namespace").and_then(|v| v.as_str())
+            {
+                *namespaces.entry(namespace).or_default() += 1;
+            }
+        }
+    }
     for (name, conf) in configs.iter() {
         let name = name.to_string();
         let category = if let Some(value) = conf.get("category") {
@@ -360,12 +376,25 @@ pub fn parse_plugins(
                 PluginMiss::Failed {
                     category: String::new(),
                     reason: "no category".to_string(),
+                    enforcement_required: false,
                 },
             );
             continue;
         }
 
-        match get_plugin_factory().create(conf) {
+        let duplicate = conf
+            .get("abuse_namespace")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| namespaces.get(n).copied().unwrap_or(0) > 1);
+        let created = if category == "behaviour" && duplicate {
+            Err(pingap_plugin::Error::Invalid {
+                category: category.clone(),
+                message: "abuse_namespace must be unique".into(),
+            })
+        } else {
+            get_plugin_factory().create(conf)
+        };
+        match created {
             Ok(plugin) => {
                 plugins.insert(name.clone(), plugin.clone());
             },
@@ -378,6 +407,11 @@ pub fn parse_plugins(
                     PluginMiss::Failed {
                         category: category.clone(),
                         reason: e.to_string(),
+                        enforcement_required:
+                            pingap_core::security_failure_intent(
+                                &category,
+                                &serde_json::to_value(conf).unwrap_or_default(),
+                            ),
                     },
                 );
                 errors.push(Error::Invalid {
@@ -414,6 +448,27 @@ pub fn parse_plugins(
 pub fn try_init_plugins(
     plugins: &HashMap<String, PluginConf>,
 ) -> (Vec<String>, String) {
+    let abuse_configs = plugins;
+    // Count over the complete desired set, including instances reused below.
+    // Otherwise a new colliding profile is checked alone after unchanged entries
+    // are removed from the constructor batch.
+    let mut abuse_namespace_counts =
+        std::collections::HashMap::<&str, usize>::new();
+    for conf in plugins.values() {
+        if conf.get("category").and_then(|v| v.as_str()) == Some("behaviour")
+            && conf
+                .get("abuse")
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        {
+            if let Some(namespace) =
+                conf.get("abuse_namespace").and_then(|v| v.as_str())
+            {
+                *abuse_namespace_counts.entry(namespace).or_default() += 1;
+            }
+        }
+    }
     let mut plugin_configs: Vec<(String, PluginConf)> = plugins
         .iter()
         .map(|(name, value)| (name.to_string(), value.clone()))
@@ -444,7 +499,8 @@ pub fn try_init_plugins(
             if let Some(plugin) = PLUGIN_PROVIDER.get(name) {
                 exists = true;
                 // exists plugin with same config
-                if plugin.config_key() == conf_hash_key {
+                let duplicate=conf.get("abuse_namespace").and_then(|v|v.as_str()).is_some_and(|namespace|abuse_namespace_counts.get(namespace).copied().unwrap_or(0)>1);
+                if !duplicate && plugin.config_key() == conf_hash_key {
                     plugins.insert(name.to_string(), plugin);
                     return false;
                 }
@@ -470,6 +526,12 @@ pub fn try_init_plugins(
     // Stored even when construction failed, which is upstream behaviour and stays that
     // way — but now the failures are stored with it, so a Location listing one can be
     // refused instead of silently proxying unfiltered.
+    let active_abuse_configs = abuse_configs
+        .iter()
+        .filter(|(name, _)| plugins.contains_key(*name))
+        .map(|(name, conf)| (name.clone(), conf.clone()))
+        .collect();
+    pingap_behaviour::activate_profiles(&active_abuse_configs);
     PLUGIN_PROVIDER.store(plugins, failures);
     let error = if !errors.is_empty() {
         let error = errors

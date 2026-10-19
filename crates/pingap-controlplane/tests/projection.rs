@@ -864,3 +864,35 @@ async fn validating_never_touches_a_directory_the_caller_owns() {
          test and the comment above should be simplified rather than deleted"
     );
 }
+
+#[test]
+fn abuse_namespace_is_generated_and_cannot_be_overridden() {
+    let mut intent = Intent::default();
+    intent.policies.insert(
+        "behaviour:login".into(),
+        toml::toml! {category="behaviour" [abuse] enabled=true},
+    );
+    let projected = generate(&intent).expect("test fixture");
+    assert_eq!(
+        projected.config.plugins["behaviour:login"]
+            .get("abuse_namespace")
+            .and_then(|v| v.as_str()),
+        Some("behaviour:login")
+    );
+    for reserved in ["abuse_namespace", "enforcement_required"] {
+        intent
+            .policies
+            .get_mut("behaviour:login")
+            .expect("test fixture")
+            .insert(
+                reserved.into(),
+                toml::Value::String("operator override".into()),
+            );
+        assert!(generate(&intent).is_err());
+        intent
+            .policies
+            .get_mut("behaviour:login")
+            .expect("test fixture")
+            .remove(reserved);
+    }
+}

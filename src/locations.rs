@@ -94,5 +94,12 @@ pub fn try_init_locations(
             .flat_map(|hosts| hosts.split(','))
             .map(str::trim),
     );
+    pingap_behaviour::set_abuse_hosts(pingap_domainstate::HostPolicy::new(
+        location_configs
+            .values()
+            .filter_map(|conf| conf.host.as_deref())
+            .flat_map(|hosts| hosts.split(','))
+            .map(str::trim),
+    ));
     Ok(updated_locations)
 }

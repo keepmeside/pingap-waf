@@ -295,6 +295,7 @@ pub enum PluginMiss {
         /// than by parsing a name.
         category: String,
         reason: String,
+        enforcement_required: bool,
     },
 }
 
@@ -306,6 +307,50 @@ pub enum PluginMiss {
 /// miss, so there is one place that answers "is this plugin load-bearing for security".
 pub const SECURITY_ENFORCING_CATEGORIES: &[&str] =
     &["waf", "acl", "bot", "access_list", "challenge"];
+
+/// Desired enforcement survives malformed or unavailable constructors.
+/// A valid detect-only/disabled Behaviour remains advisory. Explicit malformed
+/// abuse configuration must not turn a requested security control into a bypass.
+pub fn security_failure_intent(
+    category: &str,
+    conf: &serde_json::Value,
+) -> bool {
+    if category == "limit" {
+        return conf.get("enforcement_required").and_then(|v| v.as_bool())
+            == Some(true);
+    }
+    if category != "behaviour" {
+        return is_security_enforcing(category);
+    }
+    if conf.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+        return false;
+    }
+    let Some(abuse) = conf.get("abuse") else {
+        return false;
+    };
+    if !abuse.is_object() {
+        return true;
+    }
+    if abuse.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+        return false;
+    }
+    if abuse.get("enabled").is_some_and(|v| !v.is_boolean()) {
+        return true;
+    }
+    if abuse.get("enabled").is_none() {
+        return false;
+    }
+    let mut found = false;
+    for name in ["failed_login", "scan"] {
+        if let Some(scenario) = abuse.get(name) {
+            found = true;
+            if scenario.get("mode").and_then(|v| v.as_str()) != Some("detect") {
+                return true;
+            }
+        }
+    }
+    !found
+}
 
 /// Optional per-request multiplier supplied by the adaptive learner.
 ///
@@ -404,5 +449,47 @@ mod tests {
         let respond1 = RequestPluginResult::Respond(HttpResponse::no_content());
         let respond2 = RequestPluginResult::Respond(HttpResponse::no_content());
         assert_eq!(false, respond1 == respond2);
+    }
+}
+
+#[cfg(test)]
+mod security_failure_intent_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn security_failure_intent_preserves_explicit_protection_without_widening_legacy()
+     {
+        assert!(!security_failure_intent(
+            "behaviour",
+            &json!({"enabled":true})
+        ));
+        for mode in ["block", "unknown"] {
+            assert!(security_failure_intent(
+                "behaviour",
+                &json!({"enabled":true,"abuse":{"enabled":true,"scan":{"mode":mode}}})
+            ));
+        }
+        assert!(!security_failure_intent(
+            "behaviour",
+            &json!({"enabled":true,"abuse":{"enabled":true,"scan":{"mode":"detect"}}})
+        ));
+        assert!(!security_failure_intent(
+            "behaviour",
+            &json!({"enabled":true,"abuse":{"enabled":false,"scan":{"mode":"block"}}})
+        ));
+        assert!(!security_failure_intent(
+            "behaviour",
+            &json!({"enabled":false,"abuse":{"enabled":true,"scan":{"mode":"block"}}})
+        ));
+        assert!(security_failure_intent(
+            "behaviour",
+            &json!({"enabled":true,"abuse":{"enabled":true}})
+        ));
+        assert!(!security_failure_intent("limit", &json!({})));
+        assert!(security_failure_intent(
+            "limit",
+            &json!({"enforcement_required":true})
+        ));
+        assert!(security_failure_intent("waf", &json!({})));
     }
 }

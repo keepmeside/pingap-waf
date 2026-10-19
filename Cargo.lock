@@ -4509,10 +4509,12 @@ dependencies = [
  "pingap-plugin",
  "pingora",
  "serde",
+ "sha2 0.11.0",
  "snafu",
  "tokio",
  "tokio-test",
  "toml",
+ "tracing",
 ]
 
 [[package]]

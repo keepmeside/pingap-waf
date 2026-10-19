@@ -5,6 +5,9 @@ use std::time::Duration;
 pub struct BehaviourConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub abuse: crate::scenario::AbuseConfig,
+    pub abuse_namespace: Option<String>,
     #[serde(default = "default_window", with = "humantime_serde")]
     pub window: Duration,
     #[serde(default = "default_max_clients")]
@@ -149,6 +152,8 @@ impl Default for BehaviourConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            abuse: Default::default(),
+            abuse_namespace: None,
             window: default_window(),
             max_clients: default_max_clients(),
             max_url_keys: default_max_urls(),
@@ -179,12 +184,28 @@ pub enum ConfigError {
         "behaviour: identity gate refused construction: {reason}"
     ))]
     Identity { reason: String },
+    #[snafu(display("behaviour: invalid abuse configuration: {reason}"))]
+    Abuse { reason: String },
 }
 
 impl BehaviourConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !self.enabled {
             return Ok(());
+        }
+        if self.abuse.enabled {
+            self.abuse
+                .validate(self.max_interval_samples, self.max_url_keys)
+                .map_err(|reason| ConfigError::Abuse { reason })?;
+            if self
+                .abuse_namespace
+                .as_ref()
+                .is_none_or(|v| v.trim().is_empty())
+            {
+                return Err(ConfigError::Abuse {
+                    reason: "abuse_namespace is required".into(),
+                });
+            }
         }
         if self.window.is_zero() {
             return Err(ConfigError::Zero { key: "window" });

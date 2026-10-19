@@ -106,7 +106,33 @@ pub fn generate(intent: &Intent) -> Result<Projected> {
     }
 
     for (name, plugin) in &intent.policies {
-        config.plugins.insert(name.clone(), plugin.clone());
+        if plugin.contains_key("abuse_namespace")
+            || plugin.contains_key("enforcement_required")
+        {
+            return Err(ProjectionError::BadValue{field:format!("policy `{name}`"),value:"reserved generated metadata".into(),reason:"abuse_namespace and enforcement_required are generated, not user overrides".into()});
+        }
+        let category = name.split_once(':').map(|v| v.0).unwrap_or_default();
+        if plugin.get("category").and_then(|v| v.as_str()) != Some(category) {
+            return Err(ProjectionError::BadValue {
+                field: format!("policy `{name}`.category"),
+                value: category.into(),
+                reason: "category must match policy entry".into(),
+            });
+        }
+        let mut plugin = plugin.clone();
+        if category == "behaviour"
+            && plugin
+                .get("abuse")
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        {
+            plugin.insert(
+                "abuse_namespace".into(),
+                toml::Value::String(name.clone()),
+            );
+        }
+        config.plugins.insert(name.clone(), plugin);
     }
 
     let toml = canonical_toml(&config)?;

@@ -2,6 +2,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
+case "${1:-}" in native-scenario|policy-unavailable-behaviour) exec python3 tests/admin/native-canary.py "$1";; esac
 case "${1:-}" in policy-save) ;; *) echo "Unsupported canary case: ${1:-missing}" >&2; exit 2;; esac
 image="${PINGAP_CANARY_IMAGE:-pingap-native-canary:phase1}"
 run_id="pingap-canary-$(date +%s)-$$"

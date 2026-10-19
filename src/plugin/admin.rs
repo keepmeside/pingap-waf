@@ -410,6 +410,8 @@ impl AdminServe {
                         // counters climb.
                         "behaviour_tracked":
                             pingap_behaviour::tracked_snapshot(),
+                        "native_abuse": pingap_behaviour::decisions::registry().counters(),
+                        "native_state_epoch": pingap_behaviour::decisions::registry().epoch(),
                         "adaptive":
                             pingap_adaptive::domain_state_snapshot(),
                         "intel": pingap_intel::feed_stats_snapshot(),
