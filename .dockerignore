@@ -8,3 +8,7 @@ spikes
 *.db
 *.sqlite
 *.log
+
+.cross-review
+web/test-results
+web/playwright-report

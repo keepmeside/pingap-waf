@@ -1,4 +1,5 @@
 import { useI18n } from "@/i18n";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Card,
   CardContent,
@@ -24,6 +25,7 @@ import { LoaderCircle } from "lucide-react";
 
 export default function Login() {
   const loginI18n = useI18n("login");
+  const queryClient = useQueryClient();
 
   const [account, setAccount] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -50,6 +52,8 @@ export default function Login() {
         username: account,
         password,
       });
+      queryClient.clear();
+      useConfigState.setState(useConfigState.getInitialState());
       saveLoginToken(data.token);
       if (data.auth_level === "password_only") {
         setTotpPending(true);

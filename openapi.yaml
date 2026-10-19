@@ -768,7 +768,9 @@ paths:
         config-entry name, so two domains that must count independently have to bind two
         *different* profiles.
 
-        The body is the plugin's own config table, uninterpreted here. The projection's gate
+        The body must contain a string `category` matching the entry-name prefix. Missing or
+        mismatched categories are rejected with400 before a version or audit row is created.
+        All other fields remain the plugin's own complete config table. The projection's gate
         asks the real plugin factory whether the table constructs before anything is
         committed, so a profile whose regex is quadratic, whose paranoia is out of range, or
         whose category this build does not have is refused with the reason — rather than
@@ -779,7 +781,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PluginConf'
+              $ref: '#/components/schemas/PolicyWrite'
       responses:
         '200':
           $ref: '#/components/responses/Applied'
@@ -2077,6 +2079,17 @@ components:
         A plugin's own configuration table. Interpreted by the plugin that owns it and by
         nothing else; the projection only checks that every binding names an entry that
         exists, and the gate asks the plugin factory whether the table constructs.
+
+    PolicyWrite:
+      allOf:
+        - $ref: '#/components/schemas/PluginConf'
+        - type: object
+          required: [category]
+          properties:
+            category:
+              type: string
+              minLength: 1
+              description: Must match the category prefix in the policy entry name.
 
     NotificationChannel:
       type: object

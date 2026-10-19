@@ -1,5 +1,6 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from "axios";
 import HTTPError from "./http-error";
+import { apiErrorMessage } from "./api-error";
 
 import { getLoginToken, removeLoginToken } from "@/states/token";
 
@@ -62,7 +63,12 @@ function addRequestStats(
 
 // 设置接口最少要x ms才完成，能让客户看到loading
 const minUse = 300;
-const timeoutErrorCodes = ["ECONNABORTED", "ECONNREFUSED", "ECONNRESET"];
+const timeoutErrorCodes = [
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+];
 request.interceptors.response.use(
   async (res) => {
     addRequestStats(res.config, res, undefined);
@@ -84,7 +90,15 @@ request.interceptors.response.use(
     const he = new HTTPError("Unknown error");
     // Axios network failures have no response — guard before reading status.
     he.status = response?.status ?? 0;
-    if (he.status == 401) {
+    const authorization =
+      err.config?.headers?.Authorization ??
+      response?.config?.headers?.Authorization;
+    const sentToken =
+      typeof authorization === "string" && authorization.startsWith("Bearer ")
+        ? authorization.slice(7)
+        : "";
+    // A delayed401 belongs to the token sent, not a newer login in this browser.
+    if (he.status == 401 && sentToken === getLoginToken()) {
       removeLoginToken();
       // Hash router: avoid a hard reload, and don't bounce if already on login.
       const hash = window.location.hash || "";
@@ -94,16 +108,17 @@ request.interceptors.response.use(
     }
     if (timeoutErrorCodes.includes(err.code)) {
       he.category = "timeout";
-      he.message = "Request timeout";
+      he.message =
+        "Request timed out. Reload policies and config versions to check the outcome before retrying.";
     } else if (response) {
-      if (response.data && response.data.message) {
-        he.message = response.data.message;
-        he.category = response.data.category;
-      } else {
-        he.exception = true;
-        he.category = "exception";
-        he.message = response.data || "Unknown error";
-      }
+      he.message = apiErrorMessage(
+        response.data,
+        `Request failed (HTTP ${he.status})`,
+      );
+      he.category =
+        typeof response.data?.category === "string"
+          ? response.data.category
+          : "api";
     }
     addRequestStats(response?.config, response, he);
     return Promise.reject(he);

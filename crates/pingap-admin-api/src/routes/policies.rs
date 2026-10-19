@@ -77,11 +77,17 @@ pub async fn put(
     request: &ApiRequest,
     params: &[String],
 ) -> Result<ApiResponse> {
-    intent_resource::upsert(
+    let name = profile_name(params)?;
+    let body: pingap_config::PluginConf = request.json()?;
+    validate_category(name, &body)?;
+    let base = intent_resource::base_intent(state).await?;
+    intent_resource::insert(
         state,
         request,
         "policy",
-        profile_name(params)?,
+        name,
+        body,
+        base,
         |intent| &mut intent.policies,
     )
     .await
@@ -100,4 +106,38 @@ pub async fn delete(
         |intent| &mut intent.policies,
     )
     .await
+}
+
+/// Refuse mismatched/missing categories before creating an intent version.
+fn validate_category(
+    name: &str,
+    body: &pingap_config::PluginConf,
+) -> Result<()> {
+    let category = name.split_once(':').map(|pair| pair.0).unwrap_or_default();
+    if body.get("category").and_then(|value| value.as_str()) != Some(category) {
+        return Err(ApiError::BadRequest {
+            reason: "policy category must match category:profile entry name"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod category_tests {
+    use super::*;
+    #[test]
+    fn policy_category_must_match_name() {
+        for category in ["waf", "acl", "bot"] {
+            let body: pingap_config::PluginConf = serde_json::from_value(
+                serde_json::json!({"category": category}),
+            )
+            .expect("config");
+            assert!(
+                validate_category(&format!("{category}:strict"), &body).is_ok()
+            );
+            assert!(validate_category("other:strict", &body).is_err());
+        }
+        assert!(validate_category("waf:strict", &Default::default()).is_err());
+    }
 }

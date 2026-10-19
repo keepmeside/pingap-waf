@@ -5,9 +5,10 @@ RUN cd web && npm ci
 COPY . .
 RUN cd web && npm run build && cp -rf dist /src/dist
 
-FROM rust:1.88-alpine AS build
+FROM rust:1.98-alpine AS build
 ARG TARGET=x86_64-unknown-linux-musl
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static ca-certificates perl make g++ zlib-dev zlib-static protobuf-dev protoc cmake clang lld pkgconf file
+RUN mkdir -m 1777 /runtime-tmp
 RUN rustup target add ${TARGET}
 WORKDIR /src
 COPY --from=web /src /src
@@ -20,6 +21,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && (file /src/pingap-waf | grep -qE 'statically linked|static-pie linked' || ldd /src/pingap-waf 2>&1 | grep -q 'not a dynamic executable')
 
 FROM scratch
+COPY --from=build /runtime-tmp /tmp
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /src/pingap-waf /usr/local/bin/pingap-waf
 COPY --from=web /src/dist /opt/pingap/dist

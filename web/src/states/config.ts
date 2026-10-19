@@ -1,6 +1,9 @@
 import request from "@/helpers/request";
 import { random } from "@/helpers/util";
 import { create } from "zustand";
+import { can } from "@/lib/rbac";
+import type { Profile } from "@/lib/types";
+import { getLoginToken } from "@/states/token";
 
 export interface CertificateInfo {
   not_after: number;
@@ -225,7 +228,28 @@ const useConfigState = create<ConfigState>()((set, get) => ({
   version: random(),
   initialized: false,
   fetch: async () => {
+    const token = getLoginToken();
+    const assertCurrentSession = () => {
+      if (getLoginToken() !== token) throw new Error("The session changed while loading configuration.");
+    };
+    // Raw config is optional for read-only accounts, not a prerequisite for login.
+    // Clear prior privileged content when this session cannot read it.
+    const clear = (initialized: boolean): Config => {
+      const data = { basic: {} as Basic };
+      set({ data, initialized, fullToml: "", originalToml: "", hcl: "", version: random() });
+      return data;
+    };
+    let profile: Profile;
+    try {
+      profile = (await request.get<Profile>("/account")).data;
+    } catch (error) {
+      if (getLoginToken() === token) clear(false);
+      throw error;
+    }
+    assertCurrentSession();
+    if (!can(profile, "view_raw_config")) return clear(true);
     const { data } = await request.get<Config>("/configs");
+    assertCurrentSession();
     set({
       initialized: true,
       data,
@@ -233,11 +257,13 @@ const useConfigState = create<ConfigState>()((set, get) => ({
     return data;
   },
   fetchFullConfig: async () => {
+    const token = getLoginToken();
     const { data } = await request.get<{
       full: string;
       hcl: string;
       original: string;
     }>("/configs/full");
+    if (getLoginToken() !== token) throw new Error("The session changed while loading configuration.");
     set({
       fullToml: data.full,
       originalToml: data.original,

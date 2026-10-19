@@ -1115,3 +1115,27 @@ async fn backup_export_and_restore_are_unavailable_without_a_backup_dir() {
         "{response:?}"
     );
 }
+
+/// Category/body disagreement must fail before apply, even with a permissive factory.
+#[tokio::test]
+async fn policy_category_mismatch_never_creates_a_version_or_audit() {
+    let api = api().await;
+    for body in [r#"{}"#, r#"{"category":"acl"}"#, r#"{"category":17}"#] {
+        let response =
+            send(&api, Method::PUT, "/policies/waf:strict", body).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    }
+    let rows = api
+        .store
+        .list_config_versions(None)
+        .await
+        .expect("versions");
+    assert!(rows.is_empty(), "invalid policy reached projection");
+    assert!(
+        api.store
+            .read_activity(TimeRange::default())
+            .await
+            .expect("activity")
+            .is_empty()
+    );
+}

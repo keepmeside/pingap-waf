@@ -133,7 +133,7 @@ export default function BotManager() {
                   toast.success("Bot profile saved");
                   setEditing(null);
                 },
-                onError: (e) => toast.error("Save failed", { description: formatError(e) }),
+                onError: (e) => toast.error((e as { category?: string }).category === "timeout" ? "Save outcome unconfirmed" : "Save failed", { description: formatError(e) }),
               },
             );
           }}

@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Browser evidence stays local to the verification run.
+test-results/
+playwright-report/

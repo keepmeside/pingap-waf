@@ -89,7 +89,7 @@ export default function Waf() {
                   toast.success("WAF profile saved");
                   setEditing(null);
                 },
-                onError: (e) => toast.error("Save failed", { description: formatError(e) }),
+                onError: (e) => toast.error((e as { category?: string }).category === "timeout" ? "Save outcome unconfirmed" : "Save failed", { description: formatError(e) }),
               },
             );
           }}

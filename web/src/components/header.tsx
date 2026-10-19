@@ -1,4 +1,6 @@
 import React from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import useConfigState from "@/states/config";
 import { cn } from "@/lib/utils";
 import {
   Check,
@@ -57,6 +59,7 @@ export function MainHeader({
   const { t } = useTranslation();
 
   const iconClassName = "mr-2 h-4 w-4";
+  const queryClient = useQueryClient();
   const { setTheme, theme } = useTheme();
   const lang = i18n.language;
 
@@ -88,6 +91,8 @@ export function MainHeader({
     try {
       await request.post("/auth/logout");
     } finally {
+      queryClient.clear();
+      useConfigState.setState(useConfigState.getInitialState());
       removeLoginToken();
       window.location.hash = "#/login";
     }

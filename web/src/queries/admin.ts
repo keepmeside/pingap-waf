@@ -20,6 +20,8 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 import request from "@/helpers/request";
+import { putConfig } from "@/helpers/config-write";
+import { policyPayload } from "@/helpers/policy-payload";
 import type { ApiState } from "@/queries/api";
 import type {
   Activity, AlertHistory, AlertRuleRecord, BackupFileRecord, BackupScheduleRecord,
@@ -125,8 +127,8 @@ function usePut<T>(keys: string[], build: (name: string) => string) {
   const { invalidate } = useWriter(keys);
   return useMutation({
     mutationFn: async ({ name, body }: { name: string; body: Body }) => {
-      const res = await request.put<T>(build(name), body ?? {});
-      return res.data;
+      const payload = keys.includes("policies") ? policyPayload(name, (body ?? {}) as PluginConf) : body ?? {};
+      return putConfig<T>(build(name), payload);
     },
     onSettled: invalidate,
   });
