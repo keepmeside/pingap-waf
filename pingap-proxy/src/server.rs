@@ -730,15 +730,18 @@ impl Server {
 
         let mut location_plugins = Vec::with_capacity(plugins.len());
         for name in plugins.iter() {
-            if let Some(plugin) = self.plugin_provider.get(name) {
-                location_plugins.push((name.clone(), plugin));
-                continue;
-            }
+            let missing = match self.plugin_provider.resolve(name) {
+                Ok(plugin) => {
+                    location_plugins.push((name.clone(), plugin));
+                    continue;
+                },
+                Err(missing) => missing,
+            };
             let PluginMiss::Failed {
                 category,
                 reason,
                 enforcement_required,
-            } = self.plugin_provider.miss(name)
+            } = missing
             else {
                 continue;
             };
@@ -2245,6 +2248,38 @@ plugins = ["stats"]
     /// it has already reported the real failure, and turning that into a poison panic in
     /// three other tests would bury it.
     static POSTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct CoherentOnlyProvider;
+    impl PluginProvider for CoherentOnlyProvider {
+        fn get(&self, _name: &str) -> Option<Arc<dyn Plugin>> {
+            None
+        }
+        fn miss(&self, _name: &str) -> PluginMiss {
+            PluginMiss::Unknown
+        }
+        fn resolve(
+            &self,
+            _name: &str,
+        ) -> std::result::Result<Arc<dyn Plugin>, PluginMiss> {
+            Err(PluginMiss::Failed {
+                category: "behaviour".into(),
+                reason: "required publication snapshot".into(),
+                enforcement_required: true,
+            })
+        }
+    }
+    #[test]
+    fn request_uses_coherent_instance_or_failure_resolution() {
+        let _posture = POSTURE.lock().unwrap_or_else(|e| e.into_inner());
+        pingap_core::set_policy_unavailable_mode(&None);
+        let server = new_server_with(Some(Arc::new(CoherentOnlyProvider)));
+        let error = match server
+            .get_context_plugins(location_listing("behaviour:block"))
+        {
+            Err(error) => error,
+            Ok(_) => panic!("request bypassed coherent failure metadata"),
+        };
+        assert!(matches!(error.etype(), pingora::ErrorType::HTTPStatus(503)));
+    }
 
     /// The fail-closed guard. A Location listing a security-enforcing plugin that is
     /// configured but not running must refuse the request rather than proxy it

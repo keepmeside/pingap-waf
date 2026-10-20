@@ -123,3 +123,11 @@ before deployment; these bounds do not promise that every configuration fits1GiB
 An unavailable block-mode profile follows on_policy_unavailable: default fail_closed
 returns503 only for its affected locations; explicit fail_open serves with a warning.
 Detect-only and legacy advisory profiles retain their existing failure behavior.
+
+Failed-login timestamp capacity is `max_interval_samples`; distinct scan capacity is
+`max_url_keys`. Threshold validation uses each scenario's own capacity. Accepted
+upstream responses refresh evidence retention, while a live ban's deadline remains
+fixed. State time is sampled while holding the mutation lock, so concurrent response
+completion cannot reorder timestamps. Instances and construction failures publish
+through one provider snapshot. Desired enforcing metadata is staged before routing
+can expose a new binding, including during notification awaits on reload.

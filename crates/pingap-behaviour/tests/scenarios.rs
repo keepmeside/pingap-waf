@@ -28,7 +28,7 @@ fn registry(mode: &str) -> (Registry<ManualClock>, ManualClock) {
         clock.clone(),
     );
     registry.activate(vec![
-        ScenarioProfile::new("behaviour:a", config(mode), 5000, 64)
+        ScenarioProfile::new("behaviour:a", config(mode), 5000, 32, 64)
             .expect("test fixture"),
     ]);
     (registry, clock)
@@ -114,7 +114,7 @@ ban_ttl="20s"
     )
     .expect("test fixture");
     r.activate(vec![
-        ScenarioProfile::new("behaviour:a", conf, 5000, 64)
+        ScenarioProfile::new("behaviour:a", conf, 5000, 32, 64)
             .expect("test fixture"),
     ]);
     for i in 0..100 {

@@ -287,37 +287,127 @@ remark = "Adjust the accept encoding order and choose one encoding"
 /// failure set from one reload and a plugin map from another.
 pub type Failures = AHashMap<String, PluginMiss>;
 
-struct Provider {
-    plugins: ArcSwap<Plugins>,
-    failures: ArcSwap<Failures>,
+#[derive(Clone)]
+struct DesiredPolicy {
+    key: String,
+    category: String,
+    required: bool,
 }
-
+#[derive(Default)]
+struct ProviderSnapshot {
+    plugins: Arc<Plugins>,
+    failures: Arc<Failures>,
+    desired: Arc<HashMap<String, DesiredPolicy>>,
+}
+impl ProviderSnapshot {
+    fn resolve(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Arc<dyn Plugin>, PluginMiss> {
+        if let Some(desired) =
+            self.desired.get(name).filter(|policy| policy.required)
+        {
+            if self
+                .plugins
+                .get(name)
+                .is_none_or(|plugin| plugin.config_key() != desired.key)
+            {
+                return Err(PluginMiss::Failed{category:desired.category.clone(),reason:"required desired policy is unavailable or awaiting publication".into(),enforcement_required:true});
+            }
+        }
+        self.plugins.get(name).cloned().ok_or_else(|| {
+            self.failures
+                .get(name)
+                .cloned()
+                .unwrap_or(PluginMiss::Unknown)
+        })
+    }
+}
+struct Provider {
+    snapshot: ArcSwap<ProviderSnapshot>,
+}
+impl Default for Provider {
+    fn default() -> Self {
+        Self {
+            snapshot: ArcSwap::from_pointee(ProviderSnapshot::default()),
+        }
+    }
+}
 impl Provider {
     fn store(&self, data: Plugins, failures: Failures) {
-        self.plugins.store(Arc::new(data));
-        self.failures.store(Arc::new(failures));
+        self.store_then(data, failures, || {});
+    }
+    fn store_then(
+        &self,
+        data: Plugins,
+        failures: Failures,
+        after_publication: impl FnOnce(),
+    ) {
+        let plugins = Arc::new(data);
+        let failures = Arc::new(failures);
+        self.snapshot.rcu(|current| {
+            Arc::new(ProviderSnapshot {
+                plugins: plugins.clone(),
+                failures: failures.clone(),
+                desired: current.desired.clone(),
+            })
+        });
+        after_publication();
+    }
+    fn stage_desired(&self, configs: &HashMap<String, PluginConf>) {
+        let desired: Arc<HashMap<String, DesiredPolicy>> = Arc::new(
+            configs
+                .iter()
+                .map(|(name, conf)| {
+                    let category = conf
+                        .get("category")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let required = pingap_core::security_failure_intent(
+                        &category,
+                        &serde_json::to_value(conf).unwrap_or_default(),
+                    );
+                    (
+                        name.clone(),
+                        DesiredPolicy {
+                            key: get_hash_key(conf),
+                            category,
+                            required,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        self.snapshot.rcu(|current| {
+            Arc::new(ProviderSnapshot {
+                plugins: current.plugins.clone(),
+                failures: current.failures.clone(),
+                desired: desired.clone(),
+            })
+        });
     }
 }
-
-static PLUGIN_PROVIDER: LazyLock<Arc<Provider>> = LazyLock::new(|| {
-    Arc::new(Provider {
-        plugins: ArcSwap::from_pointee(AHashMap::new()),
-        failures: ArcSwap::from_pointee(AHashMap::new()),
-    })
-});
-
+static PLUGIN_PROVIDER: LazyLock<Arc<Provider>> =
+    LazyLock::new(|| Arc::new(Provider::default()));
 impl PluginProvider for Provider {
     fn get(&self, name: &str) -> Option<Arc<dyn Plugin>> {
-        self.plugins.load().get(name).cloned()
+        self.snapshot.load().plugins.get(name).cloned()
     }
-
+    fn resolve(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Arc<dyn Plugin>, PluginMiss> {
+        self.snapshot.load().resolve(name)
+    }
     fn miss(&self, name: &str) -> PluginMiss {
-        self.failures
-            .load()
-            .get(name)
-            .cloned()
-            .unwrap_or(PluginMiss::Unknown)
+        self.resolve(name).err().unwrap_or(PluginMiss::Unknown)
     }
+}
+/// Publish only desired metadata before any dependent location can be exposed.
+/// Candidate validation does not call this runtime preparation hook.
+pub(crate) fn stage_desired_plugins(configs: &HashMap<String, PluginConf>) {
+    PLUGIN_PROVIDER.stage_desired(configs);
 }
 
 pub fn new_plugin_provider() -> Arc<dyn PluginProvider> {
@@ -448,6 +538,7 @@ pub fn parse_plugins(
 pub fn try_init_plugins(
     plugins: &HashMap<String, PluginConf>,
 ) -> (Vec<String>, String) {
+    stage_desired_plugins(plugins);
     let abuse_configs = plugins;
     // Count over the complete desired set, including instances reused below.
     // Otherwise a new colliding profile is checked alone after unchanged entries
@@ -671,5 +762,123 @@ mod tests {
             Some("abc"),
             plugin_conf.get("totp_key").and_then(|v| v.as_str())
         );
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    #[test]
+    fn required_failure_is_visible_at_the_publication_boundary() {
+        let provider = Arc::new(Provider::default());
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let finish = Arc::new(std::sync::Barrier::new(2));
+        let worker = provider.clone();
+        let worker_ready = ready.clone();
+        let worker_finish = finish.clone();
+        let task = std::thread::spawn(move || {
+            let failures = AHashMap::from_iter([(
+                "behaviour:block".into(),
+                PluginMiss::Failed {
+                    category: "behaviour".into(),
+                    reason: "invalid required policy".into(),
+                    enforcement_required: true,
+                },
+            )]);
+            worker.store_then(AHashMap::new(), failures, || {
+                worker_ready.wait();
+                worker_finish.wait();
+            });
+        });
+        ready.wait();
+        let result = provider.resolve("behaviour:block").err();
+        finish.wait();
+        task.join().expect("publisher finishes");
+        assert!(
+            matches!(
+                result,
+                Some(PluginMiss::Failed {
+                    enforcement_required: true,
+                    ..
+                })
+            ),
+            "publication must never expose Unknown for the required policy"
+        );
+    }
+    struct Healthy;
+    impl Plugin for Healthy {
+        fn config_key(&self) -> std::borrow::Cow<'_, str> {
+            std::borrow::Cow::Borrowed("healthy")
+        }
+    }
+    #[test]
+    fn held_snapshot_does_not_mix_with_a_new_failure_generation() {
+        let provider = Provider::default();
+        provider.store(
+            AHashMap::from_iter([(
+                "behaviour:block".into(),
+                Arc::new(Healthy) as Arc<dyn Plugin>,
+            )]),
+            AHashMap::new(),
+        );
+        let held = provider.snapshot.load_full();
+        provider.store(
+            AHashMap::new(),
+            AHashMap::from_iter([(
+                "behaviour:block".into(),
+                PluginMiss::Failed {
+                    category: "behaviour".into(),
+                    reason: "bad".into(),
+                    enforcement_required: true,
+                },
+            )]),
+        );
+        assert!(held.resolve("behaviour:block").is_ok());
+        assert!(matches!(
+            provider.resolve("behaviour:block"),
+            Err(PluginMiss::Failed {
+                enforcement_required: true,
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn desired_required_policy_is_not_unknown_before_construction() {
+        let provider = Arc::new(Provider::default());
+        let config:PluginConf=toml::from_str("category=\"behaviour\"\nenabled=true\n[abuse]\nenabled=true\n[abuse.scan]\nmode=\"block\"\nthreshold=0").expect("config");
+        provider.stage_desired(&HashMap::from_iter([(
+            "behaviour:new".into(),
+            config,
+        )]));
+        // A reader is paused at the new-location boundary while construction has
+        // deliberately not occurred. Staged intent must already refuse it.
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let reader = provider.clone();
+        let gate = ready.clone();
+        let request = std::thread::spawn(move || {
+            gate.wait();
+            reader.resolve("behaviour:new").err()
+        });
+        ready.wait();
+        assert!(matches!(
+            request.join().expect("request"),
+            Some(PluginMiss::Failed {
+                enforcement_required: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            provider.resolve("legacy:unconfigured"),
+            Err(PluginMiss::Unknown)
+        ));
+        let advisory:PluginConf=toml::from_str("category=\"behaviour\"\nenabled=true\n[abuse]\nenabled=true\n[abuse.scan]\nmode=\"detect\"\nthreshold=0").expect("config");
+        provider.stage_desired(&HashMap::from_iter([(
+            "behaviour:advisory".into(),
+            advisory,
+        )]));
+        assert!(matches!(
+            provider.resolve("behaviour:advisory"),
+            Err(PluginMiss::Unknown)
+        ));
     }
 }

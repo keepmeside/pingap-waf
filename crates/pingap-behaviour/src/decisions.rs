@@ -40,15 +40,17 @@ pub struct ScenarioProfile {
     pub config: AbuseConfig,
     pub max_clients: usize,
     pub max_paths: usize,
+    pub max_logins: usize,
 }
 impl ScenarioProfile {
     pub fn new(
         namespace: &str,
         config: AbuseConfig,
         max_clients: usize,
+        max_logins: usize,
         max_paths: usize,
     ) -> Result<Self, String> {
-        config.validate(max_paths, max_paths)?;
+        config.validate(max_logins, max_paths)?;
         if namespace.trim().is_empty() || max_clients == 0 {
             return Err(
                 "abuse requires namespace and positive client capacity".into(),
@@ -56,7 +58,7 @@ impl ScenarioProfile {
         }
         let generation = digest_hex(
             format!(
-                "{}:{max_clients}:{max_paths}",
+                "{}:{max_clients}:{max_logins}:{max_paths}",
                 toml::to_string(&config)
                     .map_err(|_| "invalid abuse configuration")?
             )
@@ -68,6 +70,7 @@ impl ScenarioProfile {
             config,
             max_clients,
             max_paths,
+            max_logins,
         })
     }
     fn idle_ms(&self) -> u64 {
@@ -283,8 +286,8 @@ impl<C: Clock> Registry<C> {
             .expect("validated IP")
             .to_string();
         let path_digest = path_key(path);
-        let now = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = self.clock.now_ms();
         if inner
             .hosts
             .as_ref()
@@ -421,8 +424,8 @@ impl<C: Clock> Registry<C> {
         if local_denial || ticket.epoch != self.epoch {
             return Evidence::default();
         }
-        let now = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = self.clock.now_ms();
         let Some(profile) = inner
             .profiles
             .get(&ticket.namespace)
@@ -452,6 +455,7 @@ impl<C: Clock> Registry<C> {
                     stale = true;
                     return Evidence::default();
                 }
+                c.idle_at = now.saturating_add(profile.idle_ms());
                 let crossings = c.counters.observe(
                     &profile.config,
                     now,
@@ -503,9 +507,9 @@ impl<C: Clock> Registry<C> {
         if limit == 0 {
             return Vec::new();
         }
-        let now = self.clock.now_ms();
         let mut rows = BTreeMap::new();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = self.clock.now_ms();
         let mut expired = 0;
         for bucket in inner.domains.values_mut() {
             bucket.store.retain(bucket.domain, |_, c| {
@@ -551,8 +555,8 @@ impl<C: Clock> Registry<C> {
                 .map(|i| i.to_string())
                 .unwrap_or_default()
         );
-        let now = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = self.clock.now_ms();
         let Some(bucket) = inner.domains.get_mut(domain) else {
             return false;
         };
@@ -594,4 +598,76 @@ fn digest_hex(bytes: &[u8]) -> String {
         output.push(HEX[(b & 15) as usize] as char);
     }
     output
+}
+
+#[cfg(test)]
+mod clock_order_tests {
+    use super::*;
+    use pingap_domainstate::ManualClock;
+    use std::sync::Weak;
+    #[derive(Clone)]
+    struct LockCheckedClock {
+        time: ManualClock,
+        owner: Arc<Mutex<Option<Weak<Registry<LockCheckedClock>>>>>,
+    }
+    impl Clock for LockCheckedClock {
+        fn now_ms(&self) -> u64 {
+            let owner = self
+                .owner
+                .lock()
+                .expect("clock owner")
+                .as_ref()
+                .and_then(Weak::upgrade);
+            if let Some(owner) = owner {
+                assert!(
+                    matches!(
+                        owner.inner.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ),
+                    "state time must be sampled under the registry mutation lock"
+                );
+            }
+            self.time.now_ms()
+        }
+    }
+    #[test]
+    fn clock_sampling_is_serialized_with_mutation_at_window_boundaries() {
+        let clock = LockCheckedClock {
+            time: ManualClock::at(0),
+            owner: Arc::new(Mutex::new(None)),
+        };
+        let registry =
+            Arc::new(Registry::with_clock(Limits::default(), clock.clone()));
+        *clock.owner.lock().expect("clock owner") =
+            Some(Arc::downgrade(&registry));
+        let config=toml::from_str("enabled=true\n[failed_login]\nmode=\"block\"\nwindow=\"10ms\"\nthreshold=3\nban_ttl=\"1s\"\npath=\"/login\"\nmethod=\"POST\"\nstatuses=[401]").expect("config");
+        registry.activate(vec![
+            ScenarioProfile::new("behaviour:clock", config, 5000, 32, 64)
+                .expect("profile"),
+        ]);
+        for at in [9, 11, 20] {
+            clock.time.set(at);
+            let Admission::Allowed(Some(ticket)) = registry.admit(
+                "behaviour:clock",
+                "a.test",
+                "::1",
+                "POST",
+                "/login",
+                true,
+            ) else {
+                panic!("admission")
+            };
+            assert!(
+                !registry.observe(&ticket, 401, false).ban_created,
+                "only observations at11 and20 remain valid"
+            );
+        }
+        assert!(registry.active_decisions(0, 100).is_empty());
+        assert!(!registry.release(
+            "behaviour:clock",
+            "a.test",
+            "::1",
+            "absent"
+        ));
+    }
 }

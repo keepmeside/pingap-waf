@@ -16,7 +16,7 @@ ban_ttl="{ttl}s"
 "#
     ))
     .expect("test fixture");
-    ScenarioProfile::new(name, c, 5000, 64).expect("test fixture")
+    ScenarioProfile::new(name, c, 5000, 32, 64).expect("test fixture")
 }
 fn admit(
     r: &Registry<ManualClock>,
@@ -199,4 +199,54 @@ fn removed_registered_domain_releases_capacity_and_old_admission_cannot_recreate
         r.admit("behaviour:a", "b.test", "1.2.3.4", "GET", "/x", true),
         Admission::Allowed(Some(_))
     ));
+}
+
+#[test]
+fn eligible_slow_response_extends_evidence_retention_under_capacity_pressure() {
+    let clock = ManualClock::at(0);
+    let r = Registry::with_clock(
+        Limits {
+            max_domains: 1,
+            max_entries_per_domain: 1,
+        },
+        clock.clone(),
+    );
+    r.activate(vec![profile("behaviour:a", 1)]);
+    let slow = admit(&r, "behaviour:a", "1.2.3.4", "/slow");
+    clock.advance(Duration::from_secs(9));
+    assert!(!r.observe(&slow, 404, false).ban_created);
+    clock.advance(Duration::from_secs(2));
+    assert!(matches!(
+        r.admit("behaviour:a", "a.test", "5.6.7.8", "GET", "/other", true),
+        Admission::Saturated
+    ));
+    assert!(
+        r.observe(&admit(&r, "behaviour:a", "1.2.3.4", "/second"), 404, false)
+            .ban_created
+    );
+}
+
+#[test]
+fn login_timestamp_capacity_is_independent_of_scan_path_capacity() {
+    let conf: pingap_config::PluginConf = toml::from_str(
+        r#"category="behaviour"
+enabled=true
+client_ip_from_peer=true
+abuse_namespace="behaviour:capacity"
+max_interval_samples=64
+max_url_keys=1
+[abuse]
+enabled=true
+[abuse.failed_login]
+mode="block"
+threshold=5
+window="1m"
+ban_ttl="1m"
+path="/login"
+method="POST"
+statuses=[401]
+"#,
+    )
+    .expect("config");
+    assert!(pingap_behaviour::Behaviour::try_from(&conf).is_ok());
 }

@@ -174,6 +174,7 @@ impl TryFrom<&PluginConf> for Behaviour {
                         config.abuse_namespace.as_deref().unwrap_or_default(),
                         config.abuse.clone(),
                         config.max_clients,
+                        config.max_interval_samples,
                         config.max_url_keys,
                     )
                     .map_err(|message| Error::Invalid {

@@ -396,6 +396,15 @@ pub trait PluginProvider: Send + Sync {
     /// * `Option<Arc<dyn Plugin>>` - The plugin if found, None otherwise
     fn get(&self, name: &str) -> Option<Arc<dyn Plugin>>;
 
+    /// Resolve one request against a coherent instance/failure snapshot.
+    /// Providers that publish both maps must override this method atomically.
+    fn resolve(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Arc<dyn Plugin>, PluginMiss> {
+        self.get(name).ok_or_else(|| self.miss(name))
+    }
+
     /// Why `name` did not resolve.
     ///
     /// Only meaningful after [`Self::get`] has returned `None`. Defaults to

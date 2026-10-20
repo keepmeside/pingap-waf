@@ -143,6 +143,11 @@ async fn diff_and_update_config(
             format!("{name}({}) is modified", list.join(","))
         };
 
+        if should_reload_location || should_reload_plugin {
+            // Requests may run during upstream/notification awaits below. Make
+            // desired enforcement visible before any new binding is published.
+            plugin::stage_desired_plugins(&new_config.plugins);
+        }
         if should_reload_upstream {
             match try_update_upstreams(
                 &new_config.upstreams,

@@ -38,6 +38,7 @@ pub fn activate_profiles(
                 cfg.abuse_namespace.as_deref()?,
                 cfg.abuse,
                 cfg.max_clients,
+                cfg.max_interval_samples,
                 cfg.max_url_keys,
             )
             .ok()
