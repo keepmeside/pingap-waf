@@ -318,3 +318,19 @@ export interface Health {
   status: "ok";
   store: "available" | "unavailable";
 }
+
+/** Process-local state; persisted lifecycle history is read separately via Activity. */
+export interface NativeBan {
+  id: string; epoch: string; profile: string; domain: string; client_ip: string;
+  scenario: "failed_login" | "scan"; mode: "block";
+  created_at_ms: number; expires_at_ms: number; remaining_ms: number;
+}
+export interface NativeBanPage { epoch: string; items: NativeBan[]; next_cursor: string | null }
+export interface NativeRelease { outcome: "released" | "already_absent"; audit: "queued" | "degraded" | "not_applicable" }
+export interface NativeLifecycleDetail {
+  version: 1; kind: "detected" | "created" | "released" | "expired";
+  id: string; epoch: string; profile: string; domain: string; client_ip: string;
+  scenario: "failed_login" | "scan"; mode: "detect" | "block";
+  created_at_ms: number; expires_at_ms: number | null; observed_at_ms: number;
+  actor: { id: string | null; username: string }; reason: string;
+}

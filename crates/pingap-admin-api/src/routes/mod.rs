@@ -19,6 +19,7 @@
 //! does check is *ownership*: `Capability::ViewOwnSessions` says a viewer may list sessions,
 //! and it is the handler that makes sure the ones listed are their own.
 
+pub mod abuse;
 pub mod account;
 pub mod activity;
 pub mod alerts;

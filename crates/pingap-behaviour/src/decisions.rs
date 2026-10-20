@@ -4,6 +4,11 @@ use crate::scenario::{
     AbuseConfig, Counters, Evidence, Mode, millis, path_key,
 };
 use pingap_domainstate::{Clock, HostPolicy, Limits, ScopedStore};
+use pingap_events::{
+    AuditStatus, EventQueue, NativeAbuse, NativeActor, NativeBan,
+    NativeBanPage, NativeKind, NativeLifecycle, NativeRelease, Verdict,
+    WafEvent,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -126,6 +131,7 @@ pub struct RegistryCounters {
     pub released: u64,
     pub saturated: u64,
     pub stale_observations: u64,
+    pub dropped_lifecycle: u64,
 }
 struct Client {
     namespace: String,
@@ -137,14 +143,13 @@ struct Client {
     idle_at: u64,
 }
 impl Client {
-    fn settle(&mut self, now: u64) -> bool {
+    fn settle(&mut self, now: u64) -> Option<Decision> {
         if self.ban.as_ref().is_some_and(|b| b.deadline <= now) {
             self.reset += 1;
             self.counters = Counters::default();
-            self.ban = None;
-            return true;
+            return self.ban.take();
         }
-        false
+        None
     }
 }
 struct Bucket<C: Clock> {
@@ -167,6 +172,8 @@ pub struct Registry<C: Clock = MonotonicClock> {
     wall_origin: u64,
     mono_origin: u64,
     inner: Mutex<Inner<C>>,
+    event_queue: Option<Arc<EventQueue>>,
+    lost_lifecycle: AtomicU64,
 }
 impl<C: Clock> Registry<C> {
     pub fn with_clock(limits: Limits, clock: C) -> Self {
@@ -182,6 +189,8 @@ impl<C: Clock> Registry<C> {
             limits,
             wall_origin: pingap_core::now_ms(),
             mono_origin,
+            event_queue: None,
+            lost_lifecycle: AtomicU64::new(0),
             inner: Mutex::new(Inner {
                 profiles: BTreeMap::new(),
                 hosts: None,
@@ -199,12 +208,113 @@ impl<C: Clock> Registry<C> {
         self.wall_origin
             .saturating_add(now.saturating_sub(self.mono_origin))
     }
+    pub fn with_event_queue(mut self, queue: Arc<EventQueue>) -> Self {
+        self.event_queue = Some(queue);
+        self
+    }
+    fn queue(&self) -> Option<Arc<EventQueue>> {
+        self.event_queue.clone().or_else(pingap_events::global)
+    }
+    fn emit(&self, event: NativeLifecycle) -> AuditStatus {
+        let admitted = self.queue().map(|q| q.offer_native(event));
+        if matches!(
+            admitted,
+            Some(
+                pingap_events::Admission::Queued
+                    | pingap_events::Admission::EvictedADetect
+            )
+        ) {
+            AuditStatus::Queued
+        } else {
+            self.lost_lifecycle.fetch_add(1, Ordering::Relaxed);
+            AuditStatus::Degraded
+        }
+    }
+    fn transition(
+        &self,
+        kind: NativeKind,
+        ban: &Decision,
+        now: u64,
+        actor: NativeActor,
+    ) -> AuditStatus {
+        self.emit(NativeLifecycle {
+            version: 1,
+            kind,
+            id: ban.id.clone(),
+            epoch: ban.epoch.clone(),
+            profile: ban.profile.clone(),
+            domain: ban.domain.clone(),
+            client_ip: ban.client_ip.clone(),
+            scenario: ban.scenario.clone(),
+            mode: "block".into(),
+            created_at_ms: ban.created_at_ms,
+            expires_at_ms: Some(ban.expires_at_ms),
+            observed_at_ms: self.wall(now),
+            actor,
+            reason: match kind {
+                NativeKind::Created => "threshold",
+                NativeKind::Released => "operator_release",
+                NativeKind::Expired => "ttl_expired",
+                NativeKind::Detected => "threshold",
+            }
+            .into(),
+        })
+    }
+    fn telemetry(
+        &self,
+        profile: &str,
+        domain: &str,
+        ip: &str,
+        scenario: &str,
+        verdict: Verdict,
+        now: u64,
+    ) {
+        if let Some(queue) = self.queue() {
+            queue.offer(WafEvent {
+                node: domain.into(),
+                domain: domain.into(),
+                profile: profile.into(),
+                rule_id: None,
+                category: Some(format!(
+                    "native.abuse.{}",
+                    if scenario == "failed_login" {
+                        "login"
+                    } else {
+                        scenario
+                    }
+                )),
+                severity: None,
+                score: 0,
+                verdict,
+                client_ip: Some(ip.into()),
+                method: None,
+                uri: None,
+                created_at: (self.wall(now) / 1000) as i64,
+            });
+        }
+    }
+    /// Only called when the request plugin actually returns403, never at creation.
+    pub fn record_block(&self, ban: &Decision) {
+        let now = self.clock.now_ms();
+        self.telemetry(
+            &ban.profile,
+            &ban.domain,
+            &ban.client_ip,
+            &ban.scenario,
+            Verdict::Block,
+            now,
+        );
+    }
     pub fn counters(&self) -> RegistryCounters {
-        self.inner
+        let mut counters = self
+            .inner
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .counters
-            .clone()
+            .clone();
+        counters.dropped_lifecycle =
+            self.lost_lifecycle.load(Ordering::Relaxed);
+        counters
     }
     /// Called only after a runtime provider swap, never by candidate validation.
     pub fn retain_hosts(&self, hosts: HostPolicy) {
@@ -333,7 +443,13 @@ impl<C: Clock> Registry<C> {
         let bucket = inner.domains.get_mut(domain).expect("domain admitted");
         let mut expired = 0;
         let existing = bucket.store.update(bucket.domain, &key, |c| {
-            if c.settle(now) {
+            if let Some(ban) = c.settle(now) {
+                self.transition(
+                    NativeKind::Expired,
+                    &ban,
+                    now,
+                    NativeActor::default(),
+                );
                 expired += 1;
             }
             c.ban.clone()
@@ -353,7 +469,13 @@ impl<C: Clock> Registry<C> {
                     >= profile.max_clients
             {
                 bucket.store.retain(bucket.domain, |_, c| {
-                    if c.settle(now) {
+                    if let Some(ban) = c.settle(now) {
+                        self.transition(
+                            NativeKind::Expired,
+                            &ban,
+                            now,
+                            NativeActor::default(),
+                        );
                         expired += 1;
                     }
                     let keep = c.ban.is_some() || c.idle_at >= now;
@@ -446,7 +568,15 @@ impl<C: Clock> Registry<C> {
         let result = bucket
             .store
             .update(bucket.domain, &ticket.key, |c| {
-                expired = c.settle(now);
+                if let Some(ban) = c.settle(now) {
+                    self.transition(
+                        NativeKind::Expired,
+                        &ban,
+                        now,
+                        NativeActor::default(),
+                    );
+                    expired = true;
+                }
                 if c.generation != ticket.generation
                     || c.incarnation != ticket.incarnation
                     || c.reset != ticket.reset
@@ -467,6 +597,34 @@ impl<C: Clock> Registry<C> {
                     detected: !crossings.is_empty(),
                     ban_created: false,
                 };
+                for (scenario, mode, _) in &crossings {
+                    if *mode == Mode::Detect {
+                        self.emit(NativeLifecycle {
+                            version: 1,
+                            kind: NativeKind::Detected,
+                            id: format!("{}-{sequence}-{scenario}", self.epoch),
+                            epoch: self.epoch.clone(),
+                            profile: ticket.namespace.clone(),
+                            domain: ticket.domain.clone(),
+                            client_ip: ticket.identity.clone(),
+                            scenario: (*scenario).into(),
+                            mode: "detect".into(),
+                            created_at_ms: self.wall(now),
+                            expires_at_ms: None,
+                            observed_at_ms: self.wall(now),
+                            actor: NativeActor::default(),
+                            reason: "threshold".into(),
+                        });
+                        self.telemetry(
+                            &ticket.namespace,
+                            &ticket.domain,
+                            &ticket.identity,
+                            scenario,
+                            Verdict::Detect,
+                            now,
+                        );
+                    }
+                }
                 if let Some((scenario, _, ttl)) =
                     crossings.iter().find(|(_, mode, _)| *mode == Mode::Block)
                 {
@@ -482,6 +640,12 @@ impl<C: Clock> Registry<C> {
                         expires_at_ms: self.wall(deadline),
                         deadline,
                     });
+                    self.transition(
+                        NativeKind::Created,
+                        c.ban.as_ref().expect("created ban"),
+                        now,
+                        NativeActor::default(),
+                    );
                     c.idle_at = c.idle_at.max(deadline);
                     evidence.ban_created = true;
                 }
@@ -495,17 +659,26 @@ impl<C: Clock> Registry<C> {
             inner.counters.stale_observations += 1;
         }
         if result.detected {
+            inner.sequence = sequence;
             inner.counters.detected += 1;
         }
         if result.ban_created {
-            inner.sequence = sequence;
             inner.counters.created += 1;
         }
         result
     }
     pub fn active_decisions(&self, after: u64, limit: usize) -> Vec<Decision> {
+        self.filtered_decisions(None, None, after, limit).0
+    }
+    fn filtered_decisions(
+        &self,
+        profile: Option<&str>,
+        domain: Option<&str>,
+        after: u64,
+        limit: usize,
+    ) -> (Vec<Decision>, u64) {
         if limit == 0 {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let mut rows = BTreeMap::new();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -513,10 +686,18 @@ impl<C: Clock> Registry<C> {
         let mut expired = 0;
         for bucket in inner.domains.values_mut() {
             bucket.store.retain(bucket.domain, |_, c| {
-                if c.settle(now) {
+                if let Some(ban) = c.settle(now) {
+                    self.transition(
+                        NativeKind::Expired,
+                        &ban,
+                        now,
+                        NativeActor::default(),
+                    );
                     expired += 1;
                 }
                 if let Some(ban) = &c.ban
+                    && profile.is_none_or(|p| p == ban.profile)
+                    && domain.is_none_or(|d| d == ban.domain)
                     && let Some(seq) = ban
                         .id
                         .rsplit('-')
@@ -537,7 +718,7 @@ impl<C: Clock> Registry<C> {
             });
         }
         inner.counters.expired += expired;
-        rows.into_values().collect()
+        (rows.into_values().collect(), self.wall(now))
     }
     /// Exact decision ID prevents a delayed release from removing a newer ban.
     pub fn release(
@@ -547,6 +728,22 @@ impl<C: Clock> Registry<C> {
         identity: &str,
         id: &str,
     ) -> bool {
+        self.release_as(namespace, domain, identity, id, NativeActor::default())
+            .outcome
+            == "released"
+    }
+    pub fn release_as(
+        &self,
+        namespace: &str,
+        domain: &str,
+        identity: &str,
+        id: &str,
+        actor: NativeActor,
+    ) -> NativeRelease {
+        let absent = NativeRelease {
+            outcome: "already_absent",
+            audit: AuditStatus::NotApplicable,
+        };
         let key = format!(
             "{}:{}",
             digest_hex(namespace.as_bytes()),
@@ -558,16 +755,31 @@ impl<C: Clock> Registry<C> {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let now = self.clock.now_ms();
         let Some(bucket) = inner.domains.get_mut(domain) else {
-            return false;
+            return absent;
         };
         let mut expired = false;
+        let mut audit = AuditStatus::NotApplicable;
         let released = bucket
             .store
             .update(bucket.domain, &key, |c| {
-                expired = c.settle(now);
+                if let Some(ban) = c.settle(now) {
+                    self.transition(
+                        NativeKind::Expired,
+                        &ban,
+                        now,
+                        NativeActor::default(),
+                    );
+                    expired = true;
+                }
                 if c.ban.as_ref().is_none_or(|b| b.id != id) {
                     return false;
                 }
+                audit = self.transition(
+                    NativeKind::Released,
+                    c.ban.as_ref().expect("matched ban"),
+                    now,
+                    actor.clone(),
+                );
                 c.reset += 1;
                 c.ban = None;
                 c.counters = Counters::default();
@@ -580,7 +792,95 @@ impl<C: Clock> Registry<C> {
         if released {
             inner.counters.released += 1;
         }
-        released
+        NativeRelease {
+            outcome: if released {
+                "released"
+            } else {
+                "already_absent"
+            },
+            audit,
+        }
+    }
+}
+impl<C: Clock> NativeAbuse for Registry<C> {
+    fn epoch(&self) -> String {
+        self.epoch.clone()
+    }
+    fn list(
+        &self,
+        profile: Option<&str>,
+        domain: Option<&str>,
+        after: u64,
+        limit: usize,
+    ) -> NativeBanPage {
+        let (rows, now) =
+            self.filtered_decisions(profile, domain, after, limit);
+        let next_cursor = if rows.len() == limit {
+            rows.last().map(|b| {
+                format!(
+                    "{}:{}",
+                    self.epoch,
+                    b.id.rsplit('-').next().unwrap_or("0")
+                )
+            })
+        } else {
+            None
+        };
+        NativeBanPage {
+            epoch: self.epoch.clone(),
+            next_cursor,
+            items: rows
+                .into_iter()
+                .map(|b| NativeBan {
+                    id: b.id,
+                    epoch: b.epoch,
+                    profile: b.profile,
+                    domain: b.domain,
+                    client_ip: b.client_ip,
+                    scenario: b.scenario,
+                    mode: "block",
+                    created_at_ms: b.created_at_ms,
+                    expires_at_ms: b.expires_at_ms,
+                    remaining_ms: b.expires_at_ms.saturating_sub(now),
+                })
+                .collect(),
+        }
+    }
+    fn release(
+        &self,
+        profile: &str,
+        domain: &str,
+        ip: &str,
+        id: &str,
+        actor: NativeActor,
+    ) -> NativeRelease {
+        self.release_as(profile, domain, ip, id, actor)
+    }
+}
+/// Binary-owned adapter to the process registry; APIs never depend on detector code.
+pub struct NativeRuntime;
+impl NativeAbuse for NativeRuntime {
+    fn epoch(&self) -> String {
+        registry().epoch().into()
+    }
+    fn list(
+        &self,
+        profile: Option<&str>,
+        domain: Option<&str>,
+        after: u64,
+        limit: usize,
+    ) -> NativeBanPage {
+        NativeAbuse::list(registry(), profile, domain, after, limit)
+    }
+    fn release(
+        &self,
+        profile: &str,
+        domain: &str,
+        ip: &str,
+        id: &str,
+        actor: NativeActor,
+    ) -> NativeRelease {
+        registry().release_as(profile, domain, ip, id, actor)
     }
 }
 static GLOBAL: OnceLock<Registry> = OnceLock::new();

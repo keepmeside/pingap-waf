@@ -3,16 +3,20 @@
 from pathlib import Path
 import re
 import sys
+from urllib.parse import urlsplit, parse_qs
 
 run = Path(sys.argv[1])
 secrets = set()
-for name in ("candidate.env", "browser.env"):
+for name in ("candidate.env", "browser.env", "tester.env"):
     path = run / name
     if path.exists():
         for line in path.read_text().splitlines():
             key, _, value = line.partition("=")
-            if key in ("PINGAP_ADMIN_PASSWORD", "PINGAP_E2E_PASSWORD") and value:
+            if key in ("PINGAP_ADMIN_PASSWORD", "PINGAP_E2E_PASSWORD", "PASSWORD") and value:
                 secrets.add(value)
+            if key == "PINGAP_ADMIN_ADDR":
+                for secret in parse_qs(urlsplit("http://" + value).query).get("totp_key", []):
+                    secrets.add(secret)
 for root in (run, Path(sys.argv[2])):
     if not root.exists():
         continue

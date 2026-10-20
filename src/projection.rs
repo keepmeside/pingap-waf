@@ -64,6 +64,56 @@ fn rollup_window(now: i64) -> TimeRange {
     }
 }
 
+/// One bounded batch per tick, using the same lazy store as admin and rollups.
+/// No connection is opened before Pingora forks or on a request thread.
+struct SecurityEventTask {
+    store: LazyStore,
+    queue: Arc<pingap_controlplane::events::EventQueue>,
+}
+#[async_trait::async_trait]
+impl BackgroundTask for SecurityEventTask {
+    async fn execute(&self, _count: u32) -> Result<bool, pingap_core::Error> {
+        if self.queue.is_empty() {
+            return Ok(false);
+        }
+        let store = self
+            .store
+            .get()
+            .await
+            .map_err(|message| {
+                self.queue
+                    .record_write_failure(self.queue.pending_lifecycle() > 0);
+                pingap_core::Error::Invalid { message }
+            })?
+            .clone();
+        pingap_controlplane::events::EventWriter::new(self.queue.clone(), store)
+            .flush()
+            .await
+            .map(|written| written > 0)
+            .map_err(|e| pingap_core::Error::Invalid {
+                message: e.to_string(),
+            })
+    }
+}
+pub fn new_security_event_task(store_path: String) -> Box<dyn BackgroundTask> {
+    use pingap_controlplane::events::{
+        DEFAULT_BATCH, EventQueue, global, install,
+    };
+    let queue = global().unwrap_or_else(|| {
+        // Reuse the writer's existing bounded batch budget for the shared queue.
+        let queue =
+            Arc::new(EventQueue::new(DEFAULT_BATCH).expect("positive batch"));
+        match install(queue.clone()) {
+            Ok(()) => queue,
+            Err(_) => global().expect("installed queue"),
+        }
+    });
+    Box::new(SecurityEventTask {
+        store: LazyStore::at(store_path),
+        queue,
+    })
+}
+
 pub struct WafMetricsTask {
     store: LazyStore,
 }
@@ -1725,5 +1775,46 @@ max_baseline_age_days = 30
             "nothing changed between cycles, so the sweep must not have \
              re-restored and the write-back must not have re-written"
         );
+    }
+    #[tokio::test]
+    async fn runtime_event_task_uses_the_shared_store_and_preserves_producer_time()
+     {
+        use pingap_controlplane::events::{
+            EventQueue, NativeActor, NativeKind, NativeLifecycle,
+        };
+        let h = harness().await;
+        let queue =
+            Arc::new(EventQueue::new(2).expect("test fixture succeeds"));
+        queue.offer_native(NativeLifecycle {
+            version: 1,
+            kind: NativeKind::Created,
+            id: "test-decision".into(),
+            epoch: "test-epoch".into(),
+            profile: "behaviour:test".into(),
+            domain: "a.test".into(),
+            client_ip: "::1".into(),
+            scenario: "scan".into(),
+            mode: "block".into(),
+            created_at_ms: 1234000,
+            expires_at_ms: Some(1235000),
+            observed_at_ms: 1234000,
+            actor: NativeActor::default(),
+            reason: "threshold".into(),
+        });
+        let task = SecurityEventTask {
+            store: LazyStore::ready(h.store.clone()),
+            queue: queue.clone(),
+        };
+        assert!(task.execute(0).await.expect("test fixture succeeds"));
+        assert!(!task.execute(1).await.expect("test fixture succeeds"));
+        assert!(queue.is_empty());
+        let rows = h
+            .store
+            .read_activity(TimeRange::default())
+            .await
+            .expect("test fixture succeeds");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].created_at, 1234);
+        assert_eq!(rows[0].action, "native.ban.created");
     }
 }

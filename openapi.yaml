@@ -1275,6 +1275,72 @@ paths:
         '409':
           $ref: '#/components/responses/NotApplied'
 
+  /abuse/bans:
+    get:
+      tags: [audit]
+      operationId: listNativeBans
+      summary: Active process-local native bans
+      description: Runtime state, not proof of durable audit delivery. Filters precede pagination. Restart changes epoch; refresh the first page.
+      x-required-capability: view_events
+      parameters:
+        - {name: profile, in: query, schema: {type: string}}
+        - {name: domain, in: query, schema: {type: string}}
+        - {name: cursor, in: query, schema: {type: string}, description: Epoch and sequence returned by the previous page.}
+      responses:
+        '200':
+          description: Active bans, up to 100 per page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [epoch, items, next_cursor]
+                properties:
+                  epoch: {type: string}
+                  next_cursor: {type: string, nullable: true}
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/NativeBan'}
+        '400': {description: Invalid or obsolete runtime cursor.}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {description: Native runtime is unavailable.}
+  /abuse/bans/{id}:
+    delete:
+      tags: [audit]
+      operationId: releaseNativeBan
+      summary: Release an exact runtime decision
+      description: Requires a completed second factor. Does not create a config version. Stale IDs return already_absent without changing newer evidence. Queued audit is not a persistence acknowledgement.
+      x-required-capability: edit_policy
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [profile, domain, client_ip]
+              properties:
+                profile: {type: string}
+                domain: {type: string}
+                client_ip: {type: string}
+      responses:
+        '200':
+          description: Runtime outcome and audit admission status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [outcome, audit]
+                properties:
+                  outcome: {type: string, enum: [released, already_absent]}
+                  audit: {type: string, enum: [queued, degraded, not_applicable]}
+        '400': {description: Invalid decision ID or owner body.}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {description: Native runtime is unavailable.}
+
   /activity:
     get:
       tags: [audit]
@@ -2032,6 +2098,21 @@ components:
               $ref: '#/components/schemas/CertificateView'
 
   schemas:
+    NativeBan:
+      type: object
+      required: [id, epoch, profile, domain, client_ip, scenario, mode, created_at_ms, expires_at_ms, remaining_ms]
+      properties:
+        id: {type: string}
+        epoch: {type: string}
+        profile: {type: string}
+        domain: {type: string}
+        client_ip: {type: string}
+        scenario: {type: string, enum: [failed_login, scan]}
+        mode: {type: string, enum: [block]}
+        created_at_ms: {type: integer, format: int64}
+        expires_at_ms: {type: integer, format: int64}
+        remaining_ms: {type: integer, format: int64}
+
     Error:
       type: object
       required: [error, action]

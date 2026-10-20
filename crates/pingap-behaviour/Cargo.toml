@@ -12,6 +12,7 @@ name = "pingap_behaviour"
 path = "src/lib.rs"
 
 [dependencies]
+pingap-events = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }

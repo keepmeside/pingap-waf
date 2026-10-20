@@ -24,7 +24,7 @@ import { putConfig } from "@/helpers/config-write";
 import { policyPayload } from "@/helpers/policy-payload";
 import type { ApiState } from "@/queries/api";
 import type {
-  Activity, AlertHistory, AlertRuleRecord, BackupFileRecord, BackupScheduleRecord,
+  NativeBan, NativeBanPage, NativeRelease, Activity, AlertHistory, AlertRuleRecord, BackupFileRecord, BackupScheduleRecord,
   BackupView, CertificateView, ConfigStatus, Dashboard, Domain, Health, Listener,
   NodeView, NotificationChannel, PerformanceMetricRecord, PluginConf, Profile,
   RollbackResult, SecondFactorSetup, SecondFactorStatus, SessionView, Upstream,
@@ -264,3 +264,19 @@ export const useDisableSecondFactor = () =>
 // A config-version status is part of the projection contract; re-export for callers that
 // branch on it rather than import twice.
 export type { ConfigStatus };
+
+export const useNativeBans = (params = "") =>
+  useGet<NativeBanPage>(`native-bans${params}`, `/abuse/bans${params}`);
+export function useReleaseNativeBan() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (ban: NativeBan) => {
+      const response = await request.delete<NativeRelease>(`/abuse/bans/${encodeURIComponent(ban.id)}`, {
+        data: { profile: ban.profile, domain: ban.domain, client_ip: ban.client_ip },
+      });
+      return response.data;
+    },
+    onSettled: () => client.invalidateQueries({ predicate: query => query.queryKey[0] === "admin" &&
+      ["native-bans", "activity", "detection-metrics"].some(prefix => String(query.queryKey[1]).startsWith(prefix)) }),
+  });
+}

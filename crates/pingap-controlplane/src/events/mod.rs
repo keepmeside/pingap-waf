@@ -21,5 +21,9 @@
 
 pub mod writer;
 
-pub use pingap_events::{Admission, EventQueue, Verdict, WafEvent};
+pub use pingap_events::{
+    Admission, AuditStatus, EventQueue, NativeAbuse, NativeActor, NativeBan,
+    NativeBanPage, NativeKind, NativeLifecycle, NativeRelease, Notification,
+    Verdict, WafEvent, global, install,
+};
 pub use writer::{DEFAULT_BATCH, EventWriter};

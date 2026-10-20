@@ -68,6 +68,8 @@ pub type DetectionMetricsSource =
 /// with.
 pub struct AppState {
     pub store: Arc<dyn ControlPlaneStore>,
+    pub(crate) native_abuse:
+        Option<Arc<dyn pingap_controlplane::events::NativeAbuse>>,
     pub applier: Arc<Applier>,
     pub(crate) config_source: Option<Arc<dyn ConfigSource>>,
     /// The peer inventory over the config `Storage` — the etcd heartbeat, not the Turso
@@ -103,6 +105,7 @@ impl AppState {
     ) -> Self {
         Self {
             store,
+            native_abuse: None,
             applier,
             config_source: None,
             cluster: None,
@@ -112,6 +115,14 @@ impl AppState {
             totp,
             totp_key,
         }
+    }
+
+    pub fn with_native_abuse(
+        mut self,
+        runtime: Arc<dyn pingap_controlplane::events::NativeAbuse>,
+    ) -> Self {
+        self.native_abuse = Some(runtime);
+        self
     }
 
     /// Drift reads storage, never the last config the process already knows about.

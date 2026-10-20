@@ -9,5 +9,8 @@ publish = false
 name = "pingap_events"
 path = "src/lib.rs"
 
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
 [lints]
 workspace = true

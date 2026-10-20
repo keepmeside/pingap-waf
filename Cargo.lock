@@ -4480,9 +4480,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "http",
+ "pingap-behaviour",
  "pingap-config",
  "pingap-controlplane",
  "pingap-core",
+ "pingap-domainstate",
  "pingap-waf",
  "pretty_assertions",
  "serde",
@@ -4490,6 +4492,7 @@ dependencies = [
  "snafu",
  "tempfile",
  "tokio",
+ "toml",
  "urlencoding",
 ]
 
@@ -4505,6 +4508,7 @@ dependencies = [
  "pingap-config",
  "pingap-core",
  "pingap-domainstate",
+ "pingap-events",
  "pingap-logger",
  "pingap-plugin",
  "pingora",
@@ -4752,6 +4756,9 @@ dependencies = [
 [[package]]
 name = "pingap-events"
 version = "0.13.10"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "pingap-health"

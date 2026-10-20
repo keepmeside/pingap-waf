@@ -253,7 +253,8 @@ impl Plugin for Behaviour {
                 session.req_header().uri.path(),
                 domain != pingap_domainstate::OVERFLOW_LABEL,
             ) {
-                crate::decisions::Admission::Blocked(_) => {
+                crate::decisions::Admission::Blocked(ban) => {
+                    crate::decisions::registry().record_block(&ban);
                     ctx.add_variable("native_abuse_action", "block");
                     return Ok(RequestPluginResult::Respond(
                         pingap_core::HttpResponse::builder(

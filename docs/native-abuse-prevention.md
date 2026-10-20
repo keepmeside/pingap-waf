@@ -19,3 +19,86 @@ On logout or acceptance of a new login token, clear authenticated query data and
 Pending raw-config reads are scoped to the login token that started them: a response from a logged-out or replaced session cannot repopulate raw configuration or full-config text after clearing the cache.
 
 A delayed401 from a replaced session is still returned as an error to its caller, but cannot clear the newer login token. Current-session401 behavior remains unchanged.
+
+## Runtime bans and permanent history
+
+Native protection remains process-local. `GET /api/abuse/bans` lists active
+bans with their runtime epoch, fixed expiry and remaining lifetime. Optional
+`profile` and `domain` filters are applied before pagination. A cursor belongs
+to one runtime epoch; refresh from the first page after a restart. The list
+requires `ViewEvents` and describes enforcement, not durable audit delivery.
+
+`DELETE /api/abuse/bans/{id}` requires `EditPolicy` and a two-factor session.
+Its JSON body names `profile`, `domain`, and `client_ip`. All four identity
+components must match the active decision. A stale or absent ID returns
+`already_absent` and never resets a newer decision or produces a second audit
+transition. A successful release returns `released` with `audit: queued` or
+`degraded`. Queued means admitted to the bounded writer queue, not persisted.
+Release changes runtime state and does not create a configuration version.
+
+The shared event queue transports typed lifecycle notifications. Detection,
+creation, operator release and lazily observed expiry map to `native.abuse.detected`,
+`native.ban.created`, `native.ban.released`, and `native.ban.expired` in the
+existing append-only activity history (`ViewEvents`). Detail JSON is versioned
+and contains only profile/domain/IP/scenario/epoch/transition metadata. It
+contains no URL, body, cookies, tokens or credentials. Stored history is never
+purged automatically. The WAF findings view (`ViewLogs`) remains telemetry with
+its existing retention; creating a ban is not an HTTP403 or a blocked request.
+An actual subsequent blocked request produces Block telemetry. Detection-mode
+crossings produce Detect telemetry. Release and expiry produce no WAF event.
+
+Queue saturation and failed writes expose degraded/loss counters. Enforcement
+continues independently of audit storage. A failed writer retries only entries
+not yet acknowledged; no unbounded secondary queue is created. Expiry records
+both the fixed expiry and when it was first observed; no traffic means no
+promise of a notification at the expiry instant.
+
+The executable installs one shared event queue when an admin store is configured.
+Its capacity reuses `DEFAULT_BATCH` (256), with one writer batch per second through
+the existing process background-task service. This is an in-process consumer,
+not another container or external scheduler. The database opens lazily after
+Pingora service startup for fork safety. With no admin store, enforcement still
+runs and native audit delivery reports degraded. Worker-open and flush failures
+are counted; `native_event_delivery` in detection metrics exposes queue/write
+health. The runtime-state counters also count lifecycle notifications that
+could not enter a queue. Neither counter claims those events were persisted.
+
+### Measured storage and operator response
+
+The isolated 16 MiB candidate fixture on 2026-10-20 persisted 163 native
+detection/creation/release/expiry rows in 3.651 seconds (44.65 rows/second observed). Its database
+was 4,096 bytes and its WAL grew from 440,872 to 3,386,672 bytes: 18,072.39 bytes
+of database-plus-uncheckpointed-WAL growth per lifecycle row in that short run.
+This includes transaction/index overhead and is not a steady checkpointed row
+size or a maximum. The earlier synthetic SQLite estimate of about 479 bytes
+per row does not describe this real writer/WAL pattern. At a hypothetical one
+transition/second with the same observed pattern, growth would be 1.56 GB/day,
+46.84 GB/30 days or 569.93 GB/year. These are projections, not reserved capacity.
+The final cumulative resource gate must also measure its configured state and
+metadata. Evidence: `.cross-review/implementation/native-api.if4hyeg8/result.json`.
+
+The fixture filled the remaining test volume with a run-owned pressure file
+(13,385,728 bytes). Existing committed rows remained readable, protected
+traffic still received403, an administrative write returned503, and the native
+writer failure counter increased. Removing only that pressure file restored
+capacity; the queued history then persisted, the original rows remained, and
+protection still returned403. No activity row was removed to recover space.
+
+Before rollout, resolve the actual database directory from the operator config.
+Measure its filesystem with `df -Pk <db-directory>` and database/WAL/backup sizes
+with `du -k <db-file> <wal-file> <backup-directory>`. Sample both over a
+representative traffic interval, including a checkpoint and backup cycle. Compute
+remaining ingest time from available bytes minus the measured backup/checkpoint
+working-space requirement, divided by observed growth per second. Use that
+value in the existing external disk monitor: warn before the actual storage
+expansion/backup lead time plus the operator response window is exhausted.
+There is no universal safe percentage or unlimited finite volume.
+
+On warning, provision more capacity or migrate a consistent backup to a larger
+volume. Rehearse export/restore on a copy using the existing backup API/runbook,
+compare history counts and readable IDs, then schedule the separate production
+rollout. Keep the original until the restored copy verifies. Never purge native
+history to free space. If full, preserve the database/WAL, inspect delivery/write
+failure counters and administrative errors, add capacity, then verify new rows
+resume and previous history stays readable. No monitor, volume expansion or
+production migration is installed by this plan execution.

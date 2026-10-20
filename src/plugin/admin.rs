@@ -362,6 +362,7 @@ impl AdminServe {
                     auth.totp_guard(),
                     auth.totp_key(),
                 )
+                .with_native_abuse(Arc::new(pingap_behaviour::decisions::NativeRuntime))
                 .with_config_source(Arc::new(
                     crate::projection::ConfigManagerSource::new(
                         self.manager.clone(),
@@ -411,6 +412,15 @@ impl AdminServe {
                         "behaviour_tracked":
                             pingap_behaviour::tracked_snapshot(),
                         "native_abuse": pingap_behaviour::decisions::registry().counters(),
+                        "native_event_delivery": pingap_controlplane::events::global().map(|q| serde_json::json!({
+                            "queued_lifecycle":q.queued_lifecycle(),
+                            "dropped_lifecycle":q.dropped_lifecycle(),
+                            "dropped_native_detection":q.dropped_native_detection(),
+                            "dropped_detect_telemetry":q.dropped_detect(),
+                            "counted_enforced_telemetry":q.counted_enforced(),
+                            "write_failures":q.write_failures(),
+                            "lifecycle_write_failures":q.lifecycle_write_failures(),
+                        })),
                         "native_state_epoch": pingap_behaviour::decisions::registry().epoch(),
                         "adaptive":
                             pingap_adaptive::domain_state_snapshot(),

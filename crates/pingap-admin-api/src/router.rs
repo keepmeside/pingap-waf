@@ -320,6 +320,18 @@ fn build() -> Vec<Route> {
         // ---- activity ----------------------------------------------------------------
         Route {
             method: Method::GET,
+            path: "/abuse/bans",
+            access: Access::Needs(Capability::ViewEvents),
+            handler: handler!(routes::abuse::list),
+        },
+        Route {
+            method: Method::DELETE,
+            path: "/abuse/bans/:id",
+            access: Access::Needs(Capability::EditPolicy),
+            handler: handler!(routes::abuse::release),
+        },
+        Route {
+            method: Method::GET,
             path: "/activity",
             access: Access::Needs(Capability::ViewEvents),
             handler: handler!(routes::activity::list),

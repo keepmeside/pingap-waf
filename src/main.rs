@@ -912,6 +912,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     // `--admin`, because the store that holds the versions to compare against does
     // not exist without it.
     if let Some(store_path) = crate::plugin::admin_store_path() {
+        // The queue/worker library also needs a runtime consumer. Its service is
+        // process-local, uses the admin store, and never opens a DB before fork.
+        let events = pingap_core::BackgroundTaskService::new_single(
+            "security_event_writer",
+            Duration::from_secs(1),
+            "security_events",
+            projection::new_security_event_task(store_path.clone()),
+        );
+        my_server
+            .add_service(background_service("security_event_writer", events));
         simple_background_service.add_task(
             "config_drift",
             projection::new_drift_detection_task(

@@ -27,7 +27,9 @@
 //! meaningless at the moment the store is struggling.
 
 use crate::repository::ControlPlaneStore;
-use pingap_events::{Admission, EventQueue};
+use crate::repository::NewActivity;
+use pingap_events::{Admission, EventQueue, Notification};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -73,35 +75,86 @@ impl EventWriter {
     /// starved by a producer that outpaces the store: it writes a bounded amount, returns,
     /// and the next tick writes the next bounded amount.
     pub async fn flush(&self) -> crate::repository::Result<usize> {
-        let batch = self.queue.drain(self.batch);
-        if batch.is_empty() {
-            return Ok(0);
-        }
-        let count = batch.len();
-        if let Err(error) = self.store.record_waf_events(&batch).await {
-            let mut restored = 0usize;
-            for event in batch {
-                if !matches!(
-                    self.queue.offer(event),
-                    Admission::Dropped | Admission::Counted
-                ) {
-                    restored += 1;
+        let mut pending: VecDeque<_> =
+            self.queue.drain_notifications(self.batch).into();
+        let count = pending.len();
+        while let Some(first) = pending.front() {
+            let (result, acknowledged) = match first {
+                Notification::Waf(_) => {
+                    let events: Vec<_> = pending
+                        .iter()
+                        .take_while(|n| matches!(n, Notification::Waf(_)))
+                        .filter_map(|n| {
+                            if let Notification::Waf(e) = n {
+                                Some(e.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    (
+                        self.store.record_waf_events(&events).await.map(|_| ()),
+                        events.len(),
+                    )
+                },
+                Notification::Native(event) => {
+                    let result = async {
+                        // The authenticated actor snapshot survives account removal. Keep
+                        // the original identity in detail, and only use an extant FK.
+                        let actor_id = match event.actor.id.as_deref() {
+                            Some(id) => self
+                                .store
+                                .find_user_by_id(id)
+                                .await?
+                                .map(|user| user.id),
+                            None => None,
+                        };
+                        let entry = NewActivity {
+                            actor_id,
+                            actor_username: event.actor.username.clone(),
+                            action: event.kind.action().into(),
+                            target: event.id.clone(),
+                            config_version: None,
+                            ip: None,
+                            user_agent: None,
+                            detail: Some(
+                                serde_json::to_string(event)
+                                    .expect("typed lifecycle serializes"),
+                            ),
+                        };
+                        self.store
+                            .record_activity(
+                                entry,
+                                (event.observed_at_ms / 1000) as i64,
+                            )
+                            .await
+                            .map(|_| ())
+                    }
+                    .await;
+                    (result, 1)
+                },
+            };
+            if let Err(error) = result {
+                self.queue.record_write_failure(
+                    pending
+                        .iter()
+                        .any(|e| matches!(e, Notification::Native(_))),
+                );
+                let unacknowledged = pending.len();
+                let mut restored = 0;
+                for event in pending {
+                    if !matches!(
+                        self.queue.offer_notification(event),
+                        Admission::Dropped | Admission::Counted
+                    ) {
+                        restored += 1;
+                    }
                 }
+                warn!(target:"controlplane::events", batch=count, unacknowledged, restored, lost=unacknowledged-restored, error=%error,
+                    "event write failed; unacknowledged notifications returned to bounded queue");
+                return Err(error);
             }
-            // Both numbers matter and neither is derivable from the other: how many came
-            // back says whether the failure cost anything, and the queue's own counters say
-            // what it cost. A warning rather than an error because the findings are not lost
-            // yet — the next flush retries them — and the store being briefly unreachable is
-            // a state this system is required to survive.
-            warn!(
-                target: "controlplane::events",
-                batch = count,
-                restored,
-                lost = count - restored,
-                error = %error,
-                "a WAF event batch did not write and was put back"
-            );
-            return Err(error);
+            pending.drain(..acknowledged);
         }
         Ok(count)
     }

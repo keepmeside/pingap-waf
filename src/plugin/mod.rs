@@ -306,14 +306,16 @@ impl ProviderSnapshot {
     ) -> std::result::Result<Arc<dyn Plugin>, PluginMiss> {
         if let Some(desired) =
             self.desired.get(name).filter(|policy| policy.required)
-        {
-            if self
+            && self
                 .plugins
                 .get(name)
                 .is_none_or(|plugin| plugin.config_key() != desired.key)
-            {
-                return Err(PluginMiss::Failed{category:desired.category.clone(),reason:"required desired policy is unavailable or awaiting publication".into(),enforcement_required:true});
-            }
+        {
+            return Err(PluginMiss::Failed {
+                category: desired.category.clone(),
+                reason: "required desired policy is unavailable or awaiting publication".into(),
+                enforcement_required: true,
+            });
         }
         self.plugins.get(name).cloned().ok_or_else(|| {
             self.failures
@@ -438,12 +440,10 @@ pub fn parse_plugins(
                 .and_then(|v| v.get("enabled"))
                 .and_then(|v| v.as_bool())
                 == Some(true)
-        {
-            if let Some(namespace) =
+            && let Some(namespace) =
                 conf.get("abuse_namespace").and_then(|v| v.as_str())
-            {
-                *namespaces.entry(namespace).or_default() += 1;
-            }
+        {
+            *namespaces.entry(namespace).or_default() += 1;
         }
     }
     for (name, conf) in configs.iter() {
@@ -552,12 +552,10 @@ pub fn try_init_plugins(
                 .and_then(|v| v.get("enabled"))
                 .and_then(|v| v.as_bool())
                 == Some(true)
-        {
-            if let Some(namespace) =
+            && let Some(namespace) =
                 conf.get("abuse_namespace").and_then(|v| v.as_str())
-            {
-                *abuse_namespace_counts.entry(namespace).or_default() += 1;
-            }
+        {
+            *abuse_namespace_counts.entry(namespace).or_default() += 1;
         }
     }
     let mut plugin_configs: Vec<(String, PluginConf)> = plugins
