@@ -6,7 +6,7 @@ describe("native lifecycle history", () => {
     expect(parseNativeLifecycle(JSON.stringify(entry))).toEqual(entry);
   });
   it("refuses malformed, unsupported and incompatible shapes", () => {
-    for (const value of [null, "invalid", "null", "[]", JSON.stringify({...entry, version:2}), JSON.stringify({...entry, observed_at_ms:"1500"}), JSON.stringify({...entry,kind:"unknown"})]) expect(parseNativeLifecycle(value)).toBeNull();
+    for (const value of [null, "invalid", "null", "[]", JSON.stringify({...entry, version:2}), JSON.stringify({...entry, observed_at_ms:"1500"}), JSON.stringify({...entry,kind:"unknown"}), JSON.stringify({...entry,kind:["released"]}), JSON.stringify({...entry,scenario:["scan"]}), JSON.stringify({...entry,mode:["block"]}), JSON.stringify({...entry,kind:["released"],scenario:["scan"],mode:["block"]})]) expect(parseNativeLifecycle(value)).toBeNull();
   });
   it("returns only known metadata and treats payload-shaped text as plain text", () => {
     const parsed = parseNativeLifecycle(JSON.stringify({...entry, domain:"<img src=x onerror=alert(1)>", body:"credential", cookie:"token"}));

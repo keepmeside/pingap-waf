@@ -7,8 +7,8 @@ export function parseNativeLifecycle(detail: string | null): NativeLifecycleDeta
     const value: unknown = JSON.parse(detail);
     if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
     const row = value as Record<string, unknown>;
-    if (row.version !== 1 || !["detected", "created", "released", "expired"].includes(String(row.kind)) ||
-        !["failed_login", "scan"].includes(String(row.scenario)) || !["detect", "block"].includes(String(row.mode))) return null;
+    if (row.version !== 1 || typeof row.kind !== "string" || !["detected", "created", "released", "expired"].includes(row.kind) ||
+        typeof row.scenario !== "string" || !["failed_login", "scan"].includes(row.scenario) || typeof row.mode !== "string" || !["detect", "block"].includes(row.mode)) return null;
     for (const key of ["id", "epoch", "profile", "domain", "client_ip", "reason"]) if (typeof row[key] !== "string") return null;
     for (const key of ["created_at_ms", "observed_at_ms"]) if (typeof row[key] !== "number" || !Number.isFinite(row[key]) || row[key] < 0) return null;
     if (row.expires_at_ms !== null && (typeof row.expires_at_ms !== "number" || !Number.isFinite(row.expires_at_ms) || row.expires_at_ms < 0)) return null;
