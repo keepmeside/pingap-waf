@@ -530,12 +530,14 @@ impl AdminServe {
         replace_include: bool,
     ) -> pingora::Result<PingapConfig> {
         let config = self.manager.load_all().await.map_err(|e| {
-            error!(target: LOG_TARGET, "failed to load config: {e}");
-            pingap_core::new_internal_error(400, e)
+            let _ = e;
+            error!(target: LOG_TARGET, "failed to load config");
+            pingap_core::new_internal_error(400, "failed to load config")
         })?;
         let config = config.to_pingap_config(replace_include).map_err(|e| {
-            error!(target: LOG_TARGET, "failed to convert config: {e}");
-            pingap_core::new_internal_error(400, e)
+            let _ = e;
+            error!(target: LOG_TARGET, "failed to convert config");
+            pingap_core::new_internal_error(400, "failed to convert config")
         })?;
         Ok(config)
     }
@@ -543,9 +545,11 @@ impl AdminServe {
         &self,
         category: &str,
     ) -> pingora::Result<HttpResponse> {
-        let conf = self.load_config(false).await?;
+        let mut conf = self.load_config(false).await?;
+        pingap_admin_api::policy_secret::redact_config(&mut conf);
         if category == "full" {
-            let full_conf = self.load_config(true).await?;
+            let mut full_conf = self.load_config(true).await?;
+            pingap_admin_api::policy_secret::redact_config(&mut full_conf);
             let mut full_toml = toml::to_string_pretty(&full_conf)
                 .map_err(|e| pingap_core::new_internal_error(400, e))?;
             if let Ok(value) = pingap_util::toml_omit_empty_value(&full_toml) {
@@ -669,12 +673,34 @@ impl AdminServe {
                 .await?;
             },
             CATEGORY_PLUGIN => {
-                self.handle_update_config::<PluginConf>(
-                    name,
-                    &buf,
-                    Category::Plugin,
+                let base = self.load_config(false).await?;
+                let value: serde_json::Value = serde_json::from_slice(&buf)
+                    .map_err(|_| {
+                        pingap_core::new_internal_error(
+                            400,
+                            "invalid policy JSON",
+                        )
+                    })?;
+                let candidate = pingap_admin_api::policy_secret::mutation(
+                    value,
+                    base.plugins.get(name),
                 )
-                .await?;
+                .map_err(|reason| {
+                    pingap_core::new_internal_error(400, reason)
+                })?;
+                if pingap_admin_api::policy_secret::is_challenge(&candidate) {
+                    pingap_challenge::Challenge::try_from(&candidate)
+                        .map_err(|e| pingap_core::new_internal_error(400, e))?;
+                }
+                self.manager
+                    .update(Category::Plugin, name, &candidate)
+                    .await
+                    .map_err(|_| {
+                        pingap_core::new_internal_error(
+                            400,
+                            "failed to persist policy config",
+                        )
+                    })?;
             },
             CATEGORY_CERTIFICATE => {
                 self.handle_update_config::<CertificateConf>(
@@ -709,13 +735,35 @@ impl AdminServe {
         session: &mut Session,
     ) -> pingora::Result<HttpResponse> {
         let buf = get_request_body(session).await?;
-        let config = toml::from_slice(&buf).map_err(|e| {
-            error!(target: LOG_TARGET, error = e.to_string(), "import config fail");
-            pingap_core::new_internal_error(400, e)
+        let mut config: pingap_config::PingapTomlConfig =
+            toml::from_slice(&buf).map_err(|_| {
+                pingap_core::new_internal_error(400, "invalid config document")
+            })?;
+        let base = self.load_config(false).await?;
+        if let Some(plugins) = config.plugins.as_mut() {
+            for (name, value) in plugins {
+                if let Some(candidate) = value.as_table_mut() {
+                    pingap_admin_api::policy_secret::preserve_source(
+                        candidate,
+                        base.plugins.get(name),
+                    );
+                }
+            }
+        }
+        let resolved = config.to_pingap_config(true).map_err(|_| {
+            pingap_core::new_internal_error(400, "invalid config document")
         })?;
-        self.manager.save_all(&config).await.map_err(|e| {
-            error!(target: LOG_TARGET, error = e.to_string(), "import config fail");
-            pingap_core::new_internal_error(400, e)
+        for candidate in resolved.plugins.values() {
+            if pingap_admin_api::policy_secret::is_challenge(candidate) {
+                pingap_challenge::Challenge::try_from(candidate)
+                    .map_err(|e| pingap_core::new_internal_error(400, e))?;
+            }
+        }
+        self.manager.save_all(&config).await.map_err(|_| {
+            pingap_core::new_internal_error(
+                400,
+                "failed to persist config document",
+            )
         })?;
 
         Ok(HttpResponse::no_content())
@@ -1103,10 +1151,13 @@ async fn handle_request_admin(
 
         let mut history = vec![];
         for item in arr {
-            let data:toml::Table = toml::from_str(&item.data).map_err(|e| {
-                error!(target: LOG_TARGET, error = e.to_string(), "get config history fail");
-                pingap_core::new_internal_error(400, e)
-            })?;
+            let data: toml::Table =
+                toml::from_str(&item.data).map_err(|_| {
+                    pingap_core::new_internal_error(
+                        400,
+                        "invalid config history document",
+                    )
+                })?;
             let key = format_category(&category);
             let Some(data) = data.get(key).cloned() else {
                 continue;
@@ -1119,6 +1170,20 @@ async fn handle_request_admin(
                 };
                 data
             };
+            let mut data = data;
+            if category == Category::Plugin
+                && let Some(table) = data.as_table_mut()
+            {
+                if name.is_empty() {
+                    for (_, value) in table.iter_mut() {
+                        if let Some(config) = value.as_table_mut() {
+                            pingap_admin_api::policy_secret::redact(config);
+                        }
+                    }
+                } else {
+                    pingap_admin_api::policy_secret::redact(table);
+                }
+            }
             history.push(json!({
                 "created_at": item.created_at,
                 "data": data,
@@ -1931,6 +1996,42 @@ mod tests {
             resp.status.as_u16(),
             "the admin was refused the raw config read: {}",
             String::from_utf8_lossy(&resp.body)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_challenge_secret_raw_reads_and_edits_share_redaction_boundary()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = admin_over(&dir);
+        let token = login(&admin, "admin", "123123").await;
+        let body = r#"{"category":"challenge","enabled":false,"secret":"sentinel-raw-private"}"#;
+        let written=send(&admin,&format!("POST /api/configs/plugin/challenge:raw HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",body.len())).await;
+        assert_eq!(written.status.as_u16(), 204);
+        for path in [
+            "/api/configs/plugin",
+            "/api/configs/full",
+            "/api/configs/all",
+            "/api/config-history/plugin/challenge:raw",
+        ] {
+            let response=send(&admin,&format!("GET {path} HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n")).await;
+            assert_eq!(response.status.as_u16(), 200, "{path}");
+            assert!(
+                !String::from_utf8_lossy(&response.body)
+                    .contains("sentinel-raw-private"),
+                "leaked at {path}"
+            );
+        }
+        let body = r#"{"category":"challenge","enabled":false,"difficulty":3,"secret_configured":true,"secret_source":{"kind":"literal"}}"#;
+        let response=send(&admin,&format!("POST /api/configs/plugin/challenge:raw HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",body.len())).await;
+        assert_eq!(response.status.as_u16(), 204);
+        let canonical = admin.load_config(false).await.unwrap();
+        assert_eq!(
+            canonical.plugins["challenge:raw"]["secret"].as_str(),
+            Some("sentinel-raw-private")
+        );
+        assert!(
+            !canonical.plugins["challenge:raw"].contains_key("secret_source")
         );
     }
 

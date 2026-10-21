@@ -1,3 +1,4 @@
+import { PolicyControls } from "@/components/policy-controls";
 import React from "react";
 import { PageShell } from "@/components/page-shell";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -109,6 +110,7 @@ export default function BotManager() {
         )
       }
     >
+      <PolicyControls />
       {policies.isPending ? (
         <LoadingCard />
       ) : policies.isError ? (

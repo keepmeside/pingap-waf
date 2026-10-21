@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    Error, get_hash_key, get_int_conf, get_int_conf_or_default, get_step_conf,
-    get_str_conf,
+    Error, get_hash_key, get_int_conf, get_int_conf_or_default,
+    get_step_conf_in, get_str_conf,
 };
 use async_trait::async_trait;
 use http::StatusCode;
@@ -107,7 +107,19 @@ impl TryFrom<&PluginConf> for Limiter {
     type Error = Error;
     fn try_from(value: &PluginConf) -> Result<Self> {
         let hash_value = get_hash_key(value);
-        let step = get_step_conf(value, PluginStep::Request);
+        if value.get("step").is_some_and(|step| !step.is_str()) {
+            return Err(Error::Invalid {
+                category: "limit".into(),
+                message: "step must be a string: request or proxy_upstream"
+                    .into(),
+            });
+        }
+        let step = get_step_conf_in(
+            value,
+            "limit",
+            PluginStep::Request,
+            &[PluginStep::Request, PluginStep::ProxyUpstream],
+        )?;
 
         // Parse the tag type from config, defaulting to IP-based limiting
         let tag = match get_str_conf(value, "tag").as_str() {
@@ -327,6 +339,49 @@ register_plugin!("limit", Limiter);
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numeric_compatibility_oracle() {
+        for (kind, interval, max, weight, expected_max, expected_weight) in [
+            ("rate", "10s", 100, 50, 10.0, 0.5),
+            ("rate", "500ms", 10, 150, 10.0, 1.0),
+            ("rate", "0s", 0, -1, 0.0, 0.0),
+            ("rate", "1s", -2, 0, -2.0, 0.0),
+            ("inflight", "0s", 0, 100, 0.0, 1.0),
+            ("inflight", "1s", -1, 50, -1.0, 0.5),
+            ("inflight", "1s", i64::MAX, 50, i64::MAX as f64, 0.5),
+        ] {
+            let conf: pingap_config::PluginConf=toml::from_str(&format!("type = {kind:?}\ninterval = {interval:?}\nmax = {max}\nweight = {weight}\n")).unwrap();
+            let limiter = super::Limiter::try_from(&conf).unwrap();
+            assert_eq!(limiter.max, expected_max);
+            assert_eq!(limiter.weight, expected_weight);
+            assert_eq!(limiter.inflight.is_some(), kind == "inflight");
+        }
+    }
+    #[test]
+    fn fractional_numeric_values_keep_existing_integer_fallbacks() {
+        let conf: pingap_config::PluginConf =
+            toml::from_str("max=2.5\nweight=1.5\ninterval=\"1s\"")
+                .expect("fixture");
+        let limiter = super::Limiter::try_from(&conf).expect("legacy fallback");
+        assert_eq!(limiter.max, 0.0);
+        assert_eq!(limiter.weight, 0.5);
+    }
+    #[test]
+    fn malformed_steps_and_duration_are_not_silently_applied() {
+        for body in [
+            "step = \"unknown\"",
+            "step = \"response\"",
+            "interval = \"wrong\"",
+            "step = 1",
+        ] {
+            let conf: pingap_config::PluginConf = toml::from_str(body).unwrap();
+            assert!(
+                super::Limiter::try_from(&conf).is_err(),
+                "accepted {body}"
+            );
+        }
+    }
+
     use super::*;
     use http::StatusCode;
     use pingap_config::PluginConf;
@@ -387,7 +442,7 @@ max = 10
             .unwrap(),
         );
         assert_eq!(
-            "Plugin limit invalid, message: Limit plugin should be executed at request or proxy upstream step",
+            "Plugin limit invalid, message: Invalid step(response), expect one of: request, proxy_upstream",
             result.err().unwrap().to_string()
         );
     }

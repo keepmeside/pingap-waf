@@ -96,7 +96,7 @@ export interface Listener {
   server_timing?: boolean;
 }
 
-export type PolicyBinding = { waf: string } | { acl: string } | { bot: string };
+export type PolicyBinding = { waf: string } | { acl: string } | { bot: string } | { challenge: string } | { behaviour: string } | { adaptive: string } | { limit: string };
 
 export interface Domain {
   hostnames: string[];

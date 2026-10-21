@@ -132,6 +132,7 @@ pub enum PolicyBinding {
     Challenge(String),
     Behaviour(String),
     Adaptive(String),
+    Limit(String),
 }
 
 impl PolicyBinding {
@@ -143,6 +144,7 @@ impl PolicyBinding {
             Self::Challenge(_) => "challenge",
             Self::Behaviour(_) => "behaviour",
             Self::Adaptive(_) => "adaptive",
+            Self::Limit(_) => "limit",
         }
     }
 
@@ -153,7 +155,8 @@ impl PolicyBinding {
             | Self::Bot(p)
             | Self::Challenge(p)
             | Self::Behaviour(p)
-            | Self::Adaptive(p) => p,
+            | Self::Adaptive(p)
+            | Self::Limit(p) => p,
         }
     }
 

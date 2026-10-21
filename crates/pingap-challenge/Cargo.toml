@@ -21,6 +21,7 @@ hmac = { workspace = true }
 hex = { workspace = true }
 humantime-serde = { workspace = true }
 http = { workspace = true }
+nix = { version = "0.31.3", features = ["signal"] }
 pingap-acl = { workspace = true }
 pingap-config = { workspace = true }
 pingap-core = { workspace = true }

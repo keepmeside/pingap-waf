@@ -7,5 +7,10 @@ export function policyPayload(entry: string, body: PluginConf): PluginConf {
   const category = entry.slice(0, split);
   if (body.category !== undefined && body.category !== category)
     throw new Error("Policy category must match its entry name");
-  return { ...body, category };
+  const config: PluginConf = { ...body, category };
+  if (category === "challenge") {
+    delete config.secret_configured; delete config.secret_source;
+    return { config };
+  }
+  return config;
 }

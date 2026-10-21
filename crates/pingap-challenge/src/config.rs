@@ -11,12 +11,14 @@ pub enum ChallengeKind {
     Silent,
 }
 
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 pub struct ChallengeConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_file: Option<String>,
     #[serde(default = "default_prefix")]
     pub prefix: String,
     #[serde(default)]
@@ -93,6 +95,7 @@ impl Default for ChallengeConfig {
         Self {
             enabled: false,
             secret: String::new(),
+            secret_file: None,
             prefix: default_prefix(),
             kind: ChallengeKind::default(),
             difficulty: default_difficulty(),
@@ -115,6 +118,16 @@ impl Default for ChallengeConfig {
 pub enum ConfigError {
     #[snafu(display("challenge: `secret` is required when `enabled = true`"))]
     MissingSecret,
+    #[snafu(display("challenge: exactly one secret source is allowed"))]
+    ConflictingSecret,
+    #[snafu(display(
+        "challenge: secret_file must be a single logical filename without separators or .."
+    ))]
+    BadSecretReference,
+    #[snafu(display(
+        "challenge: secret_file is unavailable, non-regular, or blank"
+    ))]
+    UnusableSecretFile,
     #[snafu(display("challenge: `difficulty` is {value}; expected 1..=10"))]
     Difficulty { value: u8 },
     #[snafu(display(
@@ -140,11 +153,34 @@ pub enum ConfigError {
 }
 
 impl ChallengeConfig {
+    pub fn resolve_secret(&self) -> Result<Vec<u8>, ConfigError> {
+        if let Some(reference) = &self.secret_file {
+            if !self.secret.is_empty() {
+                return Err(ConfigError::ConflictingSecret);
+            }
+            return crate::secret_file::load(reference);
+        }
+        if self.enabled && self.secret.is_empty() {
+            return Err(ConfigError::MissingSecret);
+        }
+        Ok(self.secret.as_bytes().to_vec())
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validated_secret().map(|_| ())
+    }
+
+    pub(crate) fn validated_secret(&self) -> Result<Vec<u8>, ConfigError> {
+        let secret = self.resolve_secret()?;
+        self.validate_settings()?;
+        Ok(secret)
+    }
+
+    fn validate_settings(&self) -> Result<(), ConfigError> {
         if !self.enabled {
             return Ok(());
         }
-        if self.secret.is_empty() {
+        if self.secret.is_empty() && self.secret_file.is_none() {
             return Err(ConfigError::MissingSecret);
         }
         if !(1..=10).contains(&self.difficulty) {
@@ -211,5 +247,20 @@ impl ChallengeConfig {
             .map_err(|e| ConfigError::Identity {
                 reason: e.to_string(),
             })
+    }
+}
+
+// Configuration is serialized internally for intent/hash compatibility, but Debug
+// must never print literal key material (including parse/error diagnostics).
+impl std::fmt::Debug for ChallengeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChallengeConfig")
+            .field("enabled", &self.enabled)
+            .field(
+                "secret_configured",
+                &(!self.secret.is_empty() || self.secret_file.is_some()),
+            )
+            .field("secret_file", &self.secret_file)
+            .finish_non_exhaustive()
     }
 }

@@ -41,6 +41,29 @@ use tracing::{debug, error, info};
 
 static LOG_TARGET: &str = "main::auto_restart";
 
+/// Preserve change detection while redacting configuration diagnostics.
+fn observable_config_diff(
+    current: &PingapConfig,
+    next: &PingapConfig,
+) -> (Vec<String>, Vec<String>) {
+    // Preserve the real change decision: redaction must not make a literal-only
+    // key rotation disappear and prevent the required plugin reload.
+    let (categories, raw) = current.diff(next);
+    if raw.is_empty() {
+        return (categories, Vec::new());
+    }
+    let mut left = current.clone();
+    let mut right = next.clone();
+    pingap_admin_api::policy_secret::redact_config(&mut left);
+    pingap_admin_api::policy_secret::redact_config(&mut right);
+    let (_, mut visible) = left.diff(&right);
+    if visible.is_empty() {
+        visible
+            .push("Configuration changed (challenge secret redacted)".into());
+    }
+    (categories, visible)
+}
+
 /// Compares configurations and handles updates through hot reload or full restart
 ///
 /// This function:
@@ -66,7 +89,7 @@ async fn diff_and_update_config(
         config_manager.get_current_config().as_ref().clone();
 
     let (updated_category_list, original_diff_result) =
-        current_config.diff(&new_config);
+        observable_config_diff(&current_config, &new_config);
     debug!(
         target: LOG_TARGET,
         updated_category_list = updated_category_list.join(","),
@@ -287,7 +310,7 @@ async fn diff_and_update_config(
 
     if hot_reload_only {
         let (updated_category_list, original_diff_result) =
-            current_config.diff(&hot_reload_config);
+            observable_config_diff(&current_config, &hot_reload_config);
         debug!(
             target: LOG_TARGET,
             updated_category_list = updated_category_list.join(","),
@@ -323,7 +346,8 @@ async fn diff_and_update_config(
     config_manager.set_current_config(hot_reload_config.clone());
 
     // diff hot reload config and new config
-    let (_, new_config_result) = hot_reload_config.diff(&new_config);
+    let (_, new_config_result) =
+        observable_config_diff(&hot_reload_config, &new_config);
     debug!(
         target: LOG_TARGET,
         new_config_result = new_config_result.join("\n"),
@@ -507,15 +531,20 @@ impl BackgroundService for ConfigObserverService {
                                 target: LOG_TARGET,
                                 current_level, new_level, "reload log level"
                             );
+                            // Parsing a directive may itself emit a tracing error.
+                            // Construct outside the subscriber's reload write lock.
+                            let next_filter = new_env_filter(&new_level);
                             if let Err(e) = self
                                 .log_reload_handle
-                                .modify(|filter| *filter = new_env_filter(&new_level))
+                                .modify(|filter| *filter = next_filter)
                             {
                                 error!(
                                     target: LOG_TARGET,
                                     error = %e,
                                     "reload log level fail"
                                 )
+                            } else {
+                                self.current_log_level.store(Arc::new(new_level));
                             }
                         }
                     }
@@ -559,12 +588,10 @@ async fn run_diff_and_update_config(
 ) -> Option<PingapConfig> {
     match diff_and_update_config(config_manager, hot_reload_only).await {
         Ok(new_config) => Some(new_config),
-        Err(e) => {
-            error!(
-                target: LOG_TARGET,
-                error = %e,
-                "update config fail",
-            );
+        Err(_) => {
+            // A TOML parser error can include the entire source document,
+            // including a legacy challenge key. Do not emit that source.
+            error!(target: LOG_TARGET, "update config failed: invalid or unavailable configuration");
             None
         },
     }
@@ -603,18 +630,72 @@ impl BackgroundTask for AutoRestart {
                     target: LOG_TARGET,
                     current_level, new_level, "reload log level"
                 );
+                // A parser diagnostic must not re-enter a held reload write lock.
+                let next_filter = new_env_filter(&new_level);
                 if let Err(e) = self
                     .log_reload_handle
-                    .modify(|filter| *filter = new_env_filter(&new_level))
+                    .modify(|filter| *filter = next_filter)
                 {
                     error!(
                         target: LOG_TARGET,
                         error = %e,
                         "reload log level fail"
                     )
+                } else {
+                    self.current_log_level.store(Arc::new(new_level));
                 }
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod challenge_secret_tests {
+    use super::*;
+    #[test]
+    fn challenge_diff_redacts_secret_without_hiding_secret_only_changes() {
+        let mut before = PingapConfig::default();
+        let mut conf = pingap_config::PluginConf::new();
+        conf.insert("category".into(), toml::Value::String("challenge".into()));
+        conf.insert(
+            "secret".into(),
+            toml::Value::String("sentinel-old\nkey\"value".into()),
+        );
+        before.plugins.insert("challenge:edge".into(), conf.clone());
+        let original = toml::to_string(&before).expect("serialize");
+        let mut after = before.clone();
+        after
+            .plugins
+            .get_mut("challenge:edge")
+            .expect("profile")
+            .insert(
+                "secret".into(),
+                toml::Value::String("sentinel-new\nkey\"value".into()),
+            );
+        for (left, right) in [
+            (&before, &after),
+            (&PingapConfig::default(), &before),
+            (&before, &PingapConfig::default()),
+        ] {
+            let (categories, lines) = observable_config_diff(left, right);
+            assert!(categories.iter().any(|category| category == "plugin"));
+            assert!(
+                !lines.is_empty(),
+                "secret change must still trigger reload"
+            );
+            let text = lines.join("\n");
+            assert!(
+                !text.contains("sentinel-old")
+                    && !text.contains("sentinel-new"),
+                "secret leaked in diagnostic diff"
+            );
+        }
+        assert!(observable_config_diff(&before, &before).1.is_empty());
+        assert_eq!(
+            toml::to_string(&before).expect("serialize"),
+            original,
+            "redaction must not mutate canonical config"
+        );
     }
 }

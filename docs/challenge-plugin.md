@@ -143,3 +143,41 @@ which the projection never sees.
 
 No admin UI exists for this fork-owned plugin; configure it in the policy TOML or through
 the control-plane projection once that projection is enabled.
+
+## Immutable file-backed keys
+
+An enabled profile may use either its existing nonempty literal `secret` or a
+`secret_file` reference, never both. A reference is one filename under
+`/run/secrets/pingap/challenge`; it is not an arbitrary path. The backend refuses
+traversal, separators, symlinks, non-regular files, missing and blank files before
+apply. Key bytes are read only while constructing/validating the plugin and are
+never copied into configuration, intent, API responses or errors. Literal keys
+keep their existing byte semantics. A disabled legacy draft with no key remains
+a disabled draft; a supplied file reference is still validated.
+
+Provision a key with a CSPRNG and an exclusive create, without a newline, then
+mount the directory read-only. For example, an operator can create a new filename
+with Python `os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)`, write
+`os.urandom(32)`, fsync and close it. Do this outside the browser. The container
+mount is `<operator-key-directory>:/run/secrets/pingap/challenge:ro`.
+
+Rotate by provisioning an immutable new filename and applying that reference.
+Keep the old file for rollback. Never change bytes in place under a live name;
+config identity remains the ordinary serialized PluginConf hash. Pending-version
+reconciliation/restart loads the persisted reference and uses that same hash.
+Removing a required old key makes rollback validation fail while the current
+configuration stays live. No key is rotated or deleted automatically.
+
+Policy/config inspection omits literal keys and returns `secret_configured` and
+source metadata. An edit without a source preserves the canonical source; a file
+replacement explicitly removes the old literal only in the validated candidate.
+Read-only metadata never becomes PluginConf. UI creates file-backed profiles;
+legacy direct API literal configurations remain compatible. Backups of legacy
+configurations are confidential and may contain literal keys. File-backed
+backups contain references and require the corresponding files when restored.
+
+Config reload diagnostics and change notifications redact legacy challenge key values. A key-only change still triggers reload and verification. Rollback responses report their outcome in `version.status`; a failed validation records a failed version without swapping live configuration.
+
+The editor omits an unchanged or cleared filename from mutations, allowing the canonical applied source to win after a concurrent update or rollback. A different provisioned filename is an explicit source replacement. Rollback refreshes the policy inspection cache.
+
+The pending-version recovery sweep waits until the persisted version is older than the full reload window. It must not roll back a live policy edit before its normal reload verification finishes.

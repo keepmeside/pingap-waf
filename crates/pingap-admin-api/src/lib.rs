@@ -28,6 +28,7 @@
 //! determinism, drift detection and rollback at once.
 
 mod error;
+pub mod policy_secret;
 mod request;
 mod router;
 pub mod routes;

@@ -4,7 +4,7 @@ from pathlib import Path
 import json, os, subprocess, sys, tempfile, time
 ROOT=Path(__file__).resolve().parents[2]
 CASE=sys.argv[1]
-if CASE not in ("native-scenario","policy-unavailable-behaviour"):
+if CASE not in ("native-scenario","policy-unavailable-behaviour","policy-unavailable-limit"):
     raise SystemExit("Unsupported native canary")
 IMAGE=os.environ.get("PINGAP_CANARY_IMAGE","pingap-native-canary:phase2")
 RUN=f"pingap-native-{os.getpid()}-{time.time_ns()}"
@@ -17,6 +17,18 @@ def services():
 owned=[]
 before=services();(OUT/"services-before.json").write_text(json.dumps(before))
 def configuration(fail_open=False,edited=False,disabled=False,unrelated=False):
+    if CASE=="policy-unavailable-limit":
+        text='[basic]\nthreads=1\n'+('on_policy_unavailable="fail_open"\n' if fail_open else '')
+        names=['broken','control','advisory','legacy','reload']
+        text+='[servers.canary]\naddr="0.0.0.0:8080"\nlocations='+json.dumps(names)+'\n[upstreams.fixture]\naddrs=["fixture:8081"]\n'
+        for name in names:
+            text+=f'[locations.{name}]\nhost="{name}.test"\nupstream="fixture"\n'
+            if name!='control': text+=f'plugins=["limit:{name}"]\n'
+        for name in ['broken','advisory','legacy','reload']:
+            interval='invalid' if name in ['broken','advisory'] or (name=='reload' and edited) else '10s'
+            text+=f'[plugins."limit:{name}"]\ncategory="limit"\ntype="inflight"\ntag="ip"\nmax={0 if name=="legacy" else 100000}\ninterval="{interval}"\n'
+            if name in ['broken','reload']:text+='enforcement_required=true\n'
+        return text
     basic='[basic]\nname="isolated-native-canary"\nthreads=1\n'
     if fail_open:basic+='on_policy_unavailable="fail_open"\n'
     text=basic+'[servers.canary]\naddr="0.0.0.0:8080"\nlocations=["login","scan","double","detect","control","reload","broken","advisory","legacy"]\n[upstreams.fixture]\naddrs=["fixture:8081"]\n'
@@ -44,10 +56,18 @@ async function expect(host,path,method,status) {const actual=await request(host,
 async function ready(){for(let i=0;i<100;i++){try{if(await request('control')===200)return;}catch{}await pause(100);}throw Error('candidate not ready');}
 (async()=>{
  await ready();
- if(process.env.CASE==='policy-unavailable-behaviour') {
+ if(process.env.CASE.startsWith('policy-unavailable-')) {
   const status=process.env.OPEN==='1'?200:503;
   await expect('broken','/','GET',status);await expect('control','/','GET',200);
-  await expect('advisory','/','GET',200);await expect('legacy','/','GET',200);
+  await expect('advisory','/','GET',200);await expect('legacy','/','GET',process.env.CASE==='policy-unavailable-limit'?429:200);
+  if(process.env.CASE==='policy-unavailable-limit') {
+   await expect('reload','/','GET',200);fs.writeFileSync('/coord/ready-limit','ready');
+   for(let i=0;i<500 && !fs.existsSync('/coord/reload-bad');i++)await pause(100);
+   await expect('reload','/','GET',status);await expect('control','/','GET',200);
+   fs.writeFileSync('/coord/refused-limit','ready');
+   for(let i=0;i<500 && !fs.existsSync('/coord/reload-fixed');i++)await pause(100);
+   await expect('reload','/','GET',200);await expect('legacy','/','GET',429);
+  }
  } else {
   for(let i=0;i<3;i++)await expect('login','/login','POST',401);
   await expect('login','/','GET',403);await expect('control','/','GET',200);
@@ -78,7 +98,9 @@ try:
     docker("network","create","--label",f"pingap.canary={RUN}",RUN)
     fixture=RUN+"-fixture";owned.append(fixture)
     docker("run","-d","--name",fixture,"--network",RUN,"--network-alias","fixture","--label",f"pingap.canary={RUN}","--read-only","--cpus","1","--memory","128m","-v",f"{OUT}/fixture.js:/fixture.js:ro","node:24-alpine","node","/fixture.js")
-    for open_mode in ([False,True] if CASE=="policy-unavailable-behaviour" else [False]):
+    for open_mode in ([False,True] if CASE.startswith("policy-unavailable-") else [False]):
+        for signal in ['ready-limit','reload-bad','refused-limit','reload-fixed']:
+            (OUT/signal).unlink(missing_ok=True)
         (CONF/"pingap.toml").write_text(configuration(open_mode))
         candidate=RUN+("-open" if open_mode else "-closed");owned.append(candidate)
         docker("run","-d","--name",candidate,"--network",RUN,"--network-alias","candidate","--label",f"pingap.canary={RUN}","--read-only","--cpus","2","--memory","1g","--tmpfs","/tmp:rw,nosuid,nodev,size=64m","-e","PINGAP_CONF=/opt/pingap/conf","-e","PINGAP_AUTORELOAD=true","-e","PINGAP_DISABLE_ACME=1","-v",f"{CONF}:/opt/pingap/conf:ro",IMAGE)
@@ -86,6 +108,14 @@ try:
         cmd=["docker","run","--rm","--name",tester,"--network",RUN,"--label",f"pingap.canary={RUN}","-e",f"CASE={CASE}","-e",f"OPEN={int(open_mode)}","-v",f"{OUT}/client.js:/client.js:ro","-v",f"{OUT}:/coord","node:24-alpine","node","/client.js"]
         with (OUT/("client-open.log" if open_mode else "client.log")).open('w') as log:
             process=subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT)
+            if CASE=="policy-unavailable-limit":
+                for signal,bad,done in [('ready-limit',True,'reload-bad'),('refused-limit',False,'reload-fixed')]:
+                    deadline=time.monotonic()+60
+                    while not (OUT/signal).exists() and process.poll() is None and time.monotonic()<deadline:time.sleep(.1)
+                    if not (OUT/signal).exists():raise RuntimeError('missing limit reload coordination')
+                    (CONF/'pingap.toml').write_text(configuration(open_mode,edited=bad))
+                    time.sleep(15)
+                    (OUT/done).write_text('ready')
             if CASE=="native-scenario":
                 for signal in ("ready","retained","reset"):
                     deadline=time.monotonic()+50
@@ -110,7 +140,7 @@ try:
     after=services();expected=sorted(line for line in after if not any(f" {name} " in line for name in owned))
     (OUT/"services-after.json").write_text(json.dumps(expected))
     if expected!=before:raise RuntimeError("unrelated service inventory changed")
-    print("NATIVE_SCENARIO_PASS" if CASE=="native-scenario" else "POLICY_UNAVAILABLE_BEHAVIOUR_PASS")
+    print("NATIVE_SCENARIO_PASS" if CASE=="native-scenario" else "POLICY_UNAVAILABLE_LIMIT_PASS" if CASE=="policy-unavailable-limit" else "POLICY_UNAVAILABLE_BEHAVIOUR_PASS")
 finally:
     for name in reversed(owned):
         label=docker("inspect",name,"--format",'{{index .Config.Labels "pingap.canary"}}',check=False)

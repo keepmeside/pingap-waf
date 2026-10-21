@@ -1,3 +1,4 @@
+import { checkedRollback } from "@/helpers/version-outcome";
 // Typed TanStack Query hooks for the admin API — one hook per route-table endpoint.
 //
 // Two conventions hold the file together:
@@ -196,14 +197,14 @@ export const useTestSend = () =>
 
 // Config versions.
 export const useRollback = () => {
-  const { invalidate } = useWriter(["config-versions", "domains", "dashboard"]);
+  const { invalidate } = useWriter(["config-versions", "domains", "policies", "dashboard"]);
   return useMutation<RollbackResult, Error, string>({
     mutationFn: async (id) => {
       const res = await request.post<RollbackResult>(
         `/config-versions/${encodeURIComponent(id)}/rollback`,
         {},
       );
-      return res.data;
+      return checkedRollback(res.data);
     },
     onSettled: invalidate,
   });

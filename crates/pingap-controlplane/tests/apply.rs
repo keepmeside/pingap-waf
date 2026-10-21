@@ -676,3 +676,43 @@ async fn with_nothing_applied_there_is_no_baseline() {
     );
     assert_eq!(detector.check().await.expect("checks"), Drift::NoBaseline);
 }
+
+#[tokio::test]
+async fn sweep_does_not_fail_a_live_apply_inside_its_reload_window() {
+    let h = harness(&[]).await;
+    let projected = generate(&intent(3)).expect("generates");
+    let row = h
+        .store
+        .record_config_version(
+            NewConfigVersion {
+                hash: pingap_controlplane::projection::hash(&projected),
+                status: ConfigStatus::Pending,
+                actor_id: None,
+                actor_username: "live-writer".into(),
+                intent_json: serde_json::to_string(&intent(3)).unwrap(),
+                error: None,
+            },
+            2000,
+        )
+        .await
+        .unwrap();
+    let applier = Applier::new(
+        h.store.clone(),
+        Validator::new("/bin/true"),
+        Arc::new(NoPluginCheck),
+        h.sink.clone(),
+        h.data_plane.clone(),
+        Duration::from_millis(10500),
+    );
+    for now in [1999, 2000, 2005, 2010, 2011] {
+        assert!(
+            applier.settle_pending(now).await.unwrap().is_empty(),
+            "fresh version swept at {now}"
+        );
+    }
+    h.data_plane.reload_from(&projected.toml);
+    let settled = applier.settle_pending(2012).await.unwrap();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].version.id, row.id);
+    assert_eq!(settled[0].version.status, ConfigStatus::Applied);
+}

@@ -276,14 +276,22 @@ impl Applier {
     /// target — silently skips them, so an operator's rollback list is missing the version
     /// actually running.
     ///
-    /// No `reload_window` sleep: a stranded version is by definition older than the window.
+    /// Only settle rows older than the reload window. A scheduled sweep can overlap
+    /// an active writer; a fresh pending row is not evidence of a crash.
     pub async fn settle_pending(&self, now: i64) -> Result<Vec<Outcome>> {
         let versions = self.store.list_config_versions(None).await?;
         let mut out = Vec::new();
-        for version in versions
-            .into_iter()
-            .filter(|v| v.status == ConfigStatus::Pending)
-        {
+        // Persisted timestamps have whole-second precision: round the window up
+        // and require strictly greater age so we never shorten the live window.
+        let window_seconds =
+            i64::try_from(self.reload_window.as_secs().saturating_add(
+                u64::from(self.reload_window.subsec_nanos() != 0),
+            ))
+            .unwrap_or(i64::MAX);
+        for version in versions.into_iter().filter(|v| {
+            v.status == ConfigStatus::Pending
+                && now.saturating_sub(v.created_at) > window_seconds
+        }) {
             let projected = generate(&intent_of(&version)?)?;
             let previous = self.store.latest_applied_config_version().await?;
             out.push(

@@ -140,6 +140,12 @@ impl TryFrom<&PluginConf> for Challenge {
 
     fn try_from(value: &PluginConf) -> Result<Self> {
         let hash_value = pingap_plugin::get_hash_key(value);
+        if value.get("step").is_some_and(|step| !step.is_str()) {
+            return Err(Error::Invalid {
+                category: CATEGORY.into(),
+                message: "step must be a string: request".into(),
+            });
+        }
         let plugin_step = get_step_conf_in(
             value,
             CATEGORY,
@@ -148,11 +154,12 @@ impl TryFrom<&PluginConf> for Challenge {
         )?;
         let config: ChallengeConfig = toml::Value::Table(value.clone())
             .try_into()
-            .map_err(|e| Error::Invalid {
+            .map_err(|_| Error::Invalid {
                 category: CATEGORY.into(),
-                message: format!("challenge config: {e}"),
+                message: "challenge config has invalid field types or values"
+                    .into(),
             })?;
-        config.validate().map_err(|e| Error::Invalid {
+        let secret = config.validated_secret().map_err(|e| Error::Invalid {
             category: CATEGORY.into(),
             message: e.to_string(),
         })?;
@@ -173,8 +180,8 @@ impl TryFrom<&PluginConf> for Challenge {
             })?;
         Ok(Self {
             plugin_step,
-            key_id: cookie::key_id(config.secret.as_bytes()),
-            secret: config.secret.as_bytes().to_vec(),
+            key_id: cookie::key_id(&secret),
+            secret,
             state: global(
                 config.max_domains,
                 config.max_entries,

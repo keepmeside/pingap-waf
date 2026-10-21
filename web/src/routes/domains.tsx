@@ -1,3 +1,4 @@
+import { bindingFromEntry, bindingKey } from "@/helpers/policy-controls";
 import React from "react";
 import { PageShell } from "@/components/page-shell";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -202,13 +203,6 @@ export default function Domains() {
   );
 }
 
-function bindingKey(binding: PolicyBinding): string {
-  if ("waf" in binding) return `waf:${binding.waf}`;
-  if ("acl" in binding) return `acl:${binding.acl}`;
-  if ("bot" in binding) return `bot:${binding.bot}`;
-  return "?";
-}
-
 function DomainEditor({
   isNew,
   name,
@@ -244,14 +238,7 @@ function DomainEditor({
   const [newPolicy, setNewPolicy] = React.useState("");
 
   const addPolicy = () => {
-    const [category, ...rest] = newPolicy.split(":");
-    const profile = rest.join(":");
-    if (!category || !profile) return;
-    const binding =
-      category === "waf" ? { waf: profile }
-      : category === "acl" ? { acl: profile }
-      : category === "bot" ? { bot: profile }
-      : null;
+    const binding = bindingFromEntry(newPolicy);
     if (!binding) return;
     setDraft((d) => ({ ...d, policies: [...d.policies, binding] }));
     setNewPolicy("");
@@ -361,7 +348,7 @@ function DomainEditor({
         <CardContent className="space-y-3">
           {draft.policies.length === 0 && (
             <p className="py-3 text-sm text-muted-foreground">
-              No policies bound — the domain proxies unfiltered. Bind a `waf:`, `acl:` or
+              No policies bound — the domain proxies unfiltered. Bind a supported policy profile such as
               `bot:` profile to enforce.
             </p>
           )}

@@ -10,6 +10,7 @@ pub mod page;
 pub mod plugin;
 pub mod pow;
 pub mod redirect;
+mod secret_file;
 pub mod silent;
 pub mod token;
 

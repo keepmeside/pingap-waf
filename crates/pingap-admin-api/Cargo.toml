@@ -36,10 +36,13 @@ snafu = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
 urlencoding = { workspace = true }
 
+toml = { workspace = true }
+
 [dev-dependencies]
+pingap-plugin = { workspace = true }
+pingap-challenge = { workspace = true }
 pingap-behaviour = { workspace = true }
 pingap-domainstate = { workspace = true }
-toml = { workspace = true }
 tempfile = { workspace = true }
 # `test-support` exposes the code generator, so a second-factor test can confirm an enrolment
 # with a real code instead of asserting that every code is refused.

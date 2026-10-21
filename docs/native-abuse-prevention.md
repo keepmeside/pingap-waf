@@ -102,3 +102,22 @@ history to free space. If full, preserve the database/WAL, inspect delivery/writ
 failure counters and administrative errors, add capacity, then verify new rows
 resume and previous history stays readable. No monitor, volume expansion or
 production migration is installed by this plan execution.
+
+## Website-bound rate limits
+
+A website may bind `{ "limit": "profile" }` alongside existing policy types.
+The ordered binding must refer to a real `limit:profile`; removing the binding
+stops enforcement on that website without deleting the shared profile. A bound
+limiter that cannot construct follows the existing fail-closed503/fail-open
+posture. An unbound or legacy direct-file limiter keeps its existing behavior.
+No policy is attached automatically.
+
+The existing limiter semantics are preserved: rate `max` is divided by
+`max(interval_seconds, 1)`, while inflight `max` is concurrent requests. Weight is
+clamped to0..100. Zero/negative values and sub-second or zero intervals retain
+the engine behavior; the editor explains their consequences rather than adding
+new rejection rules. Shared profiles share their existing limiter counters;
+use separate profiles when sites require separate budgets. Response steps
+cannot enforce a limiter, and callers may choose429 instead of a challenge.
+
+Limiter numeric fields use integer extraction. A fractional max retains the legacy fallback of zero; a fractional weight falls back to50 before clamping. The editor previews these actual fallbacks and warns about a zero ceiling, without rejecting legacy zero, negative, or subsecond inputs.

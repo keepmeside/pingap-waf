@@ -2162,15 +2162,33 @@ components:
         exists, and the gate asks the plugin factory whether the table constructs.
 
     PolicyWrite:
-      allOf:
-        - $ref: '#/components/schemas/PluginConf'
+      description: |
+        A direct plugin table remains compatible. New clients may wrap it in config.
+        category must match category:profile. Challenge reads omit literal secret and
+        return read-only secret_configured and secret_source {kind, reference?}.
+        Read-only metadata is removed on writes. Omitted challenge source preserves the
+        canonical applied source. Explicit secret_file replacement does not inherit a
+        literal source. Both sources or unavailable file references fail before commit.
+        secret_file is one immutable filename under /run/secrets/pingap/challenge;
+        file contents never enter the table or its ordinary serialized config hash.
+      oneOf:
+        - allOf:
+            - $ref: '#/components/schemas/PluginConf'
+            - type: object
+              required: [category]
+              properties:
+                category: {type: string, minLength: 1}
         - type: object
-          required: [category]
+          required: [config]
+          additionalProperties: false
           properties:
-            category:
-              type: string
-              minLength: 1
-              description: Must match the category prefix in the policy entry name.
+            config:
+              allOf:
+                - $ref: '#/components/schemas/PluginConf'
+                - type: object
+                  required: [category]
+                  properties:
+                    category: {type: string, minLength: 1}
 
     NotificationChannel:
       type: object
@@ -2311,7 +2329,7 @@ components:
 
     PolicyBinding:
       description: |
-        Externally tagged: `{"waf":"strict"}`, `{"acl":"edge"}`, `{"bot":"deny-unknown"}`. The
+        Externally tagged: `{"waf":"strict"}`, `{"acl":"edge"}`, `{"bot":"deny-unknown"}`, and challenge/behaviour/adaptive/limit with the same shape. The
         variant is the plugin category and the payload the profile, and the config entry the
         pair names is `category:profile`.
       oneOf:
@@ -2332,6 +2350,31 @@ components:
           additionalProperties: false
           properties:
             bot:
+              type: string
+
+        - type: object
+          required: [challenge]
+          additionalProperties: false
+          properties:
+            challenge:
+              type: string
+        - type: object
+          required: [behaviour]
+          additionalProperties: false
+          properties:
+            behaviour:
+              type: string
+        - type: object
+          required: [adaptive]
+          additionalProperties: false
+          properties:
+            adaptive:
+              type: string
+        - type: object
+          required: [limit]
+          additionalProperties: false
+          properties:
+            limit:
               type: string
 
     Backend:

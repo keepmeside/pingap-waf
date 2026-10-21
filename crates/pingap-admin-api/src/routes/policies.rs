@@ -58,7 +58,11 @@ pub async fn list(
     _request: &ApiRequest,
     _params: &[String],
 ) -> Result<ApiResponse> {
-    intent_resource::list(state, |intent| &intent.policies).await
+    let mut policies = intent_resource::base_intent(state).await?.policies;
+    for config in policies.values_mut() {
+        crate::policy_secret::redact(config);
+    }
+    ApiResponse::json(&policies)
 }
 
 pub async fn get(
@@ -66,10 +70,15 @@ pub async fn get(
     _request: &ApiRequest,
     params: &[String],
 ) -> Result<ApiResponse> {
-    intent_resource::get(state, "policy", profile_name(params)?, |intent| {
-        &intent.policies
-    })
-    .await
+    let name = profile_name(params)?;
+    let mut policies = intent_resource::base_intent(state).await?.policies;
+    let mut config =
+        policies.remove(name).ok_or_else(|| ApiError::NotFound {
+            kind: "policy".into(),
+            id: name.into(),
+        })?;
+    crate::policy_secret::redact(&mut config);
+    ApiResponse::json(&config)
 }
 
 pub async fn put(
@@ -78,9 +87,15 @@ pub async fn put(
     params: &[String],
 ) -> Result<ApiResponse> {
     let name = profile_name(params)?;
-    let body: pingap_config::PluginConf = request.json()?;
-    validate_category(name, &body)?;
     let base = intent_resource::base_intent(state).await?;
+    let body = crate::policy_secret::mutation(
+        request.json()?,
+        base.policies.get(name),
+    )
+    .map_err(|reason| ApiError::BadRequest {
+        reason: reason.into(),
+    })?;
+    validate_category(name, &body)?;
     intent_resource::insert(
         state,
         request,

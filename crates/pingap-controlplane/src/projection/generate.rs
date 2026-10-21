@@ -132,6 +132,19 @@ pub fn generate(intent: &Intent) -> Result<Projected> {
                 toml::Value::String(name.clone()),
             );
         }
+        if category == "limit"
+            && intent.domains.values().any(|domain| {
+                domain.policies.iter().any(|binding| {
+                    matches!(binding, PolicyBinding::Limit(_))
+                        && binding.entry_name() == *name
+                })
+            })
+        {
+            plugin.insert(
+                "enforcement_required".into(),
+                toml::Value::Boolean(true),
+            );
+        }
         config.plugins.insert(name.clone(), plugin);
     }
 
