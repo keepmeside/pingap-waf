@@ -150,6 +150,7 @@ pub struct Applier {
     data_plane: Arc<dyn DataPlane>,
     /// How long after commit to wait for the reload before reading the data plane back.
     reload_window: Duration,
+    operation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Applier {
@@ -168,7 +169,19 @@ impl Applier {
             sink,
             data_plane,
             reload_window,
+            operation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Share coordination between independently constructed appliers that operate
+    /// on the same live configuration. Cancellation releases the guard, leaving
+    /// persisted pending versions eligible for ordinary crash recovery.
+    pub fn with_operation_lock(
+        mut self,
+        lock: Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
+        self.operation_lock = lock;
+        self
     }
 
     /// Generate, validate, commit, verify. One version row, one audit row.
@@ -183,6 +196,7 @@ impl Applier {
         action: &str,
         now: i64,
     ) -> Result<Outcome> {
+        let _operation = self.operation_lock.lock().await;
         let projected = generate(intent)?;
         let intent_json =
             serde_json::to_string(intent).map_err(|e| ApplyError::Commit {
@@ -279,6 +293,11 @@ impl Applier {
     /// Only settle rows older than the reload window. A scheduled sweep can overlap
     /// an active writer; a fresh pending row is not evidence of a crash.
     pub async fn settle_pending(&self, now: i64) -> Result<Vec<Outcome>> {
+        // Age alone is insufficient: validation or commit may have taken longer
+        // than the window. Never recover a version owned by a live apply.
+        let Ok(_operation) = self.operation_lock.try_lock() else {
+            return Ok(Vec::new());
+        };
         let versions = self.store.list_config_versions(None).await?;
         let mut out = Vec::new();
         // Persisted timestamps have whole-second precision: round the window up

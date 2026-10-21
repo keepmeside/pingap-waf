@@ -734,6 +734,16 @@ impl BackgroundTask for PendingVerificationTask {
     }
 }
 
+// API handlers and the scheduled recovery task build separate Appliers, but all
+// operate on the process-global config/provider. Construct this unlocked guard
+// lazily after fork; no background runtime or thread is started here.
+fn projection_operation_lock() -> Arc<tokio::sync::Mutex<()>> {
+    static LOCK: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> =
+        std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 /// The projection, assembled from the live config manager, plugin provider and factory.
 ///
 /// `Validator::for_current_exe` deliberately: a different build may have a different plugin
@@ -751,7 +761,8 @@ pub fn new_applier(
         Arc::new(ConfigManagerSink::new(manager)),
         Arc::new(ProviderDataPlane::new(new_plugin_provider())),
         reload_window,
-    ))
+    )
+    .with_operation_lock(projection_operation_lock()))
 }
 
 /// The scheduled drift check, ready to add to a [`pingap_core::BackgroundTaskService`].

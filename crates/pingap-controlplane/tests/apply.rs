@@ -716,3 +716,119 @@ async fn sweep_does_not_fail_a_live_apply_inside_its_reload_window() {
     assert_eq!(settled[0].version.id, row.id);
     assert_eq!(settled[0].version.status, ConfigStatus::Applied);
 }
+
+struct DelayedCommit {
+    sink: Arc<ReloadingSink>,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    committed: tokio::sync::Notify,
+}
+#[async_trait::async_trait]
+impl ConfigSink for DelayedCommit {
+    async fn commit(&self, config: &str) -> Result<(), String> {
+        self.entered.notify_one();
+        self.resume.notified().await;
+        self.sink.commit(config).await?;
+        self.committed.notify_one();
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn overlapping_sweep_cannot_settle_a_delayed_active_apply() {
+    let h = harness(&[]).await;
+    let sink = Arc::new(DelayedCommit {
+        sink: h.sink.clone(),
+        entered: Default::default(),
+        resume: Default::default(),
+        committed: Default::default(),
+    });
+    let coordination = Arc::new(tokio::sync::Mutex::new(()));
+    let sweeper = Applier::new(
+        h.store.clone(),
+        Validator::new("/bin/true"),
+        Arc::new(NoPluginCheck),
+        h.sink.clone(),
+        h.data_plane.clone(),
+        Duration::from_millis(50),
+    )
+    .with_operation_lock(coordination.clone());
+    let applier = Arc::new(
+        Applier::new(
+            h.store.clone(),
+            Validator::new("/bin/true"),
+            Arc::new(NoPluginCheck),
+            sink.clone(),
+            h.data_plane.clone(),
+            Duration::from_millis(50),
+        )
+        .with_operation_lock(coordination),
+    );
+    let writer = applier.clone();
+    let task = tokio::spawn(async move {
+        writer
+            .apply(&intent(3), &actor(), "slow-commit", 2000)
+            .await
+            .unwrap()
+    });
+    sink.entered.notified().await;
+    assert!(
+        sweeper.settle_pending(3000).await.unwrap().is_empty(),
+        "sweep stole a version while commit was still active"
+    );
+    assert_eq!(
+        h.store
+            .latest_config_version()
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ConfigStatus::Pending
+    );
+    sink.resume.notify_one();
+    sink.committed.notified().await;
+    assert!(
+        sweeper.settle_pending(3001).await.unwrap().is_empty(),
+        "sweep stole the reload verification window"
+    );
+    assert_eq!(task.await.unwrap().version.status, ConfigStatus::Applied);
+}
+
+#[tokio::test]
+async fn cancelled_writer_releases_coordination_for_stranded_recovery() {
+    let h = harness(&[]).await;
+    let sink = Arc::new(DelayedCommit {
+        sink: h.sink.clone(),
+        entered: Default::default(),
+        resume: Default::default(),
+        committed: Default::default(),
+    });
+    let coordination = Arc::new(tokio::sync::Mutex::new(()));
+    let writer = Applier::new(
+        h.store.clone(),
+        Validator::new("/bin/true"),
+        Arc::new(NoPluginCheck),
+        sink.clone(),
+        h.data_plane.clone(),
+        Duration::from_millis(50),
+    )
+    .with_operation_lock(coordination.clone());
+    let sweeper = Applier::new(
+        h.store.clone(),
+        Validator::new("/bin/true"),
+        Arc::new(NoPluginCheck),
+        h.sink.clone(),
+        h.data_plane.clone(),
+        Duration::from_millis(50),
+    )
+    .with_operation_lock(coordination);
+    let task = tokio::spawn(async move {
+        writer.apply(&intent(3), &actor(), "cancelled", 2000).await
+    });
+    sink.entered.notified().await;
+    assert!(sweeper.settle_pending(3000).await.unwrap().is_empty());
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let recovered = sweeper.settle_pending(3001).await.unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].version.status, ConfigStatus::Failed);
+}

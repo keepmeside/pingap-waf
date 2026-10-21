@@ -30,6 +30,8 @@ describe("policy controls", () => {
     expect(rateSummary({type:"rate",max:0,interval:"0s",weight:-1})).toMatchObject({effectivePerSecond:0,weight:0});
     expect(rateSummary({type:"rate",max:-2,interval:"1s"}).warning).toBeTruthy();
     expect(rateSummary({type:"inflight",max:0}).warning).toBeTruthy();
+    expect(rateSummary({type:"inflight",max:2.5})).toMatchObject({effectiveCeiling:0});
+    expect(rateSummary({type:"inflight",max:3})).toMatchObject({effectiveCeiling:3});
     expect(rateSummary({type:"rate",max:2.5,interval:"1s",weight:1.5})).toMatchObject({effectivePerSecond:0,weight:50});
     expect(rateSummary({interval:"nonsense"}).effectivePerSecond).toBeNull();
   });

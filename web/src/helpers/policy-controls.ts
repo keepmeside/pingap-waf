@@ -34,6 +34,7 @@ export function rateSummary(conf: PluginConf) {
   const interval = seconds(conf.interval);
   const weight = Math.min(100, Math.max(0, typeof conf.weight === "number" && Number.isInteger(conf.weight) ? conf.weight : 50));
   return {
+    effectiveCeiling: max,
     effectivePerSecond: conf.type === "inflight" || interval === null ? null : max / Math.max(interval, 1),
     weight,
     warning: max <= 0 ? "Zero or negative ceilings can refuse all traffic. Existing engine semantics are retained." : interval === 0 ? "Zero interval is accepted by the engine; use a positive window for an ordinary rate policy." : "",

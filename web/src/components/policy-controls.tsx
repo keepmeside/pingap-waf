@@ -88,7 +88,7 @@ function Editor({ category, entry, conf, editable, onClose }: { category: Catego
       </>}
     </fieldset>
     {category === "limit" ? <div className="text-sm text-muted-foreground" role="status">
-      <p>{draft.type === "inflight" ? `Concurrent ceiling: ${String(draft.max ?? 0)}` : summary.effectivePerSecond === null ? "The server validates this window; effective requests/second cannot be previewed." : `Effective ceiling: ${summary.effectivePerSecond} requests/second`}{draft.type === "inflight" ? " active requests." : `. Current-window weight: ${summary.weight}%.`}</p>
+      <p>{draft.type === "inflight" ? `Concurrent ceiling: ${summary.effectiveCeiling}` : summary.effectivePerSecond === null ? "The server validates this window; effective requests/second cannot be previewed." : `Effective ceiling: ${summary.effectivePerSecond} requests/second`}{draft.type === "inflight" ? " active requests." : `. Current-window weight: ${summary.weight}%.`}</p>
       {summary.warning && <p className="text-amber-700">{summary.warning}</p>}
       {draft.type !== "inflight" && <p>The engine uses at least one second as the rate divisor. Values and sliding-window behavior remain compatible with existing policies.</p>}
     </div> : <div className="text-sm text-muted-foreground" role="status">

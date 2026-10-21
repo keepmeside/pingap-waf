@@ -181,3 +181,5 @@ Config reload diagnostics and change notifications redact legacy challenge key v
 The editor omits an unchanged or cleared filename from mutations, allowing the canonical applied source to win after a concurrent update or rollback. A different provisioned filename is an explicit source replacement. Rollback refreshes the policy inspection cache.
 
 The pending-version recovery sweep waits until the persisted version is older than the full reload window. It must not roll back a live policy edit before its normal reload verification finishes.
+
+Live apply and recovery also share process-local coordination: the sweep skips while an apply is validating, committing or waiting for reload. Age is only a secondary stranded-row guard. Cancellation releases coordination, so crash recovery remains available.

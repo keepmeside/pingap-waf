@@ -15,6 +15,9 @@ test("rate profile UI attaches, enforces 429 and unbinds without affecting contr
   await page.goto("/#/bot-manager");
   await page.getByRole("button",{name:"New rate limit profile"}).click();
   await page.getByLabel("Profile name",{exact:true}).fill("browser-rate");
+  await page.getByLabel("Limit type",{exact:true}).selectOption("inflight");
+  await page.getByLabel("Request ceiling",{exact:true}).fill("2.5");
+  await expect(page.getByText("Concurrent ceiling: 0 active requests.",{exact:true})).toBeVisible();
   await page.getByLabel("Limit type",{exact:true}).selectOption("rate");
   await page.getByLabel("Request ceiling",{exact:true}).fill("2");
   await page.getByLabel("Counting window",{exact:true}).fill("1s");
