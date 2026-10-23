@@ -31,8 +31,8 @@ def configuration(fail_open=False,edited=False,disabled=False,unrelated=False):
         return text
     basic='[basic]\nname="isolated-native-canary"\nthreads=1\n'
     if fail_open:basic+='on_policy_unavailable="fail_open"\n'
-    text=basic+'[servers.canary]\naddr="0.0.0.0:8080"\nlocations=["login","scan","double","detect","control","reload","broken","advisory","legacy"]\n[upstreams.fixture]\naddrs=["fixture:8081"]\n'
-    for name,policies in {"login":["behaviour:login"],"scan":["behaviour:scan"],"double":["behaviour:scan","behaviour:login"],"detect":["behaviour:detect"],"control":[],"reload":["behaviour:reload"],"broken":["behaviour:broken"],"advisory":["behaviour:advisory"],"legacy":["behaviour:legacy"]}.items():
+    text=basic+'[servers.canary]\naddr="0.0.0.0:8080"\nlocations=["login","scan","double","detect","control","reload","broken","advisory","legacy","waf"]\n[upstreams.fixture]\naddrs=["fixture:8081"]\n'
+    for name,policies in {"login":["behaviour:login"],"scan":["behaviour:scan"],"double":["behaviour:scan","behaviour:login"],"detect":["behaviour:detect"],"control":[],"reload":["behaviour:reload"],"broken":["behaviour:broken"],"advisory":["behaviour:advisory"],"legacy":["behaviour:legacy"],"waf":["waf:strict"]}.items():
         text+=f'[locations.{name}]\nhost="{name}.test"\nupstream="fixture"\nplugins={json.dumps(policies)}\n'
     for name,scenario,mode in [("login","failed_login","block"),("scan","scan","block"),("detect","scan","detect"),("reload","scan","block"),("broken","scan","block"),("advisory","scan","detect")]:
         threshold=0 if name in ("broken","advisory") else (10 if name=="reload" and edited else 3)
@@ -41,6 +41,7 @@ def configuration(fail_open=False,edited=False,disabled=False,unrelated=False):
         enabled='false' if disabled and name=="reload" else 'true'
         text+=f'[plugins."behaviour:{name}"]\ncategory="behaviour"\nenabled={enabled}\nclient_ip_from_peer=true\nabuse_namespace="behaviour:{name}"\n[plugins."behaviour:{name}".abuse]\nenabled=true\n[plugins."behaviour:{name}".abuse.{scenario}]\nmode="{mode}"\nwindow="2s"\nthreshold={threshold}\nban_ttl="{ttl}"\n'
         if scenario=="failed_login":text+='path="/login"\nmethod="POST"\nstatuses=[401]\n'
+    text+='[plugins."waf:strict"]\ncategory="waf"\nbudget_ms=10000\n[plugins."waf:strict".categories]\nsql_injection="block"\n'
     text+='[plugins."behaviour:legacy"]\ncategory="behaviour"\nenabled=true\nclient_ip_from_peer=true\nbudget_ms=0\n'
     return text
 (OUT/"fixture.js").write_text("require('http').createServer((q,s)=>{s.statusCode=q.method==='POST'&&q.url==='/login'?401:q.url.startsWith('/missing')?404:200;s.end('fixture');}).listen(8081,'0.0.0.0');")
@@ -74,6 +75,7 @@ async function ready(){for(let i=0;i<100;i++){try{if(await request('control')===
   for(let i=0;i<20;i++)await expect('scan','/missing?s='+i,'GET',404);
   await expect('scan','/missing/2','GET',404);await expect('scan','/missing/3','GET',404);
   await expect('scan','/','GET',403);
+  await expect('waf', '/?id=1%27%20OR%20%271%27%3D%271', 'GET', 403);
   for(let i=0;i<5;i++)await expect('detect','/missing/'+i,'GET',404);
   await expect('detect','/','GET',200);
   await pause(3100);await expect('login','/','GET',200);await expect('scan','/','GET',200);

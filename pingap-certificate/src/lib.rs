@@ -291,6 +291,10 @@ CRVQZGgOQL6WDg3tUUDXYOs=
         assert_eq!(1720232616, cert.not_before);
         assert_eq!(1791253416, cert.not_after);
         assert_eq!("mkcert vicanso@tree", cert.get_issuer_common_name());
-        assert_eq!(true, cert.valid(2));
+        // The embedded fixture has a historical expiry date; test the positive
+        // validity path with the parsed certificate metadata and a relative expiry.
+        let mut fresh = cert.clone();
+        fresh.not_after = pingap_core::now_sec() as i64 + 3 * 24 * 3600;
+        assert!(fresh.valid(2));
     }
 }

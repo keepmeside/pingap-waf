@@ -129,3 +129,28 @@ The console uses a light navigation surface and turquoise selection inspired by 
 Dashboard rollups describe WAF findings and enforced findings, not total request traffic. Access totals, visitors, geography, client distribution, response-status distribution and QPS are unavailable when the current API has no corresponding source. Unsupported time windows are disabled. Empty stores never generate demo metrics. Event inspection renders stored metadata as text; request/response headers and bodies are not captured by this view.
 
 Native scenario profiles must be saved and explicitly attached to a website. Exact authentication method/path/statuses, threshold, counting window, ban lifetime and detect/block mode remain visible in the editor. Behind a trusted proxy configure trusted client identity before enabling enforcement. Detect records observations without refusing requests. Active bans are process-local; a new epoch after restart means runtime bans were reset, while lifecycle history remains permanent. Authorized releases report queued or degraded audit delivery honestly; queued is not a persistence acknowledgement. A timeout is unconfirmed: inspect the version before retrying.
+
+
+### Phase 6 candidate handoff evidence
+
+The Phase 6 candidate was tested from the real embedded image
+`pingap-native-canary:phase5-final` with immutable image ID
+`sha256:208c595296e2260671d31c63b53bc9588f44cee57440261418b6ac73b4396cc4`.
+The resource fixture was limited to 2 CPUs and 1 GiB and configured with 256
+domains, 5,000 entries per domain, and two profiles. The measured peak RSS was
+960,810,188 bytes, peak CPU was 100.47%, p99 admission latency was 1,374.98
+microseconds, all 1,280,000 admissions succeeded, saturation and expiry-slot
+reuse passed, and the run reported no OOM. The machine-readable result is
+`.cross-review/implementation/phase6/capacity.8smul4l6/result.json`.
+
+The independent real-image flow passed twice, including native block/release,
+expiry, detect-only, WAF/rate/challenge checks and the browser-backed native
+console flow. Evidence is in
+`.cross-review/implementation/phase6/e2e-run4.log` and
+`.cross-review/implementation/phase6/e2e-run5.log`; each run records
+`services_unchanged=true` and no CrowdSec runtime dependency. The copy-based
+config and synthetic challenge-key restore rehearsal is recorded in
+`.cross-review/implementation/phase6/rollback-rehearsal.json`; it restores
+the secret with mode 0400 and does not touch the canonical production store.
+These are candidate handoff artifacts only. Production containers and website
+bindings remain unchanged; rollout requires a separate operator decision.

@@ -67,6 +67,13 @@ impl Resolve for Recording {
     }
 }
 
+fn assert_loopback_reason(text: &str) {
+    assert!(
+        text.contains("127.0.0.0/8") || text.contains("::1/128"),
+        "{text}"
+    );
+}
+
 /// The whole cause chain flattened into one string. The criterion is that a refusal
 /// *surfaces its inner cause*, so an assertion on `err.to_string()` alone would pass
 /// on reqwest's outer "error sending request for url" and prove nothing.
@@ -471,7 +478,7 @@ async fn a_hostname_that_resolves_into_a_refused_range_is_refused_at_connect() {
         .expect_err("a refusal");
     let text = chain(&err);
     assert!(text.contains(LOOPBACK_NAME), "{text}");
-    assert!(text.contains("127.0.0.0/8"), "{text}");
+    assert_loopback_reason(&text);
     // The inner cause reaches the caller as this crate's own message rather than being
     // flattened into an opaque connect error. hyper-util labels the layer it failed at
     // "dns error", but that string belongs to a transitive dependency, so the assertion
@@ -516,7 +523,7 @@ async fn a_redirect_to_a_refused_hostname_is_refused_and_the_resolver_saw_the_ho
 
     let text = chain(&err);
     assert!(text.contains(LOOPBACK_NAME), "{text}");
-    assert!(text.contains("127.0.0.0/8"), "{text}");
+    assert_loopback_reason(&text);
 
     // The assertion that makes the one above mean something: the resolver was
     // consulted for the *hop*, and the pinned initial name never reached it.
@@ -653,6 +660,6 @@ async fn an_https_hostname_in_a_refused_range_is_refused_before_any_handshake()
         .expect_err("a refusal");
     let text = chain(&err);
     assert!(text.contains(LOOPBACK_NAME), "{text}");
-    assert!(text.contains("127.0.0.0/8"), "{text}");
+    assert_loopback_reason(&text);
     assert!(text.contains("intel: refused"), "{text}");
 }

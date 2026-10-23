@@ -5,6 +5,7 @@ cd "$root"
 case "${1:-}" in rate-policy|challenge-secret|admin-shell|native-abuse) exec python3 tests/admin/policy-canary.py "$1";; esac
 case "${1:-}" in native-ban-api|native-history-storage) exec python3 tests/admin/native-api-canary.py "$1";; esac
 case "${1:-}" in native-scenario|policy-unavailable-behaviour|policy-unavailable-limit) exec python3 tests/admin/native-canary.py "$1";; esac
+case "${1:-}" in native-capacity) exec python3 tests/admin/native-capacity.py;; esac
 case "${1:-}" in policy-save) ;; *) echo "Unsupported canary case: ${1:-missing}" >&2; exit 2;; esac
 image="${PINGAP_CANARY_IMAGE:-pingap-native-canary:phase1}"
 run_id="pingap-canary-$(date +%s)-$$"

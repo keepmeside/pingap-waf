@@ -41,6 +41,11 @@ const BUILT_SUBPATHS: [&str; 4] = ["src", "tests", "benches", "examples"];
 /// licence boundary on bytes nobody wrote.
 const GENERATED_DIRS: [&str; 3] = ["target", "corpus", "artifacts"];
 
+/// Non-Rust canary harnesses kept under the repository tests tree. Cargo does not
+/// compile this directory; excluding it keeps the boundary check about actual Cargo
+/// inputs while still walking every Rust test directory.
+const NON_RUST_HARNESSES: [&str; 1] = ["admin"];
+
 /// The two surveyed projects that ship no licence grant.
 ///
 /// Assembled from halves so this file — which lives under `crates/`, inside the roots it
@@ -103,11 +108,28 @@ fn crate_dirs() -> Vec<PathBuf> {
 /// examples, and is checked all the same: it is distributed content, so a foreign source
 /// file dropped there would ship.
 fn built_paths() -> Vec<PathBuf> {
+    let root = workspace_root();
     let mut out = Vec::new();
     for dir in crate_dirs() {
         for sub in BUILT_SUBPATHS {
             let path = dir.join(sub);
-            if path.is_dir() {
+            if !path.is_dir() {
+                continue;
+            }
+            if dir == root && sub == "tests" {
+                for entry in
+                    std::fs::read_dir(&path).into_iter().flatten().flatten()
+                {
+                    let name = entry.file_name();
+                    if name
+                        .to_str()
+                        .is_some_and(|name| NON_RUST_HARNESSES.contains(&name))
+                    {
+                        continue;
+                    }
+                    out.push(entry.path());
+                }
+            } else {
                 out.push(path);
             }
         }
