@@ -4,7 +4,7 @@
 //! assertion that matters is that the line exists with its fields — not that
 //! a helper was called.
 
-use pingap_challenge::pow::find_nonce;
+use pingap_challenge::pow::{find_nonce, solved};
 use pingap_challenge::{ChallengeConfig, plugin::Challenge};
 use pingap_core::{Ctx, Plugin, PluginStep, RequestPluginResult};
 use pingora::proxy::Session;
@@ -173,9 +173,14 @@ async fn every_decision_names_its_domain_and_reason_solved_and_refused() {
     };
     let body = String::from_utf8_lossy(&response.body).into_owned();
     let token = hidden_input(&body, "challenge_token");
+    let wrong_nonce = (0..1_000_000)
+        .find(|candidate| {
+            *candidate != nonce && !solved(&salt, *candidate, difficulty)
+        })
+        .expect("difficulty 1 has an invalid candidate");
     let mut ctx = Ctx::default();
     let mut session = session_for(&format!(
-        "GET /.pingap/challenge/verify?challenge_token={token}&nonce=0 \
+        "GET /.pingap/challenge/verify?challenge_token={token}&nonce={wrong_nonce} \
          HTTP/1.1\r\nHost: verdict.test\r\n\r\n"
     ))
     .await;
