@@ -204,6 +204,16 @@ test("native scenario UI roundtrip, real ban and authorized release", async ({
   for (let i = 0; i < 3; i++)
     expect((await traffic("site.test", "/login", "POST")).status()).toBe(401);
   expect((await traffic("site.test")).status()).toBe(403);
+  // Leave the isolated admin account in its pre-test state for the following
+  // Playwright cases, which intentionally exercise password-only login.
+  expect(
+    (
+      await page.request.post("/api/account/2fa/disable", {
+        headers,
+        data: { code: code(secret) },
+      })
+    ).status(),
+  ).toBe(204);
   const banPage = await (
     await page.request.get("/api/abuse/bans", { headers })
   ).json();
