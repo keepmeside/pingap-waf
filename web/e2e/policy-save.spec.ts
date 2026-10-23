@@ -130,7 +130,7 @@ test("viewer cannot mutate through UI or direct API after account switch", async
     headers: { Authorization: `Bearer ${token}` },
     data: {
       username,
-      email: "viewer@canary.invalid",
+      email: `${username}@canary.invalid`,
       password,
       role: "viewer",
     },
