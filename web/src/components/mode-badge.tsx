@@ -1,3 +1,4 @@
+import { ShieldAlert, Eye, CircleOff, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
@@ -24,12 +25,13 @@ const STYLES: Record<string, string> = {
 
 export function ModeBadge({ mode }: { mode: string }) {
   const style = STYLES[mode] ?? STYLES.off;
+  const Icon=mode==="detect"?Eye:mode==="off"?CircleOff:mode==="block"?ShieldAlert:ShieldCheck;
   return (
     <Badge
       variant={mode === "off" ? "secondary" : "outline"}
       className={cn("machine text-[11px] font-semibold uppercase tracking-wide", style)}
     >
-      {mode}
+      <Icon className="size-3" aria-hidden="true" />{mode}
     </Badge>
   );
 }

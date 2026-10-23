@@ -95,7 +95,7 @@ export default function Login() {
   // the header is now the padding itself and the card lands in the same place.
   return (
     <div className="min-h-svh overflow-auto bg-background">
-      <div className="mx-auto w-full max-w-[400px] px-4 pt-24 pb-10">
+      <div className="mx-auto w-full max-w-[420px] px-4 pt-20 pb-10">
         <div className="mb-5 flex items-center gap-2.5">
           <span className="flex size-8 items-center justify-center rounded-md border border-border bg-card">
             <img src={Logo} alt="" className="size-5 rounded-sm" />
@@ -103,7 +103,7 @@ export default function Login() {
           <span className="text-[15px] font-semibold tracking-tight">
             Pingap
           </span>
-          <span className="eyebrow ml-0.5">admin</span>
+          <span className="eyebrow ml-0.5">Security console</span>
         </div>
         {totpPending && (
           <Card className="w-full border-border">

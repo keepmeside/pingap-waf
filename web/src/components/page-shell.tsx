@@ -54,13 +54,13 @@ export function PageShell({
   return (
     <div
       className={cn(
-        "flex min-h-0 flex-1 flex-col",
+        "flex min-h-0 min-w-0 flex-1 flex-col",
         fill ? "overflow-hidden" : "overflow-auto",
       )}
     >
       <div
         className={cn(
-          "mx-auto flex w-full flex-col px-3 py-4 sm:px-4 sm:py-5 md:px-6 md:py-6",
+          "mx-auto flex min-w-0 w-full flex-col px-3 py-4 sm:px-5 sm:py-5 md:px-7 md:py-6",
           width === "narrow" ? "max-w-[1100px]" : "max-w-[1400px]",
           fill ? "min-h-0 flex-1 overflow-hidden" : "pb-10",
           className,

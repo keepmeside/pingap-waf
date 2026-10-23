@@ -48,7 +48,7 @@ function useGet<T>(key: string, path: string): UseQueryResult<ApiState<T>, Error
           typeof error === "object" && error !== null && "status" in error
             ? Number((error as { status?: number }).status)
             : 0;
-        if (status === 404 || status === 501 || status === 503) {
+        if (status === 404 || status === 501) {
           return {
             data: null,
             unavailable: true,
@@ -281,3 +281,5 @@ export function useReleaseNativeBan() {
       ["native-bans", "activity", "detection-metrics"].some(prefix => String(query.queryKey[1]).startsWith(prefix)) }),
   });
 }
+
+export const useNativeMetrics = () => useGet<{native_abuse?:Record<string,number>;native_event_delivery?:Record<string,number>|null}>("detection-metrics","/metrics/detection");

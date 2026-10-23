@@ -52,7 +52,7 @@ export function LoadingCard() {
 /** An inline error note for a failed fetch or mutation — small, in-flow, not a toast. */
 export function ErrorNote({ message }: { message: string }) {
   return (
-    <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+    <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
       {message}
     </p>
   );

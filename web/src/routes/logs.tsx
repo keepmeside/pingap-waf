@@ -1,3 +1,5 @@
+import { EventDetail } from "@/components/event-detail";
+import { Button } from "@/components/ui/button";
 import React from "react";
 import { PageShell } from "@/components/page-shell";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -152,6 +154,7 @@ function FilterBar({ filters, onChange }: { filters: Filters; onChange: (f: Filt
  * nothing to mutate on a finding, so the page carries no capability gate.
  */
 export default function Logs() {
+  const [selectedEvent,setSelectedEvent]=React.useState<WafEventRecord|null>(null);
   const [filters, setFilters] = React.useState<Filters>({
     domain: "",
     ruleId: "",
@@ -205,7 +208,7 @@ export default function Logs() {
                   <TableHead>Verdict</TableHead>
                   <TableHead>Client</TableHead>
                   <TableHead>Method</TableHead>
-                  <TableHead>URI</TableHead>
+                  <TableHead>URI</TableHead><TableHead>Details</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -227,7 +230,7 @@ export default function Logs() {
                     <TableCell className="machine">{orDash(event.method)}</TableCell>
                     <TableCell className="machine max-w-64 truncate text-muted-foreground" title={event.uri ?? undefined}>
                       {orDash(event.uri)}
-                    </TableCell>
+                    </TableCell><TableCell><Button size="sm" variant="outline" onClick={()=>setSelectedEvent(event)}>View event</Button></TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -235,6 +238,7 @@ export default function Logs() {
           )}
         </CardContent>
       </Card>
+      <EventDetail event={selectedEvent} onClose={()=>setSelectedEvent(null)}/>
     </PageShell>
   );
 }

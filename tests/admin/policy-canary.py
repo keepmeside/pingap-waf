@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Phase-4 real policy probes; owns every container, file and network it mutates."""
 from pathlib import Path
-import json, os, secrets, shutil, subprocess, sys, tempfile, time
+import json, os, secrets, shutil, subprocess, sys, tempfile, time, base64, urllib.parse
 ROOT=Path(__file__).resolve().parents[2]
 CASE=sys.argv[1]
-assert CASE in ('rate-policy','challenge-secret')
+assert CASE in ('rate-policy','challenge-secret','admin-shell','native-abuse')
 RUN=f'pingap-policy-{os.getpid()}-{time.time_ns()}'
 OUT=Path(tempfile.mkdtemp(prefix='policy.',dir=ROOT/'.cross-review/implementation'))
 for name in ['conf','data','keys','browser-results']:(OUT/name).mkdir()
@@ -13,10 +13,11 @@ def docker(*args,check=True):return subprocess.run(['docker',*args],capture_outp
 def services():return sorted(docker('ps','--format','{{.ID}} {{.Names}} {{.Image}}').splitlines())
 before=services();(OUT/'services-before.json').write_text(json.dumps(before))
 password=secrets.token_hex(24)
-(OUT/'candidate.env').write_text(f'PINGAP_ADMIN_ADDR=0.0.0.0:3018?store=/var/lib/pingap/canary.db\nPINGAP_ADMIN_USER=canary-admin\nPINGAP_ADMIN_PASSWORD={password}\nPINGAP_CONF=/opt/pingap/conf\nPINGAP_AUTORELOAD=true\nPINGAP_DISABLE_ACME=1\nRUST_LOG=error,main::auto_restart=debug\n')
+totp_key=urllib.parse.quote(base64.b64encode(secrets.token_bytes(32)).decode(),safe='')
+(OUT/'candidate.env').write_text(f'PINGAP_ADMIN_ADDR=0.0.0.0:3018?store=/var/lib/pingap/canary.db&totp_key={totp_key}\nPINGAP_ADMIN_USER=canary-admin\nPINGAP_ADMIN_PASSWORD={password}\nPINGAP_CONF=/opt/pingap/conf\nPINGAP_AUTORELOAD=true\nPINGAP_DISABLE_ACME=1\nRUST_LOG=error,main::auto_restart=debug\n')
 (OUT/'tester.env').write_text(f'PASSWORD={password}\nPINGAP_E2E_PASSWORD={password}\nPINGAP_E2E_URL=http://candidate:3018\n')
 for name in ['candidate.env','tester.env']:os.chmod(OUT/name,0o600)
-del password
+del password,totp_key
 keys=[]
 for name in ['challenge-v1','challenge-v2']:
     key=secrets.token_hex(32).encode();keys.append(key)
@@ -30,7 +31,7 @@ for name in ['LEGACY_KEY_ONE','LEGACY_KEY_TWO']:
     value=secrets.token_hex(32);keys.append(value.encode())
     with (OUT/'tester.env').open('a') as stream:stream.write(f'{name}={value}\n')
 (OUT/'conf/basic.toml').write_text('[basic]\nthreads=1\nname="isolated-policy-canary"\nlog_level="ERROR,main::auto_restart=DEBUG"\n[servers.http]\naddr="0.0.0.0:8080"\nlocations=[]\n')
-(OUT/'fixture.js').write_text("require('http').createServer((q,s)=>s.end('fixture')).listen(8081,'0.0.0.0')")
+(OUT/'fixture.js').write_text("require('http').createServer((q,s)=>{s.statusCode=q.url==='/login'&&q.method==='POST'?401:q.url.startsWith('/missing')?404:200;s.end('fixture')}).listen(8081,'0.0.0.0')")
 owned=[]
 try:
     (OUT/'image-id.txt').write_text(docker('image','inspect',IMAGE,'--format','{{.Id}}'))
@@ -42,8 +43,9 @@ try:
     tester=RUN+'-tester';owned.append(tester)
     with (OUT/'client.log').open('w') as log:
         common=['docker','run','--rm','--name',tester,'--network',RUN,'--label',f'pingap.canary={RUN}','--env-file',str(OUT/'tester.env')]
-        if CASE=='rate-policy':
+        if CASE in ('rate-policy','admin-shell','native-abuse'):
             command=common+['-v',f'{ROOT}/web:/source:ro','-v',f'{OUT}/browser-results:/work/test-results','-w','/work','mcr.microsoft.com/playwright:v1.64.1-noble','bash','-c',"set -euo pipefail; tar -C /source --exclude=node_modules --exclude=dist --exclude=test-results --exclude=playwright-report --exclude=.env* --exclude=.npmrc -cf - . | tar -C /work -xf -; npm ci --no-audit --no-fund && npm run test:e2e -- rate-policy.spec.ts"]
+            command[-1]=command[-1].replace("rate-policy.spec.ts",CASE+".spec.ts")
             subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=300)
         else:
             command=common+['-v',f'{ROOT}/tests/admin/challenge-secret-client.js:/client.js:ro','-v',f'{OUT}:/out','node:24-alpine','node','/client.js']
@@ -77,8 +79,8 @@ finally:
     # fixtures. Retain proof JSON/logs, not confidential test snapshots.
     docker('run','--rm','--network','none','-v',f'{OUT}/conf:/owned/conf','-v',f'{OUT}/data:/owned/data','node:24-alpine','chown','-R',f'{os.getuid()}:{os.getgid()}','/owned/conf','/owned/data')
     shutil.rmtree(OUT/'conf');shutil.rmtree(OUT/'data')
-    if CASE=='rate-policy':docker('run','--rm','--network','none','-v',f'{OUT}/browser-results:/artifacts','node:24-alpine','chown','-R',f'{os.getuid()}:{os.getgid()}','/artifacts')
+    if CASE in ('rate-policy','admin-shell','native-abuse'):docker('run','--rm','--network','none','-v',f'{OUT}/browser-results:/artifacts','node:24-alpine','chown','-R',f'{os.getuid()}:{os.getgid()}','/artifacts')
     subprocess.run(['python3',str(ROOT/'tests/admin/sanitize-artifacts.py'),str(OUT),str(OUT/'browser-results')],check=True)
     if leaked:raise RuntimeError('key material leaked in candidate logs (evidence redacted)')
 
-print('RATE_POLICY_PASS' if CASE=='rate-policy' else 'CHALLENGE_SECRET_PASS')
+print({'rate-policy':'RATE_POLICY_PASS','challenge-secret':'CHALLENGE_SECRET_PASS','admin-shell':'ADMIN_SHELL_PASS','native-abuse':'NATIVE_ABUSE_BROWSER_PASS'}[CASE])

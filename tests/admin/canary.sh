@@ -2,7 +2,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
-case "${1:-}" in rate-policy|challenge-secret) exec python3 tests/admin/policy-canary.py "$1";; esac
+case "${1:-}" in rate-policy|challenge-secret|admin-shell|native-abuse) exec python3 tests/admin/policy-canary.py "$1";; esac
 case "${1:-}" in native-ban-api|native-history-storage) exec python3 tests/admin/native-api-canary.py "$1";; esac
 case "${1:-}" in native-scenario|policy-unavailable-behaviour|policy-unavailable-limit) exec python3 tests/admin/native-canary.py "$1";; esac
 case "${1:-}" in policy-save) ;; *) echo "Unsupported canary case: ${1:-missing}" >&2; exit 2;; esac

@@ -12,7 +12,7 @@ const queryClient = new QueryClient({
 export default function Home() {
   return (
     <React.StrictMode>
-      <ThemeProvider storageKey="vite-ui-theme">
+      <ThemeProvider defaultTheme="light" storageKey="vite-ui-theme">
         <QueryClientProvider client={queryClient}>
           <Toaster />
           <RouterProvider router={router} />

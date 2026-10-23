@@ -1,3 +1,4 @@
+import { useLocation } from "react-router-dom";
 import React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import useConfigState from "@/states/config";
@@ -56,6 +57,7 @@ import { useShallow } from "zustand/react/shallow";
 export function MainHeader({
   className,
 }: React.HTMLAttributes<HTMLDivElement>) {
+  const consoleLocation = useLocation();
   const { t } = useTranslation();
 
   const iconClassName = "mr-2 h-4 w-4";
@@ -334,6 +336,7 @@ export function MainHeader({
     >
       <SidebarTrigger className={cn(iconBtnClass, "-ml-0.5")} />
       <div className="mx-1 h-4 w-px shrink-0 bg-border" />
+      <span className="hidden text-xs text-muted-foreground md:block">Security console / {consoleLocation.pathname.split("/")[1] || "Home"}</span>
       {liveReadout}
       <div className="flex-1" />
       <div className="flex items-center gap-1 sm:gap-2">
@@ -349,7 +352,7 @@ export function MainHeader({
               <AudioWaveform className="size-4" strokeWidth={1.8} />
             </Button>
           </PopoverTrigger>
-          <PopoverContent className="w-[400px]" align="end">
+          <PopoverContent className="w-[min(400px,calc(100vw-2rem))]" align="end">
             {base64Tool}
           </PopoverContent>
         </Popover>

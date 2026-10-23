@@ -1,3 +1,4 @@
+import { NativeControls } from "@/components/native-controls";
 import { PolicyControls } from "@/components/policy-controls";
 import React from "react";
 import { PageShell } from "@/components/page-shell";
@@ -111,6 +112,7 @@ export default function BotManager() {
       }
     >
       <PolicyControls />
+      <NativeControls />
       {policies.isPending ? (
         <LoadingCard />
       ) : policies.isError ? (

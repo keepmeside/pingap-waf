@@ -1,3 +1,5 @@
+import { configuredModes } from "@/components/security-overview";
+import { ModeBadge } from "@/components/mode-badge";
 import { bindingFromEntry, bindingKey } from "@/helpers/policy-controls";
 import React from "react";
 import { PageShell } from "@/components/page-shell";
@@ -60,7 +62,7 @@ export default function Domains() {
     <PageShell
       title="Domains"
       eyebrow="Traffic · domains"
-      description="A hostname, where its traffic goes, and what policy applies — the object operators actually think in, projected onto a Location behind the scenes."
+      description="Websites, listening ports and configured protection. Policies protect a website only after binding."
       actions={
         canEdit && (
           <Button size="sm" onClick={() => setEditing("*new*")}>
@@ -128,8 +130,8 @@ export default function Domains() {
                   <TableRow>
                     <TableHead>Name</TableHead>
                     <TableHead>Hostnames</TableHead>
-                    <TableHead>Upstream</TableHead>
-                    <TableHead>Policies</TableHead>
+                    <TableHead>Listener / TLS</TableHead><TableHead>Upstream</TableHead>
+                    <TableHead>Policies</TableHead><TableHead>Configured mode</TableHead><TableHead>Access / blocked</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -140,7 +142,7 @@ export default function Domains() {
                       <TableRow key={name}>
                         <TableCell className="font-medium">{name}</TableCell>
                         <TableCell>{domain?.hostnames.join(", ")}</TableCell>
-                        <TableCell>{domain?.upstream}</TableCell>
+                        <TableCell>{listeners.data?.data?.[domain.listener]?.addr??domain.listener}<p className="text-xs text-muted-foreground">{listeners.data?.data?.[domain.listener]?.tls?"TLS configured":"Plain listener"}</p></TableCell><TableCell>{domain?.upstream}</TableCell>
                         <TableCell>
                           <div className="flex flex-wrap gap-1">
                             {(domain?.policies ?? []).map((binding, index) => (
@@ -151,8 +153,9 @@ export default function Domains() {
                             {(domain?.policies ?? []).length === 0 && "—"}
                           </div>
                         </TableCell>
+                        <TableCell><div className="flex flex-wrap gap-1">{domain.policies.length?domain.policies.flatMap(binding=>configuredModes(bindingKey(binding),policies.data?.data?.[bindingKey(binding)])).map((mode,index)=><ModeBadge key={index} mode={mode}/>):"Unprotected"}</div></TableCell><TableCell className="text-xs text-muted-foreground">Unavailable</TableCell>
                         <TableCell className="text-right">
-                          <Button size="icon" variant="ghost" onClick={() => setEditing(name)}>
+                          <Button aria-label={`Edit domain ${name}`} size="icon" variant="ghost" onClick={() => setEditing(name)}>
                             <Pencil className="size-4" />
                           </Button>
                           {canEdit && (

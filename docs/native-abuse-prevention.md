@@ -121,3 +121,11 @@ use separate profiles when sites require separate budgets. Response steps
 cannot enforce a limiter, and callers may choose429 instead of a challenge.
 
 Limiter numeric fields use integer extraction. A fractional max retains the legacy fallback of zero; a fractional weight falls back to50 before clamping. The editor previews these actual fallbacks and warns about a zero ceiling, without rejecting legacy zero, negative, or subsecond inputs.
+
+## Administration console
+
+The console uses a light navigation surface and turquoise selection inspired by the operator-supplied SafeLine screenshots, rebuilt with Pingap components and branding. Reference PNGs and an original mockup remain in the ignored review spike folder; no SafeLine assets ship in the app.
+
+Dashboard rollups describe WAF findings and enforced findings, not total request traffic. Access totals, visitors, geography, client distribution, response-status distribution and QPS are unavailable when the current API has no corresponding source. Unsupported time windows are disabled. Empty stores never generate demo metrics. Event inspection renders stored metadata as text; request/response headers and bodies are not captured by this view.
+
+Native scenario profiles must be saved and explicitly attached to a website. Exact authentication method/path/statuses, threshold, counting window, ban lifetime and detect/block mode remain visible in the editor. Behind a trusted proxy configure trusted client identity before enabling enforcement. Detect records observations without refusing requests. Active bans are process-local; a new epoch after restart means runtime bans were reset, while lifecycle history remains permanent. Authorized releases report queued or degraded audit delivery honestly; queued is not a persistence acknowledgement. A timeout is unconfirmed: inspect the version before retrying.
