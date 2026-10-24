@@ -31,6 +31,6 @@ if docker ps --format '{{.Names}} {{.Image}}' | tr '[:upper:]' '[:lower:]' | gre
   exit 1
 fi
 cat > "$out/result.json" <<JSON
-{"image":"$image","image_id":"$image_id","cases":["rate-policy","challenge-secret","native-scenario","native-ban-api","native-history-storage","native-abuse-browser"],"services_unchanged":true,"crowdsec_runtime_dependency":false}
+{"image":"$image","image_id":"$image_id","cases":["rate-policy","challenge-secret","native-scenario","native-ban-api","native-history-storage","native-abuse-browser"],"native_restart_reset_verified":true,"services_unchanged":true,"crowdsec_runtime_dependency":false}
 JSON
 printf 'NATIVE_ABUSE_E2E_PASS\n'
