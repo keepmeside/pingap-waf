@@ -13,8 +13,48 @@
 // limitations under the License.
 
 use snafu::Snafu;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 static LOG_TARGET: &str = "pingap::core";
+
+/// A reload is published as one even generation. Requests that begin while the
+/// generation is odd, or that cross a generation boundary, fail closed instead of
+/// combining a new route map with the previous native host snapshot.
+static POLICY_GENERATION: AtomicU64 = AtomicU64::new(0);
+static POLICY_RELOAD_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyGeneration(pub u64);
+
+pub struct PolicyReloadGuard {
+    _lock: Option<MutexGuard<'static, ()>>,
+}
+
+pub fn begin_policy_reload() -> PolicyReloadGuard {
+    // Reload callbacks are synchronous and can be triggered concurrently. Serialize them
+    // so the even/odd generation cannot briefly look settled between two overlapping
+    // reloads, and so route and native snapshots are always published as one update.
+    let lock = POLICY_RELOAD_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    POLICY_GENERATION.fetch_add(1, Ordering::SeqCst);
+    PolicyReloadGuard { _lock: Some(lock) }
+}
+
+pub fn policy_generation() -> u64 {
+    POLICY_GENERATION.load(Ordering::Acquire)
+}
+
+pub fn policy_reload_in_progress() -> bool {
+    policy_generation() % 2 == 1
+}
+
+impl Drop for PolicyReloadGuard {
+    fn drop(&mut self) {
+        POLICY_GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 #[derive(Debug, Snafu)]
 pub enum Error {

@@ -87,7 +87,8 @@ pub async fn put(
     params: &[String],
 ) -> Result<ApiResponse> {
     let name = profile_name(params)?;
-    let base = intent_resource::base_intent(state).await?;
+    let (base, expected_version_id) =
+        intent_resource::base_intent_snapshot(state).await?;
     let body = crate::policy_secret::mutation(
         request.json()?,
         base.policies.get(name),
@@ -103,6 +104,7 @@ pub async fn put(
         name,
         body,
         base,
+        expected_version_id,
         |intent| &mut intent.policies,
     )
     .await

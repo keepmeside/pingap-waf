@@ -222,6 +222,36 @@ async fn a_successful_apply_is_pending_until_verified_and_then_applied() {
 }
 
 #[tokio::test]
+async fn an_edit_prepared_from_an_older_version_is_rejected_before_commit() {
+    let h = harness(&[]).await;
+    let first = h
+        .applier
+        .apply(&intent(1), &actor(), "domain.create", 1_000)
+        .await
+        .expect("baseline applies");
+
+    let error = h
+        .applier
+        .apply_if_current(
+            &intent(2),
+            Some("version-that-is-not-current"),
+            &actor(),
+            "waf.update",
+            2_000,
+        )
+        .await
+        .expect_err("stale edit must not overwrite the baseline");
+    let message = error.to_string();
+    assert!(message.contains("configuration changed"), "{message}");
+    assert!(message.contains(&first.version.id), "{message}");
+    assert_eq!(
+        h.sink.sink.commits.lock().expect("lock").len(),
+        1,
+        "stale edit reached the config sink"
+    );
+}
+
+#[tokio::test]
 async fn a_config_whose_waf_fails_to_construct_never_reaches_applied() {
     // The plan-level criterion. The WAF plugin "constructs" fine at validation — the
     // gate passes — and is then absent from the provider after reload, which is what

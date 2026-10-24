@@ -7,8 +7,8 @@ pub mod store;
 
 pub use config::{BehaviourConfig, ConfigError, SignalWeights, Thresholds};
 pub use plugin::{
-    Behaviour, BehaviourCounters, BehaviourSnapshot, budget_exceeded,
-    counters_snapshot, tracked_snapshot,
+    Behaviour, BehaviourCounters, BehaviourSnapshot, BehaviourSnapshots,
+    budget_exceeded, counters_snapshot, tracked_snapshot,
 };
 pub use profile::{Observation, Profile};
 pub use score::{Classification, Score};
@@ -20,6 +20,13 @@ pub mod scenario;
 /// Reconcile process state only after a successful runtime provider replacement.
 pub fn activate_profiles(
     configs: &std::collections::HashMap<String, pingap_config::PluginConf>,
+) {
+    activate_profiles_with_retained(configs, &[]);
+}
+
+pub fn activate_profiles_with_retained(
+    configs: &std::collections::HashMap<String, pingap_config::PluginConf>,
+    retained_namespaces: &[String],
 ) {
     let profiles = configs
         .values()
@@ -44,7 +51,8 @@ pub fn activate_profiles(
             .ok()
         })
         .collect();
-    decisions::registry().activate(profiles);
+    decisions::registry()
+        .activate_with_retained(profiles, retained_namespaces);
 }
 
 /// Routing and abuse admission share the new registered set after a successful

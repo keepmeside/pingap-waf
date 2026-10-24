@@ -36,6 +36,16 @@ use std::collections::BTreeMap;
 
 /// The intent a new edit starts from.
 pub(crate) async fn base_intent(state: &AppState) -> Result<Intent> {
+    Ok(base_intent_snapshot(state).await?.0)
+}
+
+/// Read the edit base and the applied version that protected it.
+///
+/// The version id is carried into the write so the applier can reject an edit prepared
+/// from an older intent after another request has committed.
+pub(crate) async fn base_intent_snapshot(
+    state: &AppState,
+) -> Result<(Intent, Option<String>)> {
     // A version nobody has settled means the previous apply is still in its reload window,
     // or the process died inside one. Either way there is no safe base: the newest applied
     // intent would silently drop that edit, and the pending one would build on a config
@@ -53,17 +63,18 @@ pub(crate) async fn base_intent(state: &AppState) -> Result<Intent> {
     }
     match state.store.latest_applied_config_version().await? {
         Some(version) => {
-            serde_json::from_str(&version.intent_json).map_err(|e| {
+            let intent = serde_json::from_str(&version.intent_json).map_err(|e| {
                 ApiError::Internal {
                     reason: format!(
                         "stored intent for version `{}` is unreadable: {e}",
                         version.id
                     ),
                 }
-            })
+            })?;
+            Ok((intent, Some(version.id)))
         },
         // Nothing has ever been applied. The first write is the first version.
-        None => Ok(Intent::default()),
+        None => Ok((Intent::default(), None)),
     }
 }
 
@@ -99,6 +110,13 @@ pub(crate) fn apply_error(error: ApplyError) -> ApiError {
         ApplyError::NothingToRollBackTo => ApiError::Conflict {
             reason: "no version has ever been confirmed applied".to_string(),
         },
+        ApplyError::StaleBase { expected, actual } => ApiError::Conflict {
+            reason: format!(
+                "configuration changed while this edit was being prepared \
+                 (expected {:?}, current {:?}); retry",
+                expected, actual
+            ),
+        },
         other => ApiError::Internal {
             reason: other.to_string(),
         },
@@ -115,13 +133,15 @@ async fn apply(
     state: &AppState,
     request: &ApiRequest,
     intent: &Intent,
+    expected_version_id: Option<&str>,
     action: String,
 ) -> Result<ApiResponse> {
     let actor = caller(request)?;
     let outcome = state
         .applier
-        .apply(
+        .apply_if_current(
             intent,
+            expected_version_id,
             &Actor {
                 id: Some(actor.user_id.clone()),
                 username: actor.username.clone(),
@@ -182,13 +202,16 @@ pub(crate) async fn upsert<T: Serialize + DeserializeOwned>(
     pick: fn(&mut Intent) -> &mut BTreeMap<String, T>,
 ) -> Result<ApiResponse> {
     let value: T = request.json()?;
+    let (intent, expected_version_id) =
+        base_intent_snapshot(state).await?;
     insert(
         state,
         request,
         kind,
         name,
         value,
-        base_intent(state).await?,
+        intent,
+        expected_version_id,
         pick,
     )
     .await
@@ -206,6 +229,7 @@ pub(crate) async fn insert<T: Serialize>(
     name: &str,
     value: T,
     mut intent: Intent,
+    expected_version_id: Option<String>,
     pick: fn(&mut Intent) -> &mut BTreeMap<String, T>,
 ) -> Result<ApiResponse> {
     let existed = pick(&mut intent).insert(name.to_string(), value).is_some();
@@ -213,6 +237,7 @@ pub(crate) async fn insert<T: Serialize>(
         state,
         request,
         &intent,
+        expected_version_id.as_deref(),
         format!(
             "{kind}.{}:{name}",
             if existed { "update" } else { "create" }
@@ -233,12 +258,20 @@ pub(crate) async fn remove<T: Serialize>(
     name: &str,
     pick: fn(&mut Intent) -> &mut BTreeMap<String, T>,
 ) -> Result<ApiResponse> {
-    let mut intent = base_intent(state).await?;
+    let (mut intent, expected_version_id) =
+        base_intent_snapshot(state).await?;
     if pick(&mut intent).remove(name).is_none() {
         return Err(ApiError::NotFound {
             kind: kind.to_string(),
             id: name.to_string(),
         });
     }
-    apply(state, request, &intent, format!("{kind}.delete:{name}")).await
+    apply(
+        state,
+        request,
+        &intent,
+        expected_version_id.as_deref(),
+        format!("{kind}.delete:{name}"),
+    )
+    .await
 }

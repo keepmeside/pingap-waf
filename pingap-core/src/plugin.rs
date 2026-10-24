@@ -337,6 +337,13 @@ pub fn security_failure_intent(
     if abuse.get("enabled").is_some_and(|v| !v.is_boolean()) {
         return true;
     }
+    if abuse.get("enabled").is_none()
+        && abuse
+            .as_object()
+            .is_some_and(|fields| fields.keys().any(|key| key != "enabled"))
+    {
+        return true;
+    }
     if abuse.get("enabled").is_none() {
         return false;
     }
@@ -344,12 +351,60 @@ pub fn security_failure_intent(
     for name in ["failed_login", "scan"] {
         if let Some(scenario) = abuse.get(name) {
             found = true;
-            if scenario.get("mode").and_then(|v| v.as_str()) != Some("detect") {
+            if !valid_detect_scenario(name, scenario) {
                 return true;
             }
         }
     }
     !found
+}
+
+/// A detect-only Behaviour is advisory only after the fields required to build a
+/// real rule are present and well-shaped. The implementation crate performs the full
+/// typed validation; this small boundary check keeps malformed explicit security
+/// config fail-closed without introducing a dependency cycle from core to plugins.
+fn valid_detect_scenario(name: &str, value: &serde_json::Value) -> bool {
+    let Some(rule) = value.as_object() else {
+        return false;
+    };
+    if rule.get("mode").and_then(|v| v.as_str()) != Some("detect")
+        || rule
+            .get("threshold")
+            .and_then(|v| v.as_u64())
+            .is_none_or(|n| n == 0)
+        || rule
+            .get("window")
+            .and_then(|v| v.as_str())
+            .is_none_or(str::is_empty)
+        || rule
+            .get("ban_ttl")
+            .and_then(|v| v.as_str())
+            .is_none_or(str::is_empty)
+    {
+        return false;
+    }
+    if name != "failed_login" {
+        return true;
+    }
+    let Some(path) = rule.get("path").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Some(method) = rule.get("method").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Some(statuses) = rule.get("statuses").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    path.starts_with('/')
+        && !path.contains('?')
+        && !path.contains('#')
+        && method.parse::<http::Method>().is_ok()
+        && !statuses.is_empty()
+        && statuses.iter().all(|status| {
+            status
+                .as_u64()
+                .is_some_and(|code| (400..=599).contains(&code))
+        })
 }
 
 /// Optional per-request multiplier supplied by the adaptive learner.
@@ -480,7 +535,11 @@ mod security_failure_intent_tests {
         }
         assert!(!security_failure_intent(
             "behaviour",
-            &json!({"enabled":true,"abuse":{"enabled":true,"scan":{"mode":"detect"}}})
+            &json!({"enabled":true,"abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
+        ));
+        assert!(security_failure_intent(
+            "behaviour",
+            &json!({"enabled":true,"abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":0,"ban_ttl":"2m"}}})
         ));
         assert!(!security_failure_intent(
             "behaviour",

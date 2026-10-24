@@ -511,6 +511,13 @@ impl Server {
         let header = session.req_header();
         let host = pingap_core::get_host(header).unwrap_or_default();
         let path = header.uri.path();
+        let generation = pingap_core::policy_generation();
+        if pingap_core::policy_reload_in_progress() {
+            return Err(new_internal_error(
+                503,
+                "routing policy is being reloaded",
+            ));
+        }
 
         // locations not found
         let Some(route) = self.server_locations_provider.get(&self.name) else {
@@ -537,6 +544,16 @@ impl Server {
         let Some((location, captures)) = matched_info else {
             return Ok(());
         };
+        if pingap_core::policy_reload_in_progress()
+            || pingap_core::policy_generation() != generation
+        {
+            return Err(new_internal_error(
+                503,
+                "routing policy changed during reload",
+            ));
+        }
+        ctx.extensions
+            .insert(pingap_core::PolicyGeneration(generation));
 
         // only execute all subsequent operations after successtracingy matching location
         ctx.upstream.location = location.name.clone();

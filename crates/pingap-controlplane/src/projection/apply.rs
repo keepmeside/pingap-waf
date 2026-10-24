@@ -42,6 +42,14 @@ pub enum ApplyError {
 
     #[snafu(display("no applied version to roll back to"))]
     NothingToRollBackTo,
+
+    #[snafu(display(
+        "configuration changed while this edit was being prepared (expected {:?}, current {:?}); retry"
+    ))]
+    StaleBase {
+        expected: Option<String>,
+        actual: Option<String>,
+    },
 }
 
 impl From<super::ProjectionError> for ApplyError {
@@ -197,6 +205,45 @@ impl Applier {
         now: i64,
     ) -> Result<Outcome> {
         let _operation = self.operation_lock.lock().await;
+        self.apply_locked(intent, actor, action, now).await
+    }
+
+    /// Apply an edit only when the applied version is still the one the caller read.
+    ///
+    /// The route layer necessarily reads an intent before it can modify one entry. The
+    /// version check belongs under the same operation lock as the write so two requests
+    /// cannot both read version A and then silently publish their edits in sequence,
+    /// dropping one of the changes.
+    pub async fn apply_if_current(
+        &self,
+        intent: &Intent,
+        expected_version_id: Option<&str>,
+        actor: &Actor,
+        action: &str,
+        now: i64,
+    ) -> Result<Outcome> {
+        let _operation = self.operation_lock.lock().await;
+        let actual_version_id = self
+            .store
+            .latest_applied_config_version()
+            .await?
+            .map(|version| version.id);
+        if actual_version_id.as_deref() != expected_version_id {
+            return Err(ApplyError::StaleBase {
+                expected: expected_version_id.map(str::to_owned),
+                actual: actual_version_id,
+            });
+        }
+        self.apply_locked(intent, actor, action, now).await
+    }
+
+    async fn apply_locked(
+        &self,
+        intent: &Intent,
+        actor: &Actor,
+        action: &str,
+        now: i64,
+    ) -> Result<Outcome> {
         let projected = generate(intent)?;
         let intent_json =
             serde_json::to_string(intent).map_err(|e| ApplyError::Commit {

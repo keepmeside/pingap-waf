@@ -613,8 +613,10 @@ impl Plugin for Challenge {
         else {
             return Ok(RequestPluginResult::Continue);
         };
-        if let Some(snapshot) =
-            ctx.extensions.get::<pingap_behaviour::BehaviourSnapshot>()
+        if let Some(snapshot) = ctx
+            .extensions
+            .get::<pingap_behaviour::BehaviourSnapshots>()
+            .and_then(|snapshots| snapshots.strongest())
         {
             marker.level =
                 marker.level.saturating_add(match snapshot.classification {

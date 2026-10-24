@@ -99,7 +99,8 @@ pub async fn list(
     _request: &ApiRequest,
     _params: &[String],
 ) -> Result<ApiResponse> {
-    let intent = intent_resource::base_intent(state).await?;
+    let (intent, expected_version_id) =
+        intent_resource::base_intent_snapshot(state).await?;
     let view: BTreeMap<&str, CertificateView> = intent
         .certificates
         .iter()
@@ -151,6 +152,7 @@ pub async fn put(
         name,
         certificate,
         intent,
+        expected_version_id,
         |intent| &mut intent.certificates,
     )
     .await

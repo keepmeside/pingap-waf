@@ -63,6 +63,25 @@ pub fn new_location_provider() -> Arc<dyn LocationProvider> {
 pub fn try_init_locations(
     location_configs: &HashMap<String, LocationConf>,
 ) -> Result<Vec<String>> {
+    let hosts: Vec<String> = location_configs
+        .values()
+        .filter_map(|conf| conf.host.as_deref())
+        .flat_map(|hosts| hosts.split(','))
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let host_policy = pingap_domainstate::HostPolicy::new(&hosts);
+    if host_policy.registered() > pingap_domainstate::Limits::default().max_domains {
+        return Err(Error::Invalid {
+            message: format!(
+                "configured host count {} exceeds native abuse capacity {}",
+                host_policy.registered(),
+                pingap_domainstate::Limits::default().max_domains
+            ),
+        });
+    }
+    let _reload = pingap_core::begin_policy_reload();
     let mut locations = AHashMap::new();
     let mut updated_locations = vec![];
     for (name, conf) in location_configs.iter() {
@@ -78,7 +97,10 @@ pub fn try_init_locations(
         })?;
         locations.insert(name.to_string(), Arc::new(lo));
     }
-    LOCATION_PROVIDER.store(locations);
+    // Publish enforcement state before routing. The location map is still the old
+    // map while these snapshots change, so a request can never observe a newly routed
+    // host with the previous native host set and bypass protection during reload.
+    pingap_behaviour::set_abuse_hosts(host_policy);
     // The registered-host set every stateful subsystem classifies a request's Host
     // against, derived here because a Location's `host` restriction is the one place
     // the config names the hosts it serves. Deriving it in the same pass as the
@@ -87,19 +109,7 @@ pub fn try_init_locations(
     // with no host restriction matches every host, so it registers nothing: its
     // traffic is exactly the traffic that lands in the shared overflow bucket, the
     // trade the domain-state design records, made visible by the overflow counters.
-    pingap_domainstate::set_registered_hosts(
-        location_configs
-            .values()
-            .filter_map(|conf| conf.host.as_deref())
-            .flat_map(|hosts| hosts.split(','))
-            .map(str::trim),
-    );
-    pingap_behaviour::set_abuse_hosts(pingap_domainstate::HostPolicy::new(
-        location_configs
-            .values()
-            .filter_map(|conf| conf.host.as_deref())
-            .flat_map(|hosts| hosts.split(','))
-            .map(str::trim),
-    ));
+    pingap_domainstate::set_registered_hosts(hosts.iter().map(String::as_str));
+    LOCATION_PROVIDER.store(locations);
     Ok(updated_locations)
 }

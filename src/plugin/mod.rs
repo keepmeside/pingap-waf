@@ -615,12 +615,32 @@ pub fn try_init_plugins(
     // Stored even when construction failed, which is upstream behaviour and stays that
     // way — but now the failures are stored with it, so a Location listing one can be
     // refused instead of silently proxying unfiltered.
+    // Keep the last known-good native registry for a failed replacement while still
+    // activating unrelated successful Behaviour profiles. Locations will refuse the
+    // failed provider under fail-closed, but old bans/counters are not purged merely
+    // because the candidate config was malformed.
     let active_abuse_configs = abuse_configs
         .iter()
         .filter(|(name, _)| plugins.contains_key(*name))
         .map(|(name, conf)| (name.clone(), conf.clone()))
         .collect();
-    pingap_behaviour::activate_profiles(&active_abuse_configs);
+    let retained_namespaces = abuse_configs
+        .iter()
+        .filter(|(name, conf)| {
+            failures.contains_key(*name)
+                && conf.get("category").and_then(|v| v.as_str())
+                    == Some("behaviour")
+        })
+        .filter_map(|(_, conf)| {
+            conf.get("abuse_namespace")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    pingap_behaviour::activate_profiles_with_retained(
+        &active_abuse_configs,
+        &retained_namespaces,
+    );
     PLUGIN_PROVIDER.store(plugins, failures);
     let error = if !errors.is_empty() {
         let error = errors

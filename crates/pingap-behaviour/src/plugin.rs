@@ -101,6 +101,31 @@ pub struct BehaviourSnapshot {
     pub classification: Classification,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct BehaviourSnapshots(BTreeMap<String, BehaviourSnapshot>);
+
+impl BehaviourSnapshots {
+    fn insert(&mut self, key: String, snapshot: BehaviourSnapshot) {
+        self.0.insert(key, snapshot);
+    }
+
+    fn remove(&mut self, key: &str) -> Option<BehaviourSnapshot> {
+        self.0.remove(key)
+    }
+
+    pub fn strongest(&self) -> Option<&BehaviourSnapshot> {
+        self.0.values().max_by_key(|snapshot| {
+            let class = match snapshot.classification {
+                Classification::Human => 0,
+                Classification::Suspicious => 1,
+                Classification::Bot => 2,
+                Classification::DdosShaped => 3,
+            };
+            (class, snapshot.score.value)
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingObservation {
     domain: String,
@@ -245,6 +270,26 @@ impl Plugin for Behaviour {
         let identity = self.identity(session, ctx);
         let mut ticket = None;
         if let Some(native_profile) = &self.native_profile {
+            let expected_generation = ctx
+                .extensions
+                .get::<pingap_core::PolicyGeneration>()
+                .map(|generation| generation.0);
+            if native_profile.config.enforcing()
+                && (pingap_core::policy_reload_in_progress()
+                    || expected_generation
+                        .is_some_and(|generation| {
+                            generation != pingap_core::policy_generation()
+                        }))
+            {
+                return Ok(RequestPluginResult::Respond(
+                    pingap_core::HttpResponse::builder(
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                    )
+                    .no_store()
+                    .body("Abuse policy is reloading")
+                    .finish(),
+                ));
+            }
             match crate::decisions::registry().admit_profile(
                 native_profile,
                 &domain,
@@ -351,10 +396,18 @@ impl Plugin for Behaviour {
         }
         count(&domain, &score);
         if score.contributing_signals > 0 {
-            ctx.extensions.insert(BehaviourSnapshot {
+            let snapshot = BehaviourSnapshot {
                 score,
                 classification: score.classification,
-            });
+            };
+            if ctx.extensions.get::<BehaviourSnapshots>().is_none() {
+                ctx.extensions.insert(BehaviourSnapshots::default());
+            }
+            if let Some(snapshots) =
+                ctx.extensions.get_mut::<BehaviourSnapshots>()
+            {
+                snapshots.insert(self.pending_key.clone(), snapshot);
+            }
         }
         ctx.add_variable("behaviour_score", &score.value.to_string());
         let profile_name = if score.contributing_signals == 0 {
@@ -406,7 +459,9 @@ impl Plugin for Behaviour {
             matches!(ctx.get_variable("challenge_status"), Some("issued"));
         pending.observation.bot = ctx
             .extensions
-            .get::<BehaviourSnapshot>()
+            .get_mut::<BehaviourSnapshots>()
+            .and_then(|snapshots| snapshots.remove(&self.pending_key))
+            .as_ref()
             .is_some_and(|snapshot| {
                 matches!(
                     snapshot.classification,
