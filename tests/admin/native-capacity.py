@@ -44,7 +44,6 @@ try:
             "build",
             "-p", "pingap-behaviour",
             "--example", "native_capacity",
-            "--features", "full",
         )
         (OUT / "compile.log").write_text(compile_result.stdout + compile_result.stderr)
     if not BINARY.exists():
