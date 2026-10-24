@@ -88,6 +88,7 @@ function code(secret){const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let bits
   const absent=await api('/abuse/bans/'+ban.id,'DELETE',owner);check(absent.status===200&&absent.json.outcome==='already_absent','retry already absent');
   check((await traffic('scan','/benign')).status===200,'release restores200');
   await eventually(async()=>{const rows=await nativeRows();return rows.filter(e=>e.action==='native.ban.released'&&e.target===ban.id&&e.actor_username==='canary-admin').length===1},'release permanent actor');
+  console.log('NATIVE_RESTART_RESET_PASS');
   fs.writeFileSync('/out/result.json',JSON.stringify({case:process.env.CASE,detect_history:true,epoch:page.json.epoch,restart_epoch_before:beforeRestart.json.epoch,restart_epoch_after:afterRestart.json.epoch,restart_reset:true,post_restart_allowed:true,release:released.json,rbac:true,totp:true,metric_integrity:true}));
  }else{
   const sizes=()=>{const entries=fs.readdirSync('/db').filter(n=>n.startsWith('canary.db'));return Object.fromEntries(entries.map(n=>[n,fs.statSync('/db/'+n).size]))};
