@@ -50,6 +50,11 @@ pub enum ApplyError {
         expected: Option<String>,
         actual: Option<String>,
     },
+
+    #[snafu(display(
+        "config version `{version_id}` has not been confirmed enforcing yet; retry once it settles"
+    ))]
+    PendingVersion { version_id: String },
 }
 
 impl From<super::ProjectionError> for ApplyError {
@@ -223,6 +228,13 @@ impl Applier {
         now: i64,
     ) -> Result<Outcome> {
         let _operation = self.operation_lock.lock().await;
+        if let Some(newest) = self.store.latest_config_version().await?
+            && newest.status == ConfigStatus::Pending
+        {
+            return Err(ApplyError::PendingVersion {
+                version_id: newest.id,
+            });
+        }
         let actual_version_id = self
             .store
             .latest_applied_config_version()

@@ -252,6 +252,44 @@ async fn an_edit_prepared_from_an_older_version_is_rejected_before_commit() {
 }
 
 #[tokio::test]
+async fn an_edit_read_before_a_pending_version_cannot_apply_over_it() {
+    let h = harness(&[]).await;
+    let first = h
+        .applier
+        .apply(&intent(1), &actor(), "domain.create", 1_000)
+        .await
+        .expect("baseline applies");
+    let pending = h
+        .store
+        .record_config_version(
+            NewConfigVersion {
+                hash: "pending-hash".into(),
+                status: ConfigStatus::Pending,
+                actor_id: actor().id,
+                actor_username: actor().username,
+                intent_json: serde_json::to_string(&intent(2)).expect("intent"),
+                error: None,
+            },
+            2_000,
+        )
+        .await
+        .expect("pending version");
+    let error = h
+        .applier
+        .apply_if_current(
+            &intent(3),
+            Some(&first.version.id),
+            &actor(),
+            "waf.update",
+            3_000,
+        )
+        .await
+        .expect_err("pending version must block a stale in-flight edit");
+    assert!(error.to_string().contains(&pending.id));
+    assert_eq!(h.sink.sink.commits.lock().expect("lock").len(), 1);
+}
+
+#[tokio::test]
 async fn a_config_whose_waf_fails_to_construct_never_reaches_applied() {
     // The plan-level criterion. The WAF plugin "constructs" fine at validation — the
     // gate passes — and is then absent from the provider after reload, which is what

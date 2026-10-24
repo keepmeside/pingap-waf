@@ -111,6 +111,11 @@ pub(crate) fn apply_error(error: ApplyError) -> ApiError {
         ApplyError::NothingToRollBackTo => ApiError::Conflict {
             reason: "no version has ever been confirmed applied".to_string(),
         },
+        ApplyError::PendingVersion { version_id } => ApiError::Conflict {
+            reason: format!(
+                "config version `{version_id}` has not been confirmed enforcing yet; retry once it settles"
+            ),
+        },
         ApplyError::StaleBase { expected, actual } => ApiError::Conflict {
             reason: format!(
                 "configuration changed while this edit was being prepared \

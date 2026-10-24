@@ -16,11 +16,13 @@ use pingora::proxy::Session;
 use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 const CATEGORY: &str = "behaviour";
 static GLOBAL: OnceLock<Arc<BehaviourStore>> = OnceLock::new();
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 /// One domain's behaviour counters: fixed-name fields, aggregate only, none
 /// keyed by client identity. The names are the values the `behaviour_profile`
@@ -151,6 +153,22 @@ pub struct Behaviour {
 impl TryFrom<&PluginConf> for Behaviour {
     type Error = Error;
     fn try_from(value: &PluginConf) -> Result<Self, Self::Error> {
+        // Explicit false is the supported disable switch. An omitted flag with
+        // enabled abuse would otherwise construct an inert required policy.
+        if !value.contains_key("enabled")
+            && value
+                .get("abuse")
+                .and_then(|abuse| abuse.get("enabled"))
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+        {
+            return Err(Error::Invalid {
+                category: CATEGORY.into(),
+                message:
+                    "top-level enabled must be explicit when abuse is enabled"
+                        .into(),
+            });
+        }
         let config: BehaviourConfig = toml::Value::Table(value.clone())
             .try_into()
             .map_err(|e| Error::Invalid {
@@ -210,10 +228,11 @@ impl TryFrom<&PluginConf> for Behaviour {
             } else {
                 None
             },
+            // Two identically configured Behaviour plugins may run on the same
+            // request. Their response observations must have distinct slots.
             pending_key: format!(
-                "{}:{}",
-                config.abuse_namespace.as_deref().unwrap_or_default(),
-                pingap_plugin::get_hash_key(value)
+                "behaviour:{}",
+                NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed)
             ),
             hash: pingap_plugin::get_hash_key(value),
         })
@@ -500,6 +519,38 @@ fn register() {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_enabled_rejects_native_abuse_but_explicit_false_disables_it() {
+        let mut conf: PluginConf = toml::from_str(
+            r#"category = "behaviour"
+abuse_namespace = "behaviour:example"
+[abuse]
+enabled = true
+[abuse.scan]
+mode = "block"
+window = "1m"
+threshold = 2
+ban_ttl = "1m"
+"#,
+        )
+        .expect("config");
+        assert!(Behaviour::try_from(&conf).is_err());
+        conf.insert("enabled".into(), toml::Value::Boolean(false));
+        assert!(Behaviour::try_from(&conf).is_ok());
+    }
+
+    #[test]
+    fn identical_plugin_instances_have_distinct_request_slots() {
+        let conf: PluginConf =
+            toml::from_str("category = \"behaviour\"\nenabled = true\n")
+                .expect("config");
+        let first = Behaviour::try_from(&conf).expect("first");
+        let second = Behaviour::try_from(&conf).expect("second");
+        assert_ne!(first.pending_key, second.pending_key);
+    }
+
     #[test]
     fn category_is_registered_with_the_factory() {
         assert!(

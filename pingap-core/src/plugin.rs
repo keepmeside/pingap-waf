@@ -328,6 +328,11 @@ pub fn security_failure_intent(
     let Some(abuse) = conf.get("abuse") else {
         return false;
     };
+    // An omitted or malformed top-level flag cannot be treated as a valid
+    // detect-only profile: the constructor's default is disabled.
+    if conf.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+        return true;
+    }
     if !abuse.is_object() {
         return true;
     }
@@ -347,11 +352,35 @@ pub fn security_failure_intent(
     if abuse.get("enabled").is_none() {
         return false;
     }
+    if conf
+        .get("abuse_namespace")
+        .and_then(|v| v.as_str())
+        .is_none_or(|namespace| namespace.trim().is_empty())
+    {
+        return true;
+    }
+    if !valid_advisory_behaviour_base(conf) {
+        return true;
+    }
+    let login_capacity =
+        match advisory_capacity(conf, "max_interval_samples", 32) {
+            Some(capacity) => capacity,
+            None => return true,
+        };
+    let path_capacity = match advisory_capacity(conf, "max_url_keys", 64) {
+        Some(capacity) => capacity,
+        None => return true,
+    };
     let mut found = false;
     for name in ["failed_login", "scan"] {
         if let Some(scenario) = abuse.get(name) {
             found = true;
-            if !valid_detect_scenario(name, scenario) {
+            let capacity = if name == "failed_login" {
+                login_capacity
+            } else {
+                path_capacity
+            };
+            if !valid_detect_scenario(name, scenario, capacity) {
                 return true;
             }
         }
@@ -363,7 +392,110 @@ pub fn security_failure_intent(
 /// real rule are present and well-shaped. The implementation crate performs the full
 /// typed validation; this small boundary check keeps malformed explicit security
 /// config fail-closed without introducing a dependency cycle from core to plugins.
-fn valid_detect_scenario(name: &str, value: &serde_json::Value) -> bool {
+fn advisory_capacity(
+    conf: &serde_json::Value,
+    key: &str,
+    default: u64,
+) -> Option<u64> {
+    let capacity = conf
+        .get(key)
+        .map_or(Some(default), serde_json::Value::as_u64)?;
+    (capacity > 0 && usize::try_from(capacity).is_ok()).then_some(capacity)
+}
+
+fn valid_advisory_behaviour_base(conf: &serde_json::Value) -> bool {
+    if conf.get("window").is_some() && !positive_duration(conf.get("window")) {
+        return false;
+    }
+    for (key, default) in [
+        ("max_clients", 5000),
+        ("max_url_keys", 64),
+        ("max_user_agents", 8),
+        ("max_interval_samples", 32),
+        ("min_samples", 6),
+        ("budget_ms", 2),
+    ] {
+        if advisory_capacity(conf, key, default).is_none() {
+            return false;
+        }
+    }
+    if conf
+        .get("client_ip_from_peer")
+        .is_some_and(|v| !v.is_boolean())
+    {
+        return false;
+    }
+    if conf
+        .get("step")
+        .is_some_and(|v| v.as_str() != Some("request"))
+    {
+        return false;
+    }
+    let weights = [
+        ("timing_regularity", 25),
+        ("url_entropy", 20),
+        ("request_diversity", 20),
+        ("request_speed", 15),
+        ("error_pattern", 10),
+        ("user_agent_consistency", 10),
+    ];
+    let Some(total) = advisory_fields(conf.get("weights"), &weights) else {
+        return false;
+    };
+    if total != 100 {
+        return false;
+    }
+    let thresholds = [("human", 55), ("suspicious", 40), ("bot", 20)];
+    let Some(values) =
+        advisory_field_values(conf.get("thresholds"), &thresholds)
+    else {
+        return false;
+    };
+    values[0] >= values[1] && values[1] >= values[2]
+}
+
+fn advisory_field_values(
+    value: Option<&serde_json::Value>,
+    defaults: &[(&str, u8)],
+) -> Option<Vec<u8>> {
+    let fields = match value {
+        None => None,
+        Some(value) => Some(value.as_object()?),
+    };
+    defaults
+        .iter()
+        .map(|(key, default)| {
+            fields
+                .and_then(|fields| fields.get(*key))
+                .map_or(Some(*default), |v| u8::try_from(v.as_u64()?).ok())
+        })
+        .collect()
+}
+
+fn advisory_fields(
+    value: Option<&serde_json::Value>,
+    defaults: &[(&str, u8)],
+) -> Option<u16> {
+    Some(
+        advisory_field_values(value, defaults)?
+            .into_iter()
+            .map(u16::from)
+            .sum(),
+    )
+}
+
+fn positive_duration(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .and_then(|raw| humantime::parse_duration(raw).ok())
+        .is_some_and(|duration| !duration.is_zero())
+}
+
+fn valid_detect_scenario(
+    name: &str,
+    value: &serde_json::Value,
+    capacity: u64,
+) -> bool {
     let Some(rule) = value.as_object() else {
         return false;
     };
@@ -371,15 +503,9 @@ fn valid_detect_scenario(name: &str, value: &serde_json::Value) -> bool {
         || rule
             .get("threshold")
             .and_then(|v| v.as_u64())
-            .is_none_or(|n| n == 0)
-        || rule
-            .get("window")
-            .and_then(|v| v.as_str())
-            .is_none_or(str::is_empty)
-        || rule
-            .get("ban_ttl")
-            .and_then(|v| v.as_str())
-            .is_none_or(str::is_empty)
+            .is_none_or(|n| n == 0 || n > capacity)
+        || !positive_duration(rule.get("window"))
+        || !positive_duration(rule.get("ban_ttl"))
     {
         return false;
     }
@@ -535,11 +661,38 @@ mod security_failure_intent_tests {
         }
         assert!(!security_failure_intent(
             "behaviour",
-            &json!({"enabled":true,"abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
+            &json!({"enabled":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
         ));
         assert!(security_failure_intent(
             "behaviour",
             &json!({"enabled":true,"abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":0,"ban_ttl":"2m"}}})
+        ));
+        for bad_window in ["bogus", "0s"] {
+            assert!(security_failure_intent(
+                "behaviour",
+                &json!({"enabled":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":bad_window,"threshold":3,"ban_ttl":"2m"}}})
+            ));
+        }
+        assert!(security_failure_intent(
+            "behaviour",
+            &json!({"enabled":true,"abuse_namespace":"behaviour:detect","max_url_keys":2,"abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
+        ));
+        for invalid_base in [
+            json!({"window":"0s"}),
+            json!({"budget_ms":0}),
+            json!({"weights":{"request_speed":14}}),
+            json!({"thresholds":{"human":10}}),
+            json!({"step":"response"}),
+        ] {
+            let mut profile = json!({"enabled":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}});
+            profile.as_object_mut().expect("profile").extend(
+                invalid_base.as_object().expect("invalid base").clone(),
+            );
+            assert!(security_failure_intent("behaviour", &profile));
+        }
+        assert!(security_failure_intent(
+            "behaviour",
+            &json!({"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
         ));
         assert!(!security_failure_intent(
             "behaviour",
