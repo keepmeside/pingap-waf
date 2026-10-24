@@ -11,6 +11,7 @@ import { EmptyState, ErrorNote, LoadingCard } from "@/components/data-ui";
 import { useWafEvents } from "@/queries/admin";
 import { fmtAge, fmtTime, orDash } from "@/lib/format";
 import { formatError } from "@/helpers/util";
+import { safeEventUri } from "@/helpers/event-uri";
 import { cn } from "@/lib/utils";
 import type { WafEventRecord } from "@/lib/types";
 
@@ -228,8 +229,8 @@ export default function Logs() {
                     </TableCell>
                     <TableCell className="machine text-muted-foreground">{orDash(event.client_ip)}</TableCell>
                     <TableCell className="machine">{orDash(event.method)}</TableCell>
-                    <TableCell className="machine max-w-64 truncate text-muted-foreground" title={event.uri ?? undefined}>
-                      {orDash(event.uri)}
+                    <TableCell className="machine max-w-64 truncate text-muted-foreground" title={event.uri ? safeEventUri(event.uri) : undefined}>
+                      {orDash(event.uri ? safeEventUri(event.uri) : undefined)}
                     </TableCell><TableCell><Button size="sm" variant="outline" onClick={()=>setSelectedEvent(event)}>View event</Button></TableCell>
                   </TableRow>
                 ))}
