@@ -3,7 +3,7 @@ use pingap_behaviour::decisions::{
 };
 use pingap_behaviour::scenario::{AbuseConfig, Mode, Rule};
 use pingap_domainstate::{HostPolicy, Limits, ManualClock};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -84,9 +84,14 @@ fn main() {
     let reload_registry = Arc::clone(&registry);
     let reload_hosts = hosts.clone();
     let reload_profiles = profiles.clone();
+    let concurrent_start = Arc::new(Barrier::new(2));
+    let reload_start = Arc::clone(&concurrent_start);
     let reloads = thread::spawn(move || {
-        for _ in 0..8 {
-            thread::sleep(Duration::from_millis(25));
+        reload_start.wait();
+        for cycle in 0..8 {
+            if cycle > 0 {
+                thread::sleep(Duration::from_millis(25));
+            }
             reload_registry.retain_hosts(HostPolicy::new(
                 reload_hosts.iter().map(String::as_str),
             ));
@@ -97,8 +102,10 @@ fn main() {
     let traffic_registry = Arc::clone(&registry);
     let traffic_hosts = hosts.clone();
     let traffic_profiles = profiles.clone();
+    let traffic_start = Arc::clone(&concurrent_start);
     let traffic = thread::spawn(move || {
         let mut latencies = Vec::with_capacity(2_048);
+        traffic_start.wait();
         for n in 0..2_048 {
             let domain = n % DOMAINS;
             let profile = &traffic_profiles[n % PROFILES];
