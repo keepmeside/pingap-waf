@@ -493,22 +493,24 @@ impl<C: Clock> Registry<C> {
                 },
             );
         }
-        let bucket = inner.domains.get_mut(domain).expect("domain admitted");
         let mut expired = 0;
         let mut expired_bans = Vec::new();
-        let existing = bucket.store.update(bucket.domain, &key, |c| {
-            if let Some(ban) = c.settle(now) {
-                expired_bans.push(ban.clone());
-                self.transition(
-                    NativeKind::Expired,
-                    &ban,
-                    now,
-                    NativeActor::default(),
-                );
-                expired += 1;
-            }
-            c.ban.clone()
-        });
+        let existing = {
+            let bucket = inner.domains.get_mut(domain).expect("domain admitted");
+            bucket.store.update(bucket.domain, &key, |c| {
+                if let Some(ban) = c.settle(now) {
+                    expired_bans.push(ban.clone());
+                    self.transition(
+                        NativeKind::Expired,
+                        &ban,
+                        now,
+                        NativeActor::default(),
+                    );
+                    expired += 1;
+                }
+                c.ban.clone()
+            })
+        };
         for ban in &expired_bans {
             if let Some(sequence) = decision_sequence(&ban.id) {
                 inner.active.remove(&sequence);
@@ -523,38 +525,50 @@ impl<C: Clock> Registry<C> {
             return Admission::Allowed(None);
         }
         if existing.is_none() {
-            if bucket.store.entries(bucket.domain)
-                >= self.limits.max_entries_per_domain
-                || bucket.counts.get(namespace).copied().unwrap_or(0)
-                    >= profile.max_clients
-            {
-                bucket.store.retain(bucket.domain, |_, c| {
-                    if let Some(ban) = c.settle(now) {
-                        expired_bans.push(ban.clone());
-                        self.transition(
-                            NativeKind::Expired,
-                            &ban,
-                            now,
-                            NativeActor::default(),
-                        );
-                        expired += 1;
-                    }
-                    let keep = c.ban.is_some() || c.idle_at >= now;
-                    if !keep
-                        && let Some(count) = bucket.counts.get_mut(&c.namespace)
-                    {
-                        *count -= 1;
-                    }
-                    keep
-                });
-                for ban in &expired_bans {
-                    if let Some(sequence) = decision_sequence(&ban.id) {
-                        inner.active.remove(&sequence);
-                    }
+            let at_capacity = {
+                let bucket = inner.domains.get_mut(domain).expect("domain admitted");
+                if bucket.store.entries(bucket.domain)
+                    >= self.limits.max_entries_per_domain
+                    || bucket.counts.get(namespace).copied().unwrap_or(0)
+                        >= profile.max_clients
+                {
+                    bucket.store.retain(bucket.domain, |_, c| {
+                        if let Some(ban) = c.settle(now) {
+                            expired_bans.push(ban.clone());
+                            self.transition(
+                                NativeKind::Expired,
+                                &ban,
+                                now,
+                                NativeActor::default(),
+                            );
+                            expired += 1;
+                        }
+                        let keep = c.ban.is_some() || c.idle_at >= now;
+                        if !keep
+                            && let Some(count) = bucket.counts.get_mut(&c.namespace)
+                        {
+                            *count -= 1;
+                        }
+                        keep
+                    });
+                    true
+                } else {
+                    false
+                }
+            };
+            for ban in &expired_bans {
+                if let Some(sequence) = decision_sequence(&ban.id) {
+                    inner.active.remove(&sequence);
                 }
             }
-            if bucket.counts.get(namespace).copied().unwrap_or(0)
-                >= profile.max_clients
+            if at_capacity
+                && inner
+                    .domains
+                    .get(domain)
+                    .and_then(|bucket| bucket.counts.get(namespace))
+                    .copied()
+                    .unwrap_or(0)
+                    >= profile.max_clients
             {
                 inner.counters.expired += expired;
                 inner.counters.saturated += 1;
@@ -562,44 +576,52 @@ impl<C: Clock> Registry<C> {
             }
             inner.incarnation += 1;
             let incarnation = inner.incarnation;
-            let bucket =
-                inner.domains.get_mut(domain).expect("domain admitted");
-            let cell = Client {
-                namespace: namespace.into(),
-                generation: profile.generation.clone(),
-                incarnation,
-                reset: 0,
-                counters: Counters::default(),
-                ban: None,
-                idle_at: now.saturating_add(profile.idle_ms()),
+            let inserted = {
+                let bucket = inner.domains.get_mut(domain).expect("domain admitted");
+                let cell = Client {
+                    namespace: namespace.into(),
+                    generation: profile.generation.clone(),
+                    incarnation,
+                    reset: 0,
+                    counters: Counters::default(),
+                    ban: None,
+                    idle_at: now.saturating_add(profile.idle_ms()),
+                };
+                if bucket
+                    .store
+                    .insert(bucket.domain, &key, cell, Duration::MAX)
+                    .is_ok()
+                {
+                    *bucket.counts.entry(namespace.into()).or_default() += 1;
+                    true
+                } else {
+                    false
+                }
             };
-            if bucket
-                .store
-                .insert(bucket.domain, &key, cell, Duration::MAX)
-                .is_err()
-            {
+            if !inserted {
                 inner.counters.expired += expired;
                 inner.counters.saturated += 1;
                 return Admission::Saturated;
             }
-            *bucket.counts.entry(namespace.into()).or_default() += 1;
         }
-        let bucket = inner.domains.get_mut(domain).expect("domain admitted");
-        let ticket = bucket.store.update(bucket.domain, &key, |c| {
-            c.idle_at = now.saturating_add(profile.idle_ms());
-            Ticket {
-                epoch: self.epoch.clone(),
-                generation: profile.generation,
-                incarnation: c.incarnation,
-                reset: c.reset,
-                namespace: namespace.into(),
-                domain: domain.into(),
-                identity,
-                key: key.clone(),
-                login,
-                path: path_digest,
-            }
-        });
+        let ticket = {
+            let bucket = inner.domains.get_mut(domain).expect("domain admitted");
+            bucket.store.update(bucket.domain, &key, |c| {
+                c.idle_at = now.saturating_add(profile.idle_ms());
+                Ticket {
+                    epoch: self.epoch.clone(),
+                    generation: profile.generation.clone(),
+                    incarnation: c.incarnation,
+                    reset: c.reset,
+                    namespace: namespace.into(),
+                    domain: domain.into(),
+                    identity,
+                    key: key.clone(),
+                    login,
+                    path: path_digest,
+                }
+            })
+        };
         inner.counters.expired += expired;
         Admission::Allowed(ticket)
     }
