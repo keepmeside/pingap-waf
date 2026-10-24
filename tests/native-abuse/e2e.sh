@@ -3,6 +3,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 image="${PINGAP_CANARY_IMAGE:-pingap-native-canary:phase5-final}"
+image_id="$(docker image inspect "$image" --format '{{.Id}}')"
 out="$root/.cross-review/implementation/phase6/e2e.$(date +%Y%m%d%H%M%S).$$"
 mkdir -p "$out"
 services_before="$(docker ps --format '{{.ID}} {{.Names}} {{.Image}}' | sort)"
@@ -10,7 +11,7 @@ printf '%s\n' "$services_before" > "$out/services-before.txt"
 run_case() {
   local label="$1"; shift
   printf 'CASE %s\n' "$label" | tee "$out/$label.log"
-  PINGAP_CANARY_IMAGE="$image" "$@" 2>&1 | tee -a "$out/$label.log"
+  PINGAP_CANARY_IMAGE="$image" PINGAP_CANARY_SKIP_BUILD=1 "$@" 2>&1 | tee -a "$out/$label.log"
 }
 run_case rate-policy python3 tests/admin/policy-canary.py rate-policy
 run_case challenge-secret python3 tests/admin/policy-canary.py challenge-secret
@@ -21,7 +22,7 @@ run_case native-abuse-browser python3 tests/admin/policy-canary.py native-abuse
 services_after="$(docker ps --format '{{.ID}} {{.Names}} {{.Image}}' | sort)"
 printf '%s\n' "$services_after" > "$out/services-after.txt"
 diff -u "$out/services-before.txt" "$out/services-after.txt"
-image_id="$(docker image inspect "$image" --format '{{.Id}}')"
+test "$(docker image inspect "$image" --format '{{.Id}}')" = "$image_id"
 if docker image inspect "$image" --format '{{json .Config.Env}} {{json .Config.Labels}}' | tr '[:upper:]' '[:lower:]' | grep -q crowdsec; then
   echo 'unexpected CrowdSec runtime dependency' >&2
   exit 1
