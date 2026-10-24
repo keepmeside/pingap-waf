@@ -56,6 +56,7 @@ try:
         "-v", f"{ROOT}:/workspace:ro", IMAGE,
         "/workspace/target/musl/debug/examples/native_capacity")
     peak_process_rss = 0
+    process_rss_samples = 0
     peak_cgroup_memory = 0
     peak_cpu = 0.0
     samples = []
@@ -66,6 +67,7 @@ try:
         pid = run("inspect", RUN, "--format", "{{.State.Pid}}", check=False).stdout.strip()
         process_rss = process_rss_bytes(pid)
         if process_rss is not None:
+            process_rss_samples += 1
             peak_process_rss = max(peak_process_rss, process_rss)
         stats = run("stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}", RUN, check=False).stdout.strip()
         if stats:
@@ -125,6 +127,7 @@ result = {
     "profiles": 2,
     "peak_rss_bytes": peak_process_rss,
     "peak_process_rss_bytes": peak_process_rss,
+    "process_rss_samples": process_rss_samples,
     "process_rss_source": "host /proc/<container State.Pid>/status VmRSS",
     "peak_cgroup_memory_bytes": peak_cgroup_memory,
     "peak_cpu_percent": peak_cpu,
