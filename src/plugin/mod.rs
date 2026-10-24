@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 use tracing::{error, info};
 
 mod admin;
@@ -392,6 +393,45 @@ impl Provider {
 }
 static PLUGIN_PROVIDER: LazyLock<Arc<Provider>> =
     LazyLock::new(|| Arc::new(Provider::default()));
+
+/// Last successfully constructed native namespace for each configured plugin name.
+/// A failed replacement can omit or change `abuse_namespace`; the malformed desired
+/// value cannot identify the live state that must survive until a valid reload.
+static LAST_GOOD_ABUSE_NAMESPACES: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn next_abuse_namespaces(
+    previous: &HashMap<String, String>,
+    desired: &HashMap<String, PluginConf>,
+    running: impl Fn(&str) -> bool,
+    failed: impl Fn(&str) -> bool,
+) -> (HashMap<String, String>, Vec<String>) {
+    let mut next = HashMap::new();
+    let mut retained = Vec::new();
+    for (name, conf) in desired {
+        if running(name) {
+            if conf.get("category").and_then(|v| v.as_str())
+                == Some("behaviour")
+                && conf.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+                && conf
+                    .get("abuse")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|v| v.as_bool())
+                    == Some(true)
+                && let Some(namespace) =
+                    conf.get("abuse_namespace").and_then(|v| v.as_str())
+            {
+                next.insert(name.clone(), namespace.to_string());
+            }
+        } else if failed(name)
+            && let Some(namespace) = previous.get(name)
+        {
+            next.insert(name.clone(), namespace.clone());
+            retained.push(namespace.clone());
+        }
+    }
+    (next, retained)
+}
 impl PluginProvider for Provider {
     fn get(&self, name: &str) -> Option<Arc<dyn Plugin>> {
         self.snapshot.load().plugins.get(name).cloned()
@@ -538,6 +578,12 @@ pub fn parse_plugins(
 pub fn try_init_plugins(
     plugins: &HashMap<String, PluginConf>,
 ) -> (Vec<String>, String) {
+    // Serialize reload reconciliation with its last-good namespace map. A failed
+    // construction retains only the namespace owned by that same plugin name;
+    // removed or successfully disabled profiles still discard their state.
+    let mut last_good_abuse_namespaces = LAST_GOOD_ABUSE_NAMESPACES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     stage_desired_plugins(plugins);
     let abuse_configs = plugins;
     // Count over the complete desired set, including instances reused below.
@@ -624,24 +670,18 @@ pub fn try_init_plugins(
         .filter(|(name, _)| plugins.contains_key(*name))
         .map(|(name, conf)| (name.clone(), conf.clone()))
         .collect();
-    let retained_namespaces = abuse_configs
-        .iter()
-        .filter(|(name, conf)| {
-            failures.contains_key(*name)
-                && conf.get("category").and_then(|v| v.as_str())
-                    == Some("behaviour")
-        })
-        .filter_map(|(_, conf)| {
-            conf.get("abuse_namespace")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .collect::<Vec<_>>();
+    let (next_namespaces, retained_namespaces) = next_abuse_namespaces(
+        &last_good_abuse_namespaces,
+        abuse_configs,
+        |name| plugins.contains_key(name),
+        |name| failures.contains_key(name),
+    );
     pingap_behaviour::activate_profiles_with_retained(
         &active_abuse_configs,
         &retained_namespaces,
     );
     PLUGIN_PROVIDER.store(plugins, failures);
+    *last_good_abuse_namespaces = next_namespaces;
     let error = if !errors.is_empty() {
         let error = errors
             .iter()
@@ -699,8 +739,87 @@ remove_headers = [
 
 #[cfg(test)]
 mod tests {
-    use super::parse_admin_plugin;
+    use super::{next_abuse_namespaces, parse_admin_plugin};
     use pretty_assertions::assert_eq;
+    use std::collections::{HashMap, HashSet};
+
+    fn behaviour_conf(
+        namespace: Option<&str>,
+        abuse_enabled: bool,
+    ) -> super::PluginConf {
+        let mut conf: super::PluginConf = toml::from_str(
+            "category = \"behaviour\"\nenabled = true\n[abuse]\nenabled = true",
+        )
+        .expect("behaviour config");
+        conf.get_mut("abuse")
+            .and_then(toml::Value::as_table_mut)
+            .expect("abuse table")
+            .insert("enabled".into(), toml::Value::Boolean(abuse_enabled));
+        if let Some(namespace) = namespace {
+            conf.insert(
+                "abuse_namespace".into(),
+                toml::Value::String(namespace.into()),
+            );
+        }
+        conf
+    }
+
+    #[test]
+    fn failed_replacement_retains_last_good_namespace_by_plugin_name() {
+        let previous = HashMap::from([
+            ("guard".into(), "guard-old".into()),
+            ("removed".into(), "removed-old".into()),
+        ]);
+        let running = HashSet::from(["new"]);
+        let failed = HashSet::from(["guard", "never-ran"]);
+
+        for malformed_namespace in [None, Some("guard-new")] {
+            let desired = HashMap::from([
+                ("guard".into(), behaviour_conf(malformed_namespace, true)),
+                ("new".into(), behaviour_conf(Some("new-namespace"), true)),
+                (
+                    "never-ran".into(),
+                    behaviour_conf(Some("never-ran-namespace"), true),
+                ),
+            ]);
+            let (next, retained) = next_abuse_namespaces(
+                &previous,
+                &desired,
+                |name| running.contains(name),
+                |name| failed.contains(name),
+            );
+            assert_eq!(Some(&"guard-old".to_string()), next.get("guard"));
+            assert_eq!(Some(&"new-namespace".to_string()), next.get("new"));
+            assert!(!next.contains_key("removed"));
+            assert!(!next.contains_key("never-ran"));
+            assert_eq!(vec!["guard-old"], retained);
+        }
+    }
+
+    #[test]
+    fn successful_replacement_or_disable_discards_previous_namespace() {
+        let previous = HashMap::from([("guard".into(), "guard-old".into())]);
+        let mut disabled = behaviour_conf(Some("guard-old"), true);
+        disabled.insert("enabled".into(), toml::Value::Boolean(false));
+        for (conf, expected_namespace) in [
+            (behaviour_conf(Some("guard-new"), true), Some("guard-new")),
+            (behaviour_conf(Some("guard-old"), false), None),
+            (disabled, None),
+        ] {
+            let desired = HashMap::from([("guard".into(), conf)]);
+            let (next, retained) = next_abuse_namespaces(
+                &previous,
+                &desired,
+                |name| name == "guard",
+                |_| false,
+            );
+            assert_eq!(
+                expected_namespace.map(str::to_string).as_ref(),
+                next.get("guard")
+            );
+            assert!(retained.is_empty());
+        }
+    }
 
     /// `--admin` without a credential is no longer refused: the credential's
     /// only job is to bootstrap the first account into an empty store, and a
