@@ -63,14 +63,15 @@ pub(crate) async fn base_intent_snapshot(
     }
     match state.store.latest_applied_config_version().await? {
         Some(version) => {
-            let intent = serde_json::from_str(&version.intent_json).map_err(|e| {
-                ApiError::Internal {
-                    reason: format!(
-                        "stored intent for version `{}` is unreadable: {e}",
-                        version.id
-                    ),
-                }
-            })?;
+            let intent =
+                serde_json::from_str(&version.intent_json).map_err(|e| {
+                    ApiError::Internal {
+                        reason: format!(
+                            "stored intent for version `{}` is unreadable: {e}",
+                            version.id
+                        ),
+                    }
+                })?;
             Ok((intent, Some(version.id)))
         },
         // Nothing has ever been applied. The first write is the first version.
@@ -202,8 +203,7 @@ pub(crate) async fn upsert<T: Serialize + DeserializeOwned>(
     pick: fn(&mut Intent) -> &mut BTreeMap<String, T>,
 ) -> Result<ApiResponse> {
     let value: T = request.json()?;
-    let (intent, expected_version_id) =
-        base_intent_snapshot(state).await?;
+    let (intent, expected_version_id) = base_intent_snapshot(state).await?;
     insert(
         state,
         request,
@@ -258,8 +258,7 @@ pub(crate) async fn remove<T: Serialize>(
     name: &str,
     pick: fn(&mut Intent) -> &mut BTreeMap<String, T>,
 ) -> Result<ApiResponse> {
-    let (mut intent, expected_version_id) =
-        base_intent_snapshot(state).await?;
+    let (mut intent, expected_version_id) = base_intent_snapshot(state).await?;
     if pick(&mut intent).remove(name).is_none() {
         return Err(ApiError::NotFound {
             kind: kind.to_string(),

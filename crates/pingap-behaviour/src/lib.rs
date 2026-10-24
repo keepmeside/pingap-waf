@@ -51,8 +51,7 @@ pub fn activate_profiles_with_retained(
             .ok()
         })
         .collect();
-    decisions::registry()
-        .activate_with_retained(profiles, retained_namespaces);
+    decisions::registry().activate_with_retained(profiles, retained_namespaces);
 }
 
 /// Routing and abuse admission share the new registered set after a successful

@@ -276,10 +276,9 @@ impl Plugin for Behaviour {
                 .map(|generation| generation.0);
             if native_profile.config.enforcing()
                 && (pingap_core::policy_reload_in_progress()
-                    || expected_generation
-                        .is_some_and(|generation| {
-                            generation != pingap_core::policy_generation()
-                        }))
+                    || expected_generation.is_some_and(|generation| {
+                        generation != pingap_core::policy_generation()
+                    }))
             {
                 return Ok(RequestPluginResult::Respond(
                     pingap_core::HttpResponse::builder(

@@ -76,7 +76,8 @@ fn main() {
                 }
                 admitted += 1;
                 if entry % 256 == 0 {
-                    population_latencies.push(call_started.elapsed().as_nanos());
+                    population_latencies
+                        .push(call_started.elapsed().as_nanos());
                 }
             }
         }

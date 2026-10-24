@@ -193,7 +193,9 @@ impl BehaviourConfig {
         if !self.enabled {
             if self.abuse.enabled {
                 return Err(ConfigError::Abuse {
-                    reason: "top-level enabled must be true when abuse is enabled".into(),
+                    reason:
+                        "top-level enabled must be true when abuse is enabled"
+                            .into(),
                 });
             }
             return Ok(());

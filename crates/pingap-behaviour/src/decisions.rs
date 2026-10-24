@@ -496,7 +496,8 @@ impl<C: Clock> Registry<C> {
         let mut expired = 0;
         let mut expired_bans = Vec::new();
         let existing = {
-            let bucket = inner.domains.get_mut(domain).expect("domain admitted");
+            let bucket =
+                inner.domains.get_mut(domain).expect("domain admitted");
             bucket.store.update(bucket.domain, &key, |c| {
                 if let Some(ban) = c.settle(now) {
                     expired_bans.push(ban.clone());
@@ -526,7 +527,8 @@ impl<C: Clock> Registry<C> {
         }
         if existing.is_none() {
             let at_capacity = {
-                let bucket = inner.domains.get_mut(domain).expect("domain admitted");
+                let bucket =
+                    inner.domains.get_mut(domain).expect("domain admitted");
                 if bucket.store.entries(bucket.domain)
                     >= self.limits.max_entries_per_domain
                     || bucket.counts.get(namespace).copied().unwrap_or(0)
@@ -545,7 +547,8 @@ impl<C: Clock> Registry<C> {
                         }
                         let keep = c.ban.is_some() || c.idle_at >= now;
                         if !keep
-                            && let Some(count) = bucket.counts.get_mut(&c.namespace)
+                            && let Some(count) =
+                                bucket.counts.get_mut(&c.namespace)
                         {
                             *count -= 1;
                         }
@@ -577,7 +580,8 @@ impl<C: Clock> Registry<C> {
             inner.incarnation += 1;
             let incarnation = inner.incarnation;
             let inserted = {
-                let bucket = inner.domains.get_mut(domain).expect("domain admitted");
+                let bucket =
+                    inner.domains.get_mut(domain).expect("domain admitted");
                 let cell = Client {
                     namespace: namespace.into(),
                     generation: profile.generation.clone(),
@@ -605,7 +609,8 @@ impl<C: Clock> Registry<C> {
             }
         }
         let ticket = {
-            let bucket = inner.domains.get_mut(domain).expect("domain admitted");
+            let bucket =
+                inner.domains.get_mut(domain).expect("domain admitted");
             bucket.store.update(bucket.domain, &key, |c| {
                 c.idle_at = now.saturating_add(profile.idle_ms());
                 Ticket {

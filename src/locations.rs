@@ -72,7 +72,9 @@ pub fn try_init_locations(
         .map(str::to_ascii_lowercase)
         .collect();
     let host_policy = pingap_domainstate::HostPolicy::new(&hosts);
-    if host_policy.registered() > pingap_domainstate::Limits::default().max_domains {
+    if host_policy.registered()
+        > pingap_domainstate::Limits::default().max_domains
+    {
         return Err(Error::Invalid {
             message: format!(
                 "configured host count {} exceeds native abuse capacity {}",
