@@ -125,6 +125,7 @@ result = {
     "profiles": 2,
     "peak_rss_bytes": peak_process_rss,
     "peak_process_rss_bytes": peak_process_rss,
+    "process_rss_source": "host /proc/<container State.Pid>/status VmRSS",
     "peak_cgroup_memory_bytes": peak_cgroup_memory,
     "peak_cpu_percent": peak_cpu,
     "metrics": metrics.group(0),
