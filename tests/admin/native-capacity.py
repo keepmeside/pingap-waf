@@ -97,6 +97,8 @@ try:
     (OUT / "state.json").write_text(json.dumps(state, indent=2))
     if exit_code != 0 or state.get("OOMKilled"):
         raise RuntimeError(f"capacity process failed exit={exit_code} oom={state.get('OOMKilled')}")
+    if peak_process_rss <= 0:
+        raise RuntimeError("missing candidate process VmRSS evidence")
     metrics = re.search(r"NATIVE_CAPACITY_METRICS .+", logs)
     if not metrics:
         raise RuntimeError("missing capacity metrics")
