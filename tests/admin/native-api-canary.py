@@ -55,7 +55,7 @@ function code(secret){const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let bits
  check((await api('/abuse/bans','GET',null,null)).status===401,'unauthenticated401');
  if(process.env.CASE==='native-ban-api'){
   check((await api('/users','POST',{username:'canary-viewer',email:'viewer@example.test',password:process.env.PASSWORD,role:'viewer'})).status===200,'create isolated viewer');
-  const viewer=(await login('canary-viewer')).token;
+  let viewer=(await login('canary-viewer')).token;
   await createBan('detect');check((await traffic('detect','/benign')).status===200,'detect never blocks');
   await createBan();
   await pause(1500);
@@ -67,6 +67,7 @@ function code(secret){const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let bits
   await eventually(()=>Promise.resolve(fs.existsSync('/out/restart-complete')),'candidate restart coordination');
   await eventually(async()=>{try{return (await call(3018,'/api/health')).status===200}catch{return false}},'candidate ready after restart');
   token=(await login()).token;
+  viewer=(await login('canary-viewer')).token;
   const afterRestart=await api('/abuse/bans');
   check(afterRestart.status===200&&afterRestart.json.items.length===0,'restart clears active bans');
   check(afterRestart.json.epoch&&afterRestart.json.epoch!==beforeRestart.json.epoch,'restart advances native epoch');
