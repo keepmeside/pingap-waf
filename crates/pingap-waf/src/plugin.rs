@@ -524,7 +524,9 @@ impl Plugin for Waf {
         }
 
         let method = session.req_header().method.as_str().to_string();
-        let uri = session.req_header().uri.to_string();
+        // Keep query values out of persisted WAF events; the detector still receives the
+        // parsed query below, while event history only needs the request path.
+        let uri = session.req_header().uri.path().to_string();
         let client_ip = ensure_client_ip(session, ctx).to_string();
         let domain = pingap_core::get_host(session.req_header())
             .map(str::to_string)

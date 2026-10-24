@@ -11,6 +11,7 @@ import {
   getPluginSteps,
 } from "@/constants";
 import { PLUGIN_FIELDS } from "@/plugin-fields";
+import { mergeNativePluginConfig } from "@/helpers/plugin-config";
 import { useSearchParams } from "react-router-dom";
 import { useShallow } from "zustand/react/shallow";
 import useBasicState from "@/states/basic";
@@ -249,7 +250,12 @@ export default function Plugins() {
           }
           delete value["_name_"];
           omitEmptyArrayString(value);
-          await update("plugin", name, value);
+          const payload = mergeNativePluginConfig(
+            value.category,
+            pluginConfig,
+            value,
+          );
+          await update("plugin", name, payload);
           handleSelectPlugin(name);
         }}
       />

@@ -6,6 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { safeEventUri } from "@/helpers/event-uri";
 import { ModeBadge } from "@/components/mode-badge";
 import { fmtTime } from "@/lib/format";
 import type { WafEventRecord } from "@/lib/types";
@@ -55,7 +56,7 @@ export function EventDetail({
                 <TabsTrigger value="response">Response</TabsTrigger>
               </TabsList>
               <TabsContent value="request">
-                <pre className="event-inspection rounded-md border bg-muted/30 p-4 text-xs">{`${event.method ?? "Method not captured"} ${event.uri ?? "URI not captured"}\n\nHeaders: not captured\nBody: not captured`}</pre>
+                <pre className="event-inspection rounded-md border bg-muted/30 p-4 text-xs">{`${event.method ?? "Method not captured"} ${safeEventUri(event.uri)}\n\nHeaders: not captured\nBody: not captured`}</pre>
               </TabsContent>
               <TabsContent value="response">
                 <pre className="event-inspection rounded-md border bg-muted/30 p-4 text-xs">
