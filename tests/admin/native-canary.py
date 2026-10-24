@@ -31,11 +31,11 @@ def configuration(fail_open=False,edited=False,disabled=False,unrelated=False):
         return text
     basic='[basic]\nname="isolated-native-canary"\nthreads=1\n'
     if fail_open:basic+='on_policy_unavailable="fail_open"\n'
-    text=basic+'[servers.canary]\naddr="0.0.0.0:8080"\nlocations=["login","scan","double","detect","control","reload","broken","advisory","legacy","waf"]\n[upstreams.fixture]\naddrs=["fixture:8081"]\n'
-    for name,policies in {"login":["behaviour:login"],"scan":["behaviour:scan"],"double":["behaviour:scan","behaviour:login"],"detect":["behaviour:detect"],"control":[],"reload":["behaviour:reload"],"broken":["behaviour:broken"],"advisory":["behaviour:advisory"],"legacy":["behaviour:legacy"],"waf":["waf:strict"]}.items():
+    text=basic+'[servers.canary]\naddr="0.0.0.0:8080"\nlocations=["login","scan","double","detect","control","reload","broken","malformed","advisory","legacy","waf"]\n[upstreams.fixture]\naddrs=["fixture:8081"]\n'
+    for name,policies in {"login":["behaviour:login"],"scan":["behaviour:scan"],"double":["behaviour:scan","behaviour:login"],"detect":["behaviour:detect"],"control":[],"reload":["behaviour:reload"],"broken":["behaviour:broken"],"malformed":["behaviour:malformed"],"advisory":["behaviour:advisory"],"legacy":["behaviour:legacy"],"waf":["waf:strict"]}.items():
         text+=f'[locations.{name}]\nhost="{name}.test"\nupstream="fixture"\nplugins={json.dumps(policies)}\n'
-    for name,scenario,mode in [("login","failed_login","block"),("scan","scan","block"),("detect","scan","detect"),("reload","scan","block"),("broken","scan","block"),("advisory","scan","detect")]:
-        threshold=0 if name in ("broken","advisory") else (10 if name=="reload" and edited else 3)
+    for name,scenario,mode in [("login","failed_login","block"),("scan","scan","block"),("detect","scan","detect"),("reload","scan","block"),("broken","scan","block"),("malformed","scan","detect"),("advisory","scan","detect")]:
+        threshold=0 if name in ("broken","malformed") else (10 if name=="reload" and edited else 3)
         if name=="detect" and unrelated:threshold=4
         ttl="60s" if name=="reload" else "3s"
         enabled='false' if disabled and name=="reload" else 'true'
@@ -60,7 +60,7 @@ async function ready(){for(let i=0;i<100;i++){try{if(await request('control')===
  if(process.env.CASE.startsWith('policy-unavailable-')) {
   const status=process.env.OPEN==='1'?200:503;
   await expect('broken','/','GET',status);await expect('control','/','GET',200);
-  await expect('advisory','/','GET',200);await expect('legacy','/','GET',process.env.CASE==='policy-unavailable-limit'?429:200);
+  await expect('advisory','/','GET',200);if(process.env.CASE==='policy-unavailable-behaviour')await expect('malformed','/','GET',status);await expect('legacy','/','GET',process.env.CASE==='policy-unavailable-limit'?429:200);
   if(process.env.CASE==='policy-unavailable-limit') {
    await expect('reload','/','GET',200);fs.writeFileSync('/coord/ready-limit','ready');
    for(let i=0;i<500 && !fs.existsSync('/coord/reload-bad');i++)await pause(100);
