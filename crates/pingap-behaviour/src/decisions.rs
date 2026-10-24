@@ -115,6 +115,13 @@ pub struct Decision {
     #[serde(skip)]
     pub deadline: u64,
 }
+#[derive(Debug, Clone)]
+struct ActiveDecision {
+    decision: Decision,
+    domain: String,
+    key: String,
+}
+
 #[derive(Debug)]
 pub enum Admission {
     Allowed(Option<Ticket>),
@@ -161,9 +168,39 @@ struct Inner<C: Clock> {
     profiles: BTreeMap<String, ScenarioProfile>,
     hosts: Option<HostPolicy>,
     domains: BTreeMap<String, Bucket<C>>,
+    /// Active block decisions keyed by their monotonic sequence. Listing uses this
+    /// bounded index instead of scanning every client while holding the registry lock.
+    active: BTreeMap<u64, ActiveDecision>,
     sequence: u64,
     incarnation: u64,
     counters: RegistryCounters,
+}
+
+fn decision_sequence(id: &str) -> Option<u64> {
+    id.rsplit('-').next()?.parse().ok()
+}
+
+fn rebuild_active<C: Clock>(inner: &mut Inner<C>, now: u64) {
+    let mut active = Vec::new();
+    for (domain, bucket) in inner.domains.iter_mut() {
+        let domain = domain.clone();
+        bucket.store.visit(bucket.domain, |key, client| {
+            if let Some(ban) = client.ban.as_ref()
+                && ban.deadline > now
+                && let Some(sequence) = decision_sequence(&ban.id)
+            {
+                active.push((
+                    sequence,
+                    ActiveDecision {
+                        decision: ban.clone(),
+                        domain: domain.clone(),
+                        key: key.to_string(),
+                    },
+                ));
+            }
+        });
+    }
+    inner.active = active.into_iter().collect();
 }
 pub struct Registry<C: Clock = MonotonicClock> {
     epoch: String,
@@ -195,6 +232,7 @@ impl<C: Clock> Registry<C> {
                 profiles: BTreeMap::new(),
                 hosts: None,
                 domains: BTreeMap::new(),
+                active: BTreeMap::new(),
                 sequence: 0,
                 incarnation: 0,
                 counters: RegistryCounters::default(),
@@ -323,14 +361,28 @@ impl<C: Clock> Registry<C> {
             .domains
             .retain(|domain, _| !hosts.classify(domain).is_overflow());
         inner.hosts = Some(hosts);
+        rebuild_active(&mut inner, self.clock.now_ms());
     }
     pub fn activate(&self, profiles: Vec<ScenarioProfile>) {
+        self.activate_with_retained(profiles, &[]);
+    }
+
+    pub fn activate_with_retained(
+        &self,
+        profiles: Vec<ScenarioProfile>,
+        retained_namespaces: &[String],
+    ) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let profiles: BTreeMap<_, _> = profiles
+        let mut profiles: BTreeMap<_, _> = profiles
             .into_iter()
             .filter(|p| p.config.enabled)
             .map(|p| (p.namespace.clone(), p))
             .collect();
+        for namespace in retained_namespaces {
+            if let Some(previous) = inner.profiles.get(namespace).cloned() {
+                profiles.entry(namespace.clone()).or_insert(previous);
+            }
+        }
         for bucket in inner.domains.values_mut() {
             bucket.store.retain(bucket.domain, |_, c| {
                 profiles
@@ -343,6 +395,7 @@ impl<C: Clock> Registry<C> {
             });
         }
         inner.domains.retain(|_, b| b.store.entries(b.domain) > 0);
+        rebuild_active(&mut inner, self.clock.now_ms());
         inner.profiles = profiles;
     }
     pub fn admit(
@@ -442,8 +495,10 @@ impl<C: Clock> Registry<C> {
         }
         let bucket = inner.domains.get_mut(domain).expect("domain admitted");
         let mut expired = 0;
+        let mut expired_bans = Vec::new();
         let existing = bucket.store.update(bucket.domain, &key, |c| {
             if let Some(ban) = c.settle(now) {
+                expired_bans.push(ban.clone());
                 self.transition(
                     NativeKind::Expired,
                     &ban,
@@ -454,6 +509,11 @@ impl<C: Clock> Registry<C> {
             }
             c.ban.clone()
         });
+        for ban in &expired_bans {
+            if let Some(sequence) = decision_sequence(&ban.id) {
+                inner.active.remove(&sequence);
+            }
+        }
         if let Some(Some(ban)) = existing {
             inner.counters.expired += expired;
             return Admission::Blocked(ban);
@@ -470,6 +530,7 @@ impl<C: Clock> Registry<C> {
             {
                 bucket.store.retain(bucket.domain, |_, c| {
                     if let Some(ban) = c.settle(now) {
+                        expired_bans.push(ban.clone());
                         self.transition(
                             NativeKind::Expired,
                             &ban,
@@ -486,6 +547,11 @@ impl<C: Clock> Registry<C> {
                     }
                     keep
                 });
+                for ban in &expired_bans {
+                    if let Some(sequence) = decision_sequence(&ban.id) {
+                        inner.active.remove(&sequence);
+                    }
+                }
             }
             if bucket.counts.get(namespace).copied().unwrap_or(0)
                 >= profile.max_clients
@@ -564,11 +630,14 @@ impl<C: Clock> Registry<C> {
             return Evidence::default();
         };
         let mut expired = false;
+        let mut expired_ban = None;
+        let mut created_ban = None;
         let mut stale = false;
         let result = bucket
             .store
             .update(bucket.domain, &ticket.key, |c| {
                 if let Some(ban) = c.settle(now) {
+                    expired_ban = Some(ban.clone());
                     self.transition(
                         NativeKind::Expired,
                         &ban,
@@ -647,11 +716,29 @@ impl<C: Clock> Registry<C> {
                         NativeActor::default(),
                     );
                     c.idle_at = c.idle_at.max(deadline);
+                    created_ban = c.ban.clone();
                     evidence.ban_created = true;
                 }
                 evidence
             })
             .unwrap_or_default();
+        if let Some(ban) = expired_ban.as_ref()
+            && let Some(sequence) = decision_sequence(&ban.id)
+        {
+            inner.active.remove(&sequence);
+        }
+        if let Some(ban) = created_ban
+            && let Some(sequence) = decision_sequence(&ban.id)
+        {
+            inner.active.insert(
+                sequence,
+                ActiveDecision {
+                    decision: ban,
+                    domain: ticket.domain.clone(),
+                    key: ticket.key.clone(),
+                },
+            );
+        }
         if expired {
             inner.counters.expired += 1;
         }
@@ -683,41 +770,58 @@ impl<C: Clock> Registry<C> {
         let mut rows = BTreeMap::new();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let now = self.clock.now_ms();
-        let mut expired = 0;
-        for bucket in inner.domains.values_mut() {
-            bucket.store.retain(bucket.domain, |_, c| {
-                if let Some(ban) = c.settle(now) {
-                    self.transition(
-                        NativeKind::Expired,
-                        &ban,
-                        now,
-                        NativeActor::default(),
-                    );
-                    expired += 1;
-                }
-                if let Some(ban) = &c.ban
-                    && profile.is_none_or(|p| p == ban.profile)
-                    && domain.is_none_or(|d| d == ban.domain)
-                    && let Some(seq) = ban
-                        .id
-                        .rsplit('-')
-                        .next()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .filter(|seq| *seq > after)
-                    && (rows.len() < limit
-                        || rows
-                            .last_key_value()
-                            .is_some_and(|(last, _)| seq < *last))
-                {
-                    rows.insert(seq, ban.clone());
-                    if rows.len() > limit {
-                        rows.pop_last();
-                    }
-                }
-                true
-            });
+        let expired: Vec<(u64, ActiveDecision)> = inner
+            .active
+            .iter()
+            .filter(|(_, active)| active.decision.deadline <= now)
+            .map(|(sequence, active)| (*sequence, active.clone()))
+            .collect();
+
+        // The active index bounds the read path to live decisions. Expired entries are removed
+        // from their owning store by key so the lifecycle event is emitted once, without a
+        // full registry scan under the global mutex.
+        for (sequence, active) in expired {
+            let mut expired_ban = None;
+            if let Some(bucket) = inner.domains.get_mut(&active.domain) {
+                // Settle the client in place so its slot and namespace count remain
+                // reusable. Removing the whole entry here would make the count map
+                // overstate occupancy until the next admission.
+                bucket.store.update(bucket.domain, &active.key, |client| {
+                    expired_ban = client.settle(now);
+                });
+            }
+            if let Some(ban) = expired_ban {
+                self.transition(
+                    NativeKind::Expired,
+                    &ban,
+                    now,
+                    NativeActor::default(),
+                );
+                inner.counters.expired += 1;
+            }
+            inner.active.remove(&sequence);
         }
-        inner.counters.expired += expired;
+
+        for (sequence, active) in &inner.active {
+            let ban = &active.decision;
+            if ban.deadline <= now
+                || *sequence <= after
+                || profile.is_some_and(|p| p != ban.profile)
+                || domain.is_some_and(|d| d != ban.domain)
+            {
+                continue;
+            }
+            if rows.len() < limit
+                || rows
+                    .last_key_value()
+                    .is_some_and(|(last, _)| *sequence < *last)
+            {
+                rows.insert(*sequence, ban.clone());
+                if rows.len() > limit {
+                    rows.pop_last();
+                }
+            }
+        }
         (rows.into_values().collect(), self.wall(now))
     }
     /// Exact decision ID prevents a delayed release from removing a newer ban.
@@ -758,7 +862,9 @@ impl<C: Clock> Registry<C> {
             return absent;
         };
         let mut expired = false;
+        let mut expired_id = None;
         let mut audit = AuditStatus::NotApplicable;
+        let mut released_id = None;
         let released = bucket
             .store
             .update(bucket.domain, &key, |c| {
@@ -770,6 +876,7 @@ impl<C: Clock> Registry<C> {
                         NativeActor::default(),
                     );
                     expired = true;
+                    expired_id = Some(ban.id);
                 }
                 if c.ban.as_ref().is_none_or(|b| b.id != id) {
                     return false;
@@ -780,14 +887,23 @@ impl<C: Clock> Registry<C> {
                     now,
                     actor.clone(),
                 );
+                released_id = Some(id.to_string());
                 c.reset += 1;
                 c.ban = None;
                 c.counters = Counters::default();
                 true
             })
             .unwrap_or(false);
-        if expired {
+        if let Some(expired_id) = expired_id
+            && let Some(sequence) = decision_sequence(&expired_id)
+        {
+            inner.active.remove(&sequence);
             inner.counters.expired += 1;
+        }
+        if let Some(released_id) = released_id
+            && let Some(sequence) = decision_sequence(&released_id)
+        {
+            inner.active.remove(&sequence);
         }
         if released {
             inner.counters.released += 1;
