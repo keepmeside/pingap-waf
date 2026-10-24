@@ -425,6 +425,11 @@ fn valid_advisory_behaviour_base(conf: &serde_json::Value) -> bool {
     {
         return false;
     }
+    if conf.get("client_ip_from_peer").and_then(|v| v.as_bool()) != Some(true)
+        && !crate::construction_trusted_proxies_enabled()
+    {
+        return false;
+    }
     if conf
         .get("step")
         .is_some_and(|v| v.as_str() != Some("request"))
@@ -661,8 +666,14 @@ mod security_failure_intent_tests {
         }
         assert!(!security_failure_intent(
             "behaviour",
-            &json!({"enabled":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
+            &json!({"enabled":true,"client_ip_from_peer":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
         ));
+        crate::with_construction_trusted_proxies(&None, || {
+            assert!(security_failure_intent(
+                "behaviour",
+                &json!({"enabled":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
+            ));
+        });
         assert!(security_failure_intent(
             "behaviour",
             &json!({"enabled":true,"abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":0,"ban_ttl":"2m"}}})
@@ -670,12 +681,12 @@ mod security_failure_intent_tests {
         for bad_window in ["bogus", "0s"] {
             assert!(security_failure_intent(
                 "behaviour",
-                &json!({"enabled":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":bad_window,"threshold":3,"ban_ttl":"2m"}}})
+                &json!({"enabled":true,"client_ip_from_peer":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":bad_window,"threshold":3,"ban_ttl":"2m"}}})
             ));
         }
         assert!(security_failure_intent(
             "behaviour",
-            &json!({"enabled":true,"abuse_namespace":"behaviour:detect","max_url_keys":2,"abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
+            &json!({"enabled":true,"client_ip_from_peer":true,"abuse_namespace":"behaviour:detect","max_url_keys":2,"abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}})
         ));
         for invalid_base in [
             json!({"window":"0s"}),
@@ -684,7 +695,7 @@ mod security_failure_intent_tests {
             json!({"thresholds":{"human":10}}),
             json!({"step":"response"}),
         ] {
-            let mut profile = json!({"enabled":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}});
+            let mut profile = json!({"enabled":true,"client_ip_from_peer":true,"abuse_namespace":"behaviour:detect","abuse":{"enabled":true,"scan":{"mode":"detect","window":"30s","threshold":3,"ban_ttl":"2m"}}});
             profile.as_object_mut().expect("profile").extend(
                 invalid_base.as_object().expect("invalid base").clone(),
             );

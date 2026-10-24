@@ -544,7 +544,7 @@ ban_ttl = "1m"
     #[test]
     fn identical_plugin_instances_have_distinct_request_slots() {
         let conf: PluginConf =
-            toml::from_str("category = \"behaviour\"\nenabled = true\n")
+            toml::from_str("category = \"behaviour\"\nenabled = true\nclient_ip_from_peer = true\n")
                 .expect("config");
         let first = Behaviour::try_from(&conf).expect("first");
         let second = Behaviour::try_from(&conf).expect("second");
