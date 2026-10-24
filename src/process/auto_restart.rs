@@ -64,6 +64,34 @@ fn observable_config_diff(
     (categories, visible)
 }
 
+/// Reject a location set that the native registry cannot represent before a
+/// hot reload changes any shared state. `try_init_locations` performs the same
+/// check at publication time; doing it here prevents a rejected location edit
+/// from first staging new plugins or updating upstreams.
+fn validate_native_host_capacity(
+    config: &PingapConfig,
+) -> Result<(), pingap_config::Error> {
+    let hosts: Vec<String> = config
+        .locations
+        .values()
+        .filter_map(|conf| conf.host.as_deref())
+        .flat_map(|hosts| hosts.split(','))
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let count = pingap_domainstate::HostPolicy::new(&hosts).registered();
+    let limit = pingap_domainstate::Limits::default().max_domains;
+    if count > limit {
+        return Err(pingap_config::Error::Invalid {
+            message: format!(
+                "configured host count {count} exceeds native abuse capacity {limit}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Compares configurations and handles updates through hot reload or full restart
 ///
 /// This function:
@@ -85,6 +113,7 @@ async fn diff_and_update_config(
     let new_toml_config = config_manager.load_all().await?;
     let new_config = new_toml_config.to_pingap_config(true)?;
     new_config.validate()?;
+    validate_native_host_capacity(&new_config)?;
     let current_config: PingapConfig =
         config_manager.get_current_config().as_ref().clone();
 
@@ -697,5 +726,48 @@ mod challenge_secret_tests {
             original,
             "redaction must not mutate canonical config"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_host_capacity_tests {
+    use super::*;
+
+    fn config_with_hosts(count: usize) -> PingapConfig {
+        let mut config = PingapConfig::default();
+        for index in 0..count {
+            config.locations.insert(
+                format!("route-{index}"),
+                pingap_config::LocationConf {
+                    host: Some(format!("site-{index}.example")),
+                    ..Default::default()
+                },
+            );
+        }
+        config
+    }
+
+    #[test]
+    fn rejects_over_capacity_before_hot_reload_mutates_state() {
+        let limit = pingap_domainstate::Limits::default().max_domains;
+        let config = config_with_hosts(limit + 1);
+        let error = validate_native_host_capacity(&config)
+            .expect_err("257 distinct hosts must fail preflight");
+        assert!(error.to_string().contains("configured host count"));
+    }
+
+    #[test]
+    fn counts_normalized_distinct_hosts() {
+        let limit = pingap_domainstate::Limits::default().max_domains;
+        let mut config = config_with_hosts(limit);
+        config.locations.insert(
+            "alias".into(),
+            pingap_config::LocationConf {
+                host: Some(" SITE-0.EXAMPLE:443 , site-1.example ".into()),
+                ..Default::default()
+            },
+        );
+        validate_native_host_capacity(&config)
+            .expect("aliases of configured hosts must not consume capacity");
     }
 }
