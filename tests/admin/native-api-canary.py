@@ -62,6 +62,16 @@ function code(secret){const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let bits
   check((await nativeRows()).some(e=>e.action==='native.abuse.detected'),'permanent native detection history');
   const findings=await api('/logs/waf-events');check(findings.status===200,'findings readable');check(!findings.json.some(e=>e.blocked&&e.profile==='behaviour:scan'),'creation is not a block request');
   check((await traffic('scan')).status===403,'actual active403');check((await traffic('control')).status===200,'control200');
+  const beforeRestart=await api('/abuse/bans');check(beforeRestart.status===200&&beforeRestart.json.items.length===1,'list actual ban before restart');
+  fs.writeFileSync('/out/restart-active','ready');
+  await eventually(()=>Promise.resolve(fs.existsSync('/out/restart-complete')),'candidate restart coordination');
+  await eventually(async()=>{try{return (await call(3018,'/api/health')).status===200}catch{return false}},'candidate ready after restart');
+  token=(await login()).token;
+  const afterRestart=await api('/abuse/bans');
+  check(afterRestart.status===200&&afterRestart.json.items.length===0,'restart clears active bans');
+  check(afterRestart.json.epoch&&afterRestart.json.epoch!==beforeRestart.json.epoch,'restart advances native epoch');
+  check((await traffic('scan')).status===200,'post-restart request allowed');
+  await createBan();
   const page=await api('/abuse/bans');check(page.status===200&&page.json.items.length===1,'list actual ban');const ban=page.json.items[0];
   const owner={profile:ban.profile,domain:ban.domain,client_ip:ban.client_ip};
   check((await api('/abuse/bans','GET',null,viewer)).status===200,'viewer read');
@@ -78,7 +88,7 @@ function code(secret){const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let bits
   const absent=await api('/abuse/bans/'+ban.id,'DELETE',owner);check(absent.status===200&&absent.json.outcome==='already_absent','retry already absent');
   check((await traffic('scan','/benign')).status===200,'release restores200');
   await eventually(async()=>{const rows=await nativeRows();return rows.filter(e=>e.action==='native.ban.released'&&e.target===ban.id&&e.actor_username==='canary-admin').length===1},'release permanent actor');
-  fs.writeFileSync('/out/result.json',JSON.stringify({case:process.env.CASE,detect_history:true,epoch:page.json.epoch,release:released.json,rbac:true,totp:true,metric_integrity:true}));
+  fs.writeFileSync('/out/result.json',JSON.stringify({case:process.env.CASE,detect_history:true,epoch:page.json.epoch,restart_epoch_before:beforeRestart.json.epoch,restart_epoch_after:afterRestart.json.epoch,restart_reset:true,post_restart_allowed:true,release:released.json,rbac:true,totp:true,metric_integrity:true}));
  }else{
   const sizes=()=>{const entries=fs.readdirSync('/db').filter(n=>n.startsWith('canary.db'));return Object.fromEntries(entries.map(n=>[n,fs.statSync('/db/'+n).size]))};
   const before=sizes(),start=Date.now();
@@ -123,8 +133,21 @@ try:
     candidate=RUN+'-candidate';owned.append(candidate)
     docker('run','-d','--name',candidate,'--network',RUN,'--network-alias','candidate','--label',f'pingap.canary={RUN}','--read-only','--memory','1g','--cpus','2','--tmpfs','/tmp:rw,nosuid,nodev,size=64m','--env-file',str(OUT/'candidate.env'),'-v',f'{CONF}:/opt/pingap/conf:ro','-v',f'{data}:/var/lib/pingap',IMAGE)
     tester=RUN+'-tester';owned.append(tester)
+    command=['docker','run','--rm','--name',tester,'--network',RUN,'--label',f'pingap.canary={RUN}','--env-file',str(OUT/'tester.env'),'-v',f'{OUT}/client.js:/client.js:ro','-v',f'{OUT}:/out','-v',f'{data}:/db','node:24-alpine','node','/client.js']
     with (OUT/'client.log').open('w') as log:
-        subprocess.run(['docker','run','--rm','--name',tester,'--network',RUN,'--label',f'pingap.canary={RUN}','--env-file',str(OUT/'tester.env'),'-v',f'{OUT}/client.js:/client.js:ro','-v',f'{OUT}:/out','-v',f'{data}:/db','node:24-alpine','node','/client.js'],stdout=log,stderr=subprocess.STDOUT,check=True,timeout=240)
+        if CASE == 'native-ban-api':
+            process=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT)
+            deadline=time.monotonic()+120
+            while not (OUT/'restart-active').exists() and process.poll() is None and time.monotonic()<deadline:
+                time.sleep(.1)
+            if not (OUT/'restart-active').exists():
+                raise RuntimeError('missing active-ban restart coordination')
+            docker('restart',candidate)
+            (OUT/'restart-complete').write_text('ready')
+            if process.wait(timeout=240)!=0:
+                raise RuntimeError('native API client failed; inspect isolated client.log')
+        else:
+            subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=240)
     after=sorted(line for line in services() if not any(f' {name} ' in line for name in owned))
     (OUT/'services-after.json').write_text(json.dumps(after));assert after==before,'unrelated services changed'
     print('NATIVE_BAN_API_PASS' if CASE=='native-ban-api' else 'NATIVE_HISTORY_STORAGE_PASS')

@@ -36,6 +36,13 @@ fn ip(domain: usize, entry: usize) -> String {
     format!("10.{}.{}.{}", domain, entry / 256, entry % 256)
 }
 
+fn p99_nanos(latencies: &[u128]) -> u128 {
+    assert!(!latencies.is_empty(), "latency sample must not be empty");
+    let mut sorted = latencies.to_vec();
+    sorted.sort_unstable();
+    sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)]
+}
+
 fn main() {
     let limits = Limits::default();
     assert_eq!(limits.max_domains, DOMAINS);
@@ -54,7 +61,7 @@ fn main() {
 
     let started = Instant::now();
     let mut admitted = 0usize;
-    let mut latencies = Vec::with_capacity(4096);
+    let mut population_latencies = Vec::with_capacity(4096);
     for (domain, host) in hosts.iter().enumerate() {
         for (profile_index, scenario) in profiles.iter().enumerate() {
             for entry in 0..PER_PROFILE {
@@ -69,7 +76,7 @@ fn main() {
                 }
                 admitted += 1;
                 if entry % 256 == 0 {
-                    latencies.push(call_started.elapsed().as_nanos());
+                    population_latencies.push(call_started.elapsed().as_nanos());
                 }
             }
         }
@@ -91,9 +98,11 @@ fn main() {
     let traffic_hosts = hosts.clone();
     let traffic_profiles = profiles.clone();
     let traffic = thread::spawn(move || {
+        let mut latencies = Vec::with_capacity(2_048);
         for n in 0..2_048 {
             let domain = n % DOMAINS;
             let profile = &traffic_profiles[n % PROFILES];
+            let call_started = Instant::now();
             let _ = traffic_registry.admit_profile(
                 profile,
                 &traffic_hosts[domain],
@@ -102,15 +111,19 @@ fn main() {
                 "/",
                 true,
             );
+            latencies.push(call_started.elapsed().as_nanos());
         }
+        latencies
     });
     let reload_count = reloads.join().expect("reload thread");
-    traffic.join().expect("traffic thread");
+    let concurrent_reload_latencies = traffic.join().expect("traffic thread");
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     let mut saturated = 0usize;
+    let mut post_reload_latencies = Vec::with_capacity(DOMAINS * PROFILES);
     for host in &hosts {
         for scenario in &profiles {
+            let call_started = Instant::now();
             if matches!(
                 registry.admit_profile(
                     scenario,
@@ -124,6 +137,7 @@ fn main() {
             ) {
                 saturated += 1;
             }
+            post_reload_latencies.push(call_started.elapsed().as_nanos());
         }
     }
     assert_eq!(saturated, DOMAINS * PROFILES, "entry bound must be visible");
@@ -180,11 +194,16 @@ fn main() {
         Admission::Allowed(Some(_))
     ));
 
-    latencies.sort_unstable();
-    let p99 = latencies[(latencies.len() * 99 / 100).min(latencies.len() - 1)];
+    let p99_population = p99_nanos(&population_latencies);
+    let p99_concurrent_reload = p99_nanos(&concurrent_reload_latencies);
+    let p99_post_reload = p99_nanos(&post_reload_latencies);
+    let mut all_latencies = population_latencies;
+    all_latencies.extend_from_slice(&concurrent_reload_latencies);
+    all_latencies.extend_from_slice(&post_reload_latencies);
+    let p99 = p99_nanos(&all_latencies);
     let counters = registry.counters();
     println!(
-        "NATIVE_CAPACITY_METRICS domains={} entries_per_domain={} profiles={} admitted={} expected={} saturated={} reloads={} expiry_reused=true elapsed_ms={:.2} p99_us={:.2} detected={} dropped_lifecycle={}",
+        "NATIVE_CAPACITY_METRICS domains={} entries_per_domain={} profiles={} admitted={} expected={} saturated={} reloads={} expiry_reused=true elapsed_ms={:.2} p99_us={:.2} p99_population_us={:.2} p99_concurrent_reload_us={:.2} p99_post_reload_us={:.2} detected={} dropped_lifecycle={}",
         DOMAINS,
         ENTRIES,
         PROFILES,
@@ -194,6 +213,9 @@ fn main() {
         reload_count,
         elapsed_ms,
         p99 as f64 / 1000.0,
+        p99_population as f64 / 1000.0,
+        p99_concurrent_reload as f64 / 1000.0,
+        p99_post_reload as f64 / 1000.0,
         counters.detected,
         counters.dropped_lifecycle,
     );

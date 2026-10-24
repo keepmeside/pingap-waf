@@ -15,6 +15,20 @@ def run(*args, check=True):
 def services():
     return sorted(run("ps", "--format", "{{.ID}} {{.Names}} {{.Image}}").stdout.splitlines())
 
+def process_rss_bytes(pid):
+    """Read the candidate's process RSS from the host procfs."""
+    if not pid:
+        return None
+    status = Path(f"/proc/{pid}/status")
+    try:
+        for line in status.read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                value = line.split()[1]
+                return int(value) * 1024
+    except (FileNotFoundError, PermissionError, ValueError, IndexError):
+        return None
+    return None
+
 before = services()
 (OUT / "services-before.json").write_text(json.dumps(before))
 try:
@@ -41,13 +55,18 @@ try:
         "--network", "none", "--cpus", "2", "--memory", "1g",
         "-v", f"{ROOT}:/workspace:ro", IMAGE,
         "/workspace/target/musl/debug/examples/native_capacity")
-    peak_mem = 0
+    peak_process_rss = 0
+    peak_cgroup_memory = 0
     peak_cpu = 0.0
     samples = []
     while True:
         state = run("inspect", RUN, "--format", "{{.State.Running}} {{.State.ExitCode}}", check=False).stdout.strip()
         if state.startswith("false "):
             break
+        pid = run("inspect", RUN, "--format", "{{.State.Pid}}", check=False).stdout.strip()
+        process_rss = process_rss_bytes(pid)
+        if process_rss is not None:
+            peak_process_rss = max(peak_process_rss, process_rss)
         stats = run("stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}", RUN, check=False).stdout.strip()
         if stats:
             samples.append(stats)
@@ -60,7 +79,7 @@ try:
             units = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
             match = re.match(r"([0-9.]+)\s*(B|KiB|MiB|GiB)", usage)
             if match:
-                peak_mem = max(peak_mem, int(float(match.group(1)) * units[match.group(2)]))
+                peak_cgroup_memory = max(peak_cgroup_memory, int(float(match.group(1)) * units[match.group(2)]))
         if time.monotonic() - started > 900:
             run("kill", RUN, check=False)
             raise TimeoutError("native capacity exceeded 900 seconds")
@@ -68,7 +87,12 @@ try:
     exit_code = int(run("wait", RUN).stdout.strip())
     logs = run("logs", RUN, check=False).stdout + run("logs", RUN, check=False).stderr
     (OUT / "capacity.log").write_text(logs)
-    (OUT / "stats.txt").write_text("\n".join(samples) + "\npeak_cpu_percent=" + str(peak_cpu) + "\npeak_rss_bytes=" + str(peak_mem))
+    (OUT / "stats.txt").write_text(
+        "\n".join(samples)
+        + "\npeak_cpu_percent=" + str(peak_cpu)
+        + "\npeak_process_rss_bytes=" + str(peak_process_rss)
+        + "\npeak_cgroup_memory_bytes=" + str(peak_cgroup_memory)
+    )
     state = json.loads(run("inspect", RUN, "--format", "{{json .State}}").stdout)
     (OUT / "state.json").write_text(json.dumps(state, indent=2))
     if exit_code != 0 or state.get("OOMKilled"):
@@ -97,7 +121,9 @@ result = {
     "configured_domains": 256,
     "configured_entries_per_domain": 5000,
     "profiles": 2,
-    "peak_rss_bytes": peak_mem,
+    "peak_rss_bytes": peak_process_rss,
+    "peak_process_rss_bytes": peak_process_rss,
+    "peak_cgroup_memory_bytes": peak_cgroup_memory,
     "peak_cpu_percent": peak_cpu,
     "metrics": metrics.group(0),
     "services_unchanged": True,
