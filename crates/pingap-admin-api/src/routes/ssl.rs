@@ -99,8 +99,7 @@ pub async fn list(
     _request: &ApiRequest,
     _params: &[String],
 ) -> Result<ApiResponse> {
-    let (intent, expected_version_id) =
-        intent_resource::base_intent_snapshot(state).await?;
+    let intent = intent_resource::base_intent(state).await?;
     let view: BTreeMap<&str, CertificateView> = intent
         .certificates
         .iter()
@@ -138,7 +137,8 @@ pub async fn put(
     let mut certificate: Certificate = request.json()?;
     // One read of the base, used for both the carried-forward key and the write, so a
     // concurrent edit cannot land between them and have this one built on the older intent.
-    let intent = intent_resource::base_intent(state).await?;
+    let (intent, expected_version_id) =
+        intent_resource::base_intent_snapshot(state).await?;
     if certificate.tls_key.is_none() {
         certificate.tls_key = intent
             .certificates
