@@ -1008,7 +1008,10 @@ mod publication_tests {
             provider.resolve("legacy:unconfigured"),
             Err(PluginMiss::Unknown)
         ));
-        let advisory:PluginConf=toml::from_str("category=\"behaviour\"\nenabled=true\n[abuse]\nenabled=true\n[abuse.scan]\nmode=\"detect\"\nthreshold=0").expect("config");
+        let advisory: PluginConf = toml::from_str(
+            "category=\"behaviour\"\nenabled=true\nclient_ip_from_peer=true\nabuse_namespace=\"behaviour:advisory\"\n[abuse]\nenabled=true\n[abuse.scan]\nmode=\"detect\"\nwindow=\"30s\"\nthreshold=2\nban_ttl=\"1m\"",
+        )
+        .expect("config");
         provider.stage_desired(&HashMap::from_iter([(
             "behaviour:advisory".into(),
             advisory,
@@ -1016,6 +1019,21 @@ mod publication_tests {
         assert!(matches!(
             provider.resolve("behaviour:advisory"),
             Err(PluginMiss::Unknown)
+        ));
+        let malformed: PluginConf = toml::from_str(
+            "category=\"behaviour\"\nenabled=true\n[abuse]\nenabled=true\n[abuse.scan]\nmode=\"detect\"\nthreshold=0",
+        )
+        .expect("config");
+        provider.stage_desired(&HashMap::from_iter([(
+            "behaviour:malformed-detect".into(),
+            malformed,
+        )]));
+        assert!(matches!(
+            provider.resolve("behaviour:malformed-detect"),
+            Err(PluginMiss::Failed {
+                enforcement_required: true,
+                ..
+            })
         ));
     }
 }
