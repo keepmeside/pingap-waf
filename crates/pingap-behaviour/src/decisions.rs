@@ -11,7 +11,8 @@ use pingap_events::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound::{Excluded, Included};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -171,6 +172,8 @@ struct Inner<C: Clock> {
     /// Active block decisions keyed by their monotonic sequence. Listing uses this
     /// bounded index instead of scanning every client while holding the registry lock.
     active: BTreeMap<u64, ActiveDecision>,
+    /// Earliest expirations can be settled without walking the sequence index.
+    expiry: BTreeSet<(u64, u64)>,
     sequence: u64,
     incarnation: u64,
     counters: RegistryCounters,
@@ -201,6 +204,17 @@ fn rebuild_active<C: Clock>(inner: &mut Inner<C>, now: u64) {
         });
     }
     inner.active = active.into_iter().collect();
+    inner.expiry = inner
+        .active
+        .iter()
+        .map(|(sequence, active)| (active.decision.deadline, *sequence))
+        .collect();
+}
+
+fn remove_active<C: Clock>(inner: &mut Inner<C>, sequence: u64) {
+    if let Some(active) = inner.active.remove(&sequence) {
+        inner.expiry.remove(&(active.decision.deadline, sequence));
+    }
 }
 pub struct Registry<C: Clock = MonotonicClock> {
     epoch: String,
@@ -233,6 +247,7 @@ impl<C: Clock> Registry<C> {
                 hosts: None,
                 domains: BTreeMap::new(),
                 active: BTreeMap::new(),
+                expiry: BTreeSet::new(),
                 sequence: 0,
                 incarnation: 0,
                 counters: RegistryCounters::default(),
@@ -514,7 +529,7 @@ impl<C: Clock> Registry<C> {
         };
         for ban in &expired_bans {
             if let Some(sequence) = decision_sequence(&ban.id) {
-                inner.active.remove(&sequence);
+                remove_active(&mut inner, sequence);
             }
         }
         if let Some(Some(ban)) = existing {
@@ -561,7 +576,7 @@ impl<C: Clock> Registry<C> {
             };
             for ban in &expired_bans {
                 if let Some(sequence) = decision_sequence(&ban.id) {
-                    inner.active.remove(&sequence);
+                    remove_active(&mut inner, sequence);
                 }
             }
             if at_capacity
@@ -752,11 +767,12 @@ impl<C: Clock> Registry<C> {
         if let Some(ban) = expired_ban.as_ref()
             && let Some(sequence) = decision_sequence(&ban.id)
         {
-            inner.active.remove(&sequence);
+            remove_active(&mut inner, sequence);
         }
         if let Some(ban) = created_ban
             && let Some(sequence) = decision_sequence(&ban.id)
         {
+            inner.expiry.insert((ban.deadline, sequence));
             inner.active.insert(
                 sequence,
                 ActiveDecision {
@@ -794,62 +810,94 @@ impl<C: Clock> Registry<C> {
         if limit == 0 {
             return (Vec::new(), 0);
         }
-        let mut rows = BTreeMap::new();
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let now = self.clock.now_ms();
-        let expired: Vec<(u64, ActiveDecision)> = inner
-            .active
-            .iter()
-            .filter(|(_, active)| active.decision.deadline <= now)
-            .map(|(sequence, active)| (*sequence, active.clone()))
-            .collect();
+        const BATCH: usize = 64;
+        let (now, max_sequence) = {
+            let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let now = self.clock.now_ms();
+            let max_sequence = inner.active.last_key_value().map(|(s, _)| *s);
+            (now, max_sequence)
+        };
 
-        // The active index bounds the read path to live decisions. Expired entries are removed
-        // from their owning store by key so the lifecycle event is emitted once, without a
-        // full registry scan under the global mutex.
-        for (sequence, active) in expired {
-            let mut expired_ban = None;
-            if let Some(bucket) = inner.domains.get_mut(&active.domain) {
-                // Settle the client in place so its slot and namespace count remain
-                // reusable. Removing the whole entry here would make the count map
-                // overstate occupancy until the next admission.
-                bucket.store.update(bucket.domain, &active.key, |client| {
-                    expired_ban = client.settle(now);
-                });
+        // Expire only indexed deadlines. Releasing the lock after every bounded
+        // batch lets request admission proceed even when many bans expire together.
+        loop {
+            let mut inner =
+                self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let due: Vec<_> = inner
+                .expiry
+                .range(..=(now, u64::MAX))
+                .take(BATCH)
+                .copied()
+                .collect();
+            if due.is_empty() {
+                break;
             }
-            if let Some(ban) = expired_ban {
-                self.transition(
-                    NativeKind::Expired,
-                    &ban,
-                    now,
-                    NativeActor::default(),
-                );
-                inner.counters.expired += 1;
+            for (deadline, sequence) in &due {
+                let Some(active) = inner.active.get(sequence).cloned() else {
+                    inner.expiry.remove(&(*deadline, *sequence));
+                    continue;
+                };
+                let mut expired_ban = None;
+                if let Some(bucket) = inner.domains.get_mut(&active.domain) {
+                    // Settle in place so the client slot and namespace count stay
+                    // consistent until normal admission reuses them.
+                    bucket.store.update(bucket.domain, &active.key, |client| {
+                        if client
+                            .ban
+                            .as_ref()
+                            .is_some_and(|ban| ban.id == active.decision.id)
+                        {
+                            expired_ban = client.settle(now);
+                        }
+                    });
+                }
+                if let Some(ban) = expired_ban {
+                    self.transition(
+                        NativeKind::Expired,
+                        &ban,
+                        now,
+                        NativeActor::default(),
+                    );
+                    inner.counters.expired += 1;
+                }
+                remove_active(&mut inner, *sequence);
             }
-            inner.active.remove(&sequence);
+            drop(inner);
+            std::thread::yield_now();
         }
 
-        for (sequence, active) in &inner.active {
-            let ban = &active.decision;
-            if ban.deadline <= now
-                || *sequence <= after
-                || profile.is_some_and(|p| p != ban.profile)
-                || domain.is_some_and(|d| d != ban.domain)
-            {
-                continue;
+        let mut rows = Vec::with_capacity(limit.min(100));
+        let mut scanned_through = after;
+        let Some(max_sequence) = max_sequence.filter(|last| *last > after)
+        else {
+            return (rows, self.wall(now));
+        };
+        while scanned_through < max_sequence {
+            let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let candidates: Vec<_> = inner
+                .active
+                .range((Excluded(scanned_through), Included(max_sequence)))
+                .take(BATCH)
+                .map(|(sequence, active)| (*sequence, active.decision.clone()))
+                .collect();
+            drop(inner);
+            if candidates.is_empty() {
+                break;
             }
-            if rows.len() < limit
-                || rows
-                    .last_key_value()
-                    .is_some_and(|(last, _)| *sequence < *last)
-            {
-                rows.insert(*sequence, ban.clone());
-                if rows.len() > limit {
-                    rows.pop_last();
+            for (sequence, ban) in candidates {
+                scanned_through = sequence;
+                if ban.deadline > now
+                    && profile.is_none_or(|p| p == ban.profile)
+                    && domain.is_none_or(|d| d == ban.domain)
+                {
+                    rows.push(ban);
+                    if rows.len() == limit {
+                        return (rows, self.wall(now));
+                    }
                 }
             }
         }
-        (rows.into_values().collect(), self.wall(now))
+        (rows, self.wall(now))
     }
     /// Exact decision ID prevents a delayed release from removing a newer ban.
     pub fn release(
@@ -924,13 +972,13 @@ impl<C: Clock> Registry<C> {
         if let Some(expired_id) = expired_id
             && let Some(sequence) = decision_sequence(&expired_id)
         {
-            inner.active.remove(&sequence);
+            remove_active(&mut inner, sequence);
             inner.counters.expired += 1;
         }
         if let Some(released_id) = released_id
             && let Some(sequence) = decision_sequence(&released_id)
         {
-            inner.active.remove(&sequence);
+            remove_active(&mut inner, sequence);
         }
         if released {
             inner.counters.released += 1;

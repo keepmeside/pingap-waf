@@ -3,6 +3,7 @@ use pingap_behaviour::{
     scenario::AbuseConfig,
 };
 use pingap_domainstate::{Limits, ManualClock};
+use pingap_events::NativeAbuse;
 use std::sync::Arc;
 use std::time::Duration;
 fn profile(name: &str, ttl: u64) -> ScenarioProfile {
@@ -249,4 +250,58 @@ statuses=[401]
     )
     .expect("config");
     assert!(pingap_behaviour::Behaviour::try_from(&conf).is_ok());
+}
+
+#[test]
+fn ban_index_pages_live_decisions_after_batched_expiry() {
+    let clock = ManualClock::at(0);
+    let registry = Registry::with_clock(Limits::default(), clock.clone());
+    registry.activate(vec![
+        profile("behaviour:short", 1),
+        profile("behaviour:long", 60),
+    ]);
+    for i in 1..=128 {
+        ban(&registry, "behaviour:short", &format!("10.0.0.{i}"));
+        ban(&registry, "behaviour:long", &format!("10.0.1.{i}"));
+    }
+    clock.advance(Duration::from_secs(2));
+
+    let page = NativeAbuse::list(
+        &registry,
+        Some("behaviour:long"),
+        Some("a.test"),
+        0,
+        100,
+    );
+    assert_eq!(page.items.len(), 100);
+    assert_eq!(registry.counters().expired, 128);
+    assert!(page.items.iter().all(|ban| ban.profile == "behaviour:long"));
+    let after: u64 = page
+        .next_cursor
+        .as_deref()
+        .expect("first page has a cursor")
+        .rsplit(':')
+        .next()
+        .expect("cursor sequence")
+        .parse()
+        .expect("numeric cursor");
+    let second = NativeAbuse::list(
+        &registry,
+        Some("behaviour:long"),
+        Some("a.test"),
+        after,
+        100,
+    );
+    assert_eq!(second.items.len(), 28);
+    assert!(second.next_cursor.is_none());
+    assert_eq!(registry.counters().expired, 128);
+    assert_eq!(registry.active_decisions(0, 256).len(), 128);
+    let released = &second.items[0];
+    assert!(registry.release(
+        "behaviour:long",
+        "a.test",
+        &released.client_ip,
+        &released.id,
+    ));
+    assert_eq!(registry.active_decisions(0, 256).len(), 127);
 }
