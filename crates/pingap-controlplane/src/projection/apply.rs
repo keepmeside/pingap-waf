@@ -44,7 +44,7 @@ pub enum ApplyError {
     NothingToRollBackTo,
 
     #[snafu(display(
-        "configuration changed while this edit was being prepared (expected {:?}, current {:?}); retry"
+        "configuration changed while this edit was being prepared (expected {expected:?}, current {actual:?}); retry"
     ))]
     StaleBase {
         expected: Option<String>,
