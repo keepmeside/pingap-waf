@@ -980,6 +980,7 @@ categories = { sql_injection = "block", xss = "block", data_leakage = "redact", 
         assert_eq!(resp.status.as_u16(), 403);
         let state = ctx.extensions.get::<WafState>().expect("state recorded");
         assert!(state.blocked);
+        assert_eq!(state.uri, "/s", "event state must omit query values");
         assert!(!state.hits.is_empty(), "a block must name its rules");
 
         let mut ctx = Ctx::default();
