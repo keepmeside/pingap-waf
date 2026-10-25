@@ -26,6 +26,7 @@
 use pingap_config::PingapTomlConfig;
 use pingap_controlplane::projection::{
     Backend, Domain, Intent, Listener, PolicyBinding, Upstream, generate,
+    server_route_locations,
 };
 // The plugin categories these tests project are registered by a `#[ctor]` in each plugin
 // crate, and an rlib nothing references is dropped at link time — so without these imports
@@ -735,6 +736,8 @@ impl PluginCheck for FactoryCheck {
 #[derive(Default)]
 struct Reloaded {
     running: std::sync::Mutex<BTreeMap<String, String>>,
+    locations: std::sync::Mutex<BTreeMap<String, String>>,
+    servers: std::sync::Mutex<BTreeMap<String, Vec<String>>>,
 }
 
 impl Reloaded {
@@ -750,12 +753,33 @@ impl Reloaded {
                 pingap_controlplane::projection::plugin_config_key(conf),
             );
         }
+        let mut locations = self.locations.lock().expect("lock");
+        locations.clear();
+        for (name, conf) in &config.locations {
+            locations
+                .insert(name.clone(), pingap_config::Hashable::hash_key(conf));
+        }
+        let mut servers = self.servers.lock().expect("lock");
+        servers.clear();
+        for name in config.servers.keys() {
+            if let Some(route) = server_route_locations(&config, name) {
+                servers.insert(name.clone(), route);
+            }
+        }
     }
 }
 
 impl DataPlane for Reloaded {
     fn running_config_key(&self, name: &str) -> Option<String> {
         self.running.lock().expect("lock").get(name).cloned()
+    }
+
+    fn running_location_key(&self, name: &str) -> Option<String> {
+        self.locations.lock().expect("lock").get(name).cloned()
+    }
+
+    fn running_server_locations(&self, name: &str) -> Option<Vec<String>> {
+        self.servers.lock().expect("lock").get(name).cloned()
     }
 }
 

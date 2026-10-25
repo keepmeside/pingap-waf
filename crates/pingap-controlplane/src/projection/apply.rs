@@ -18,7 +18,7 @@ use crate::repository::{
     ConfigStatus, ConfigVersion, ControlPlaneStore, NewActivity,
     NewConfigVersion,
 };
-use pingap_config::PluginConf;
+use pingap_config::{Hashable, PluginConf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -100,6 +100,17 @@ pub trait DataPlane: Send + Sync {
     /// instance is running — which is the case both for a name nobody configured and for
     /// one whose constructor rejected its config.
     fn running_config_key(&self, name: &str) -> Option<String>;
+
+    /// The hash key of a running location, or `None` when the location is absent.
+    ///
+    /// A location key includes its ordered plugin list. Reading it back catches both a
+    /// failed location reload and a policy binding that never reached the request path.
+    fn running_location_key(&self, name: &str) -> Option<String>;
+
+    /// The ordered location names attached to a running server, or `None` when the server
+    /// has no route. A server binding can change while every plugin instance remains intact,
+    /// so it is a separate part of the data-plane contract.
+    fn running_server_locations(&self, name: &str) -> Option<Vec<String>>;
 }
 
 /// What one policy should look like once applied.
@@ -121,6 +132,77 @@ pub fn expectations(projected: &Projected) -> Vec<Expectation> {
         .map(|(name, conf)| Expectation {
             name: name.clone(),
             config_key: plugin_config_key(conf),
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// What one location should look like once applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationExpectation {
+    pub name: String,
+    pub config_key: String,
+}
+
+/// Per-location expectations for a projection, in name order.
+pub fn location_expectations(
+    projected: &Projected,
+) -> Vec<LocationExpectation> {
+    let mut out: Vec<_> = projected
+        .config
+        .locations
+        .iter()
+        .map(|(name, conf)| LocationExpectation {
+            name: name.clone(),
+            config_key: conf.hash_key(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// What one server's routing table should look like once applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerExpectation {
+    pub name: String,
+    pub locations: Vec<String>,
+}
+
+/// Return the route order the live server-location provider builds from a config.
+///
+/// `try_init_server_locations` orders by descending location weight, so verification must
+/// compare against that order rather than the lexicographic order in the generated TOML.
+pub fn server_route_locations(
+    config: &pingap_config::PingapConfig,
+    name: &str,
+) -> Option<Vec<String>> {
+    let server = config.servers.get(name)?;
+    let mut locations = server.locations.clone()?;
+    locations.sort_by_key(|location| {
+        std::cmp::Reverse(
+            config
+                .locations
+                .get(location)
+                .map(|conf| conf.get_weight())
+                .unwrap_or_default(),
+        )
+    });
+    Some(locations)
+}
+
+/// Per-server routing expectations for a projection, in name order.
+pub fn server_expectations(projected: &Projected) -> Vec<ServerExpectation> {
+    let mut out: Vec<_> = projected
+        .config
+        .servers
+        .keys()
+        .map(|name| ServerExpectation {
+            name: name.clone(),
+            // Keep an explicit empty expectation for a server with no locations. This
+            // catches a stale provider route after the last domain is removed.
+            locations: server_route_locations(&projected.config, name)
+                .unwrap_or_default(),
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -387,21 +469,7 @@ impl Applier {
         previous: Option<&ConfigVersion>,
         now: i64,
     ) -> Result<Outcome> {
-        let mut missing = Vec::new();
-        for expected in expectations(projected) {
-            match self.data_plane.running_config_key(&expected.name) {
-                Some(key) if key == expected.config_key => {},
-                Some(key) => missing.push(format!(
-                    "`{}` is running an older config ({key}, expected {})",
-                    expected.name, expected.config_key
-                )),
-                None => missing.push(format!(
-                    "`{}` is not running — its constructor rejected the config, or \
-                     the reload did not reach it",
-                    expected.name
-                )),
-            }
-        }
+        let missing = self.runtime_mismatches(projected);
 
         if missing.is_empty() {
             if let Some(prev) = previous {
@@ -453,6 +521,22 @@ impl Applier {
                 ),
             }
         })?;
+
+        // A successful write only means the watcher can observe the previous TOML. Wait
+        // through the same reload window and read the data plane back before claiming that
+        // the previous version is active. This covers location/server binding failures as
+        // well as plugin construction failures.
+        let rollback_missing = self.wait_for_runtime(&restored).await;
+        if !rollback_missing.is_empty() {
+            return Err(ApplyError::Commit {
+                reason: format!(
+                    "rollback to `{}` was not confirmed: {}",
+                    prev.id,
+                    rollback_missing.join("; ")
+                ),
+            });
+        }
+
         Ok(Outcome {
             version: self
                 .store
@@ -461,6 +545,57 @@ impl Applier {
                 .unwrap_or_else(|| version.clone()),
             rolled_back_to: Some(prev.id.clone()),
         })
+    }
+
+    async fn wait_for_runtime(&self, projected: &Projected) -> Vec<String> {
+        tokio::time::sleep(self.reload_window).await;
+        self.runtime_mismatches(projected)
+    }
+
+    fn runtime_mismatches(&self, projected: &Projected) -> Vec<String> {
+        let mut missing = Vec::new();
+        for expected in expectations(projected) {
+            match self.data_plane.running_config_key(&expected.name) {
+                Some(key) if key == expected.config_key => {},
+                Some(key) => missing.push(format!(
+                    "`{}` is running an older config ({key}, expected {})",
+                    expected.name, expected.config_key
+                )),
+                None => missing.push(format!(
+                    "`{}` is not running — its constructor rejected the config, or \
+                     the reload did not reach it",
+                    expected.name
+                )),
+            }
+        }
+        for expected in location_expectations(projected) {
+            match self.data_plane.running_location_key(&expected.name) {
+                Some(key) if key == expected.config_key => {},
+                Some(key) => missing.push(format!(
+                    "location `{}` is running an older config ({key}, expected {})",
+                    expected.name, expected.config_key
+                )),
+                None => missing.push(format!(
+                    "location `{}` is not running — its reload did not reach it",
+                    expected.name
+                )),
+            }
+        }
+        for expected in server_expectations(projected) {
+            match self.data_plane.running_server_locations(&expected.name) {
+                Some(locations) if locations == expected.locations => {},
+                None if expected.locations.is_empty() => {},
+                Some(locations) => missing.push(format!(
+                    "server `{}` is routing {:?}, expected {:?}",
+                    expected.name, locations, expected.locations
+                )),
+                None => missing.push(format!(
+                    "server `{}` has no running location route",
+                    expected.name
+                )),
+            }
+        }
+        missing
     }
 
     /// Explicit rollback to `version_id`, which must be a version that was applied.

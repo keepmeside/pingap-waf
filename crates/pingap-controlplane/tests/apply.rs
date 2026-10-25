@@ -10,13 +10,14 @@
 use pingap_controlplane::projection::{
     Actor, Applier, Backend, ConfigSink, DataPlane, Domain, Intent, Listener,
     NoPluginCheck, PolicyBinding, Upstream, Validator, expectations, generate,
-    plugin_config_key,
+    plugin_config_key, server_route_locations,
 };
 use pingap_controlplane::repository::{
     ConfigStatus, NewConfigVersion, TimeRange,
 };
 use pingap_controlplane::{ControlPlaneStore, TursoStore};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -101,11 +102,38 @@ impl ConfigSink for RecordingSink {
 #[derive(Default)]
 struct FakeDataPlane {
     running: Mutex<BTreeMap<String, String>>,
+    locations: Mutex<BTreeMap<String, String>>,
+    servers: Mutex<BTreeMap<String, Vec<String>>>,
 }
 
 impl FakeDataPlane {
     /// Pretend the reload brought up exactly the plugins in `toml`.
     fn reload_from(&self, toml: &str) {
+        let config = pingap_config::PingapConfig::new(toml.as_bytes(), true)
+            .expect("the committed config parses");
+        let mut running = self.running.lock().expect("lock");
+        running.clear();
+        for (name, conf) in &config.plugins {
+            running.insert(name.clone(), plugin_config_key(conf));
+        }
+        let mut locations = self.locations.lock().expect("lock");
+        locations.clear();
+        for (name, conf) in &config.locations {
+            locations
+                .insert(name.clone(), pingap_config::Hashable::hash_key(conf));
+        }
+        let mut servers = self.servers.lock().expect("lock");
+        servers.clear();
+        for name in config.servers.keys() {
+            if let Some(route) = server_route_locations(&config, name) {
+                servers.insert(name.clone(), route);
+            }
+        }
+    }
+
+    /// Reload only plugin instances, leaving the old location/server bindings in place.
+    /// This is the failure mode where plugin read-back alone would falsely report applied.
+    fn reload_plugins_only(&self, toml: &str) {
         let config = pingap_config::PingapConfig::new(toml.as_bytes(), true)
             .expect("the committed config parses");
         let mut running = self.running.lock().expect("lock");
@@ -120,6 +148,14 @@ impl DataPlane for FakeDataPlane {
     fn running_config_key(&self, name: &str) -> Option<String> {
         self.running.lock().expect("lock").get(name).cloned()
     }
+
+    fn running_location_key(&self, name: &str) -> Option<String> {
+        self.locations.lock().expect("lock").get(name).cloned()
+    }
+
+    fn running_server_locations(&self, name: &str) -> Option<Vec<String>> {
+        self.servers.lock().expect("lock").get(name).cloned()
+    }
 }
 
 /// A sink that also reloads the fake data plane, like a real commit would, unless the
@@ -129,18 +165,25 @@ struct ReloadingSink {
     data_plane: Arc<FakeDataPlane>,
     /// Plugin names the fake constructor refuses to build.
     refuse: Vec<String>,
+    refuse_next: AtomicBool,
+    reload_rollback: bool,
 }
 
 #[async_trait::async_trait]
 impl ConfigSink for ReloadingSink {
     async fn commit(&self, canonical_toml: &str) -> Result<(), String> {
         self.sink.commit(canonical_toml).await?;
-        self.data_plane.reload_from(canonical_toml);
+        let commit_number = self.sink.commits.lock().expect("lock").len();
+        if commit_number == 1 || self.reload_rollback {
+            self.data_plane.reload_from(canonical_toml);
+        }
         // pingap stores the provider map even when a plugin failed to construct: the
         // failed one is simply absent. Model exactly that.
-        let mut running = self.data_plane.running.lock().expect("lock");
-        for name in &self.refuse {
-            running.remove(name);
+        if self.refuse_next.swap(false, Ordering::SeqCst) {
+            let mut running = self.data_plane.running.lock().expect("lock");
+            for name in &self.refuse {
+                running.remove(name);
+            }
         }
         Ok(())
     }
@@ -167,6 +210,8 @@ async fn harness(refuse: &[&str]) -> Harness {
         sink: RecordingSink::default(),
         data_plane: data_plane.clone(),
         refuse: refuse.iter().map(|s| s.to_string()).collect(),
+        refuse_next: AtomicBool::new(false),
+        reload_rollback: true,
     });
     let applier = Applier::new(
         store.clone(),
@@ -309,6 +354,8 @@ async fn a_config_whose_waf_fails_to_construct_never_reaches_applied() {
             sink: RecordingSink::default(),
             data_plane: h.data_plane.clone(),
             refuse: vec!["waf:strict".to_string()],
+            refuse_next: AtomicBool::new(true),
+            reload_rollback: true,
         }),
         ..h
     };
@@ -359,6 +406,107 @@ async fn a_config_whose_waf_fails_to_construct_never_reaches_applied() {
             .await
             .expect("lookup")
             .map(|v| v.id),
+        Some(first.version.id)
+    );
+}
+
+#[tokio::test]
+async fn a_location_binding_reload_failure_never_reaches_applied() {
+    let h = harness(&[]).await;
+    let first = h
+        .applier
+        .apply(&intent(1), &actor(), "domain.create", 1_000)
+        .await
+        .expect("baseline applies");
+
+    // Keep every plugin exactly as it was, but change the location's path. The fake reload
+    // updates the plugin map only, modelling a location constructor/reload failure.
+    let mut candidate = intent(1);
+    candidate.domains.get_mut("d").expect("domain").path =
+        Some("/changed".to_string());
+    let projected = generate(&candidate).expect("generates");
+    let stranded = h
+        .store
+        .record_config_version(
+            NewConfigVersion {
+                hash: pingap_controlplane::projection::hash(&projected),
+                status: ConfigStatus::Pending,
+                actor_id: None,
+                actor_username: "crashed".to_string(),
+                intent_json: serde_json::to_string(&candidate)
+                    .expect("serialises"),
+                error: None,
+            },
+            2_000,
+        )
+        .await
+        .expect("records");
+    h.data_plane.reload_plugins_only(&projected.toml);
+
+    let settled = h.applier.settle_pending(3_000).await.expect("sweeps");
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].version.id, stranded.id);
+    assert_eq!(settled[0].version.status, ConfigStatus::Failed);
+    assert_eq!(
+        settled[0].rolled_back_to.as_deref(),
+        Some(first.version.id.as_str())
+    );
+    assert!(
+        settled[0]
+            .version
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("location `d`")),
+        "the failure did not name the stale location: {:?}",
+        settled[0].version.error
+    );
+}
+
+#[tokio::test]
+async fn rollback_is_not_reported_when_restoration_is_not_visible() {
+    let h = harness(&[]).await;
+    let first = h
+        .applier
+        .apply(&intent(1), &actor(), "domain.create", 1_000)
+        .await
+        .expect("baseline applies");
+
+    let stalled = Harness {
+        sink: Arc::new(ReloadingSink {
+            sink: RecordingSink::default(),
+            data_plane: h.data_plane.clone(),
+            refuse: vec!["waf:strict".to_string()],
+            refuse_next: AtomicBool::new(true),
+            // The candidate reload happens, but the restoration write is left for a
+            // watcher that never runs. The apply must not claim rollback success.
+            reload_rollback: false,
+        }),
+        ..h
+    };
+    let applier = Applier::new(
+        stalled.store.clone(),
+        Validator::new("/bin/true"),
+        Arc::new(NoPluginCheck),
+        stalled.sink.clone(),
+        stalled.data_plane.clone(),
+        Duration::from_millis(1),
+    );
+    let error = applier
+        .apply(&intent(2), &actor(), "waf.update", 2_000)
+        .await
+        .expect_err("unconfirmed rollback must be an error");
+    assert!(
+        error.to_string().contains("rollback")
+            && error.to_string().contains("not confirmed"),
+        "{error}"
+    );
+    assert_eq!(
+        stalled
+            .store
+            .latest_applied_config_version()
+            .await
+            .expect("lookup")
+            .map(|version| version.id),
         Some(first.version.id)
     );
 }

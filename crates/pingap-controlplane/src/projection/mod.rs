@@ -30,8 +30,10 @@ mod hash;
 mod validate;
 
 pub use apply::{
-    Actor, Applier, ApplyError, ConfigSink, DataPlane, Expectation, Outcome,
-    expectations, plugin_config_key,
+    Actor, Applier, ApplyError, ConfigSink, DataPlane, Expectation,
+    LocationExpectation, Outcome, ServerExpectation, expectations,
+    location_expectations, plugin_config_key, server_expectations,
+    server_route_locations,
 };
 pub use drift::{ConfigSource, Drift, DriftDetector};
 pub use generate::generate;

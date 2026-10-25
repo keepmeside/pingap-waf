@@ -26,7 +26,9 @@
 //! tested exactly once per process, and the second test would silently exercise the first
 //! test's config.
 
+use crate::locations::new_location_provider;
 use crate::plugin::new_plugin_provider;
+use crate::server_locations::new_server_locations_provider;
 use pingap_config::{
     ConfigManager, PingapConfig, PingapTomlConfig, PluginConf,
 };
@@ -43,7 +45,9 @@ use pingap_core::{
     BackgroundTask, Notification, NotificationData, NotificationSender,
     PluginProvider,
 };
+use pingap_location::LocationProvider;
 use pingap_plugin::get_plugin_factory;
+use pingap_proxy::ServerLocationsProvider;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -475,11 +479,21 @@ impl ConfigSource for ConfigManagerSource {
 /// would otherwise swallow.
 pub struct ProviderDataPlane {
     provider: Arc<dyn PluginProvider>,
+    locations: Arc<dyn LocationProvider>,
+    server_locations: Arc<dyn ServerLocationsProvider>,
 }
 
 impl ProviderDataPlane {
-    pub fn new(provider: Arc<dyn PluginProvider>) -> Self {
-        Self { provider }
+    pub fn new(
+        provider: Arc<dyn PluginProvider>,
+        locations: Arc<dyn LocationProvider>,
+        server_locations: Arc<dyn ServerLocationsProvider>,
+    ) -> Self {
+        Self {
+            provider,
+            locations,
+            server_locations,
+        }
     }
 }
 
@@ -488,6 +502,18 @@ impl DataPlane for ProviderDataPlane {
         self.provider
             .get(name)
             .map(|plugin| plugin.config_key().to_string())
+    }
+
+    fn running_location_key(&self, name: &str) -> Option<String> {
+        self.locations
+            .get(name)
+            .map(|location| location.key.clone())
+    }
+
+    fn running_server_locations(&self, name: &str) -> Option<Vec<String>> {
+        self.server_locations
+            .get(name)
+            .map(|route| route.ordered.as_ref().clone())
     }
 }
 
@@ -759,7 +785,11 @@ pub fn new_applier(
         Validator::for_current_exe().map_err(|e| e.to_string())?,
         Arc::new(FactoryPluginCheck),
         Arc::new(ConfigManagerSink::new(manager)),
-        Arc::new(ProviderDataPlane::new(new_plugin_provider())),
+        Arc::new(ProviderDataPlane::new(
+            new_plugin_provider(),
+            new_location_provider(),
+            new_server_locations_provider(),
+        )),
         reload_window,
     )
     .with_operation_lock(projection_operation_lock()))
@@ -838,7 +868,11 @@ pub fn log_policy_unavailable_posture(configured: &Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locations::{new_location_provider, try_init_locations};
     use crate::plugin::try_init_plugins;
+    use crate::server_locations::{
+        new_server_locations_provider, try_init_server_locations,
+    };
     use pingap_controlplane::projection::{
         Actor, Backend, Domain, Intent, Listener, PolicyBinding, Upstream,
         expectations, generate, plugin_config_key,
@@ -977,6 +1011,10 @@ mod tests {
                     .map_err(|e| e.to_string())?
                     .to_pingap_config(false)
                     .map_err(|e| e.to_string())?;
+                try_init_locations(&loaded.locations)
+                    .map_err(|e| e.to_string())?;
+                try_init_server_locations(&loaded.servers, &loaded.locations)
+                    .map_err(|e| e.to_string())?;
                 try_init_plugins(&loaded.plugins);
             }
             Ok(())
@@ -998,7 +1036,11 @@ mod tests {
             Validator::new(gateway_binary()),
             Arc::new(FactoryPluginCheck),
             sink.clone(),
-            Arc::new(ProviderDataPlane::new(new_plugin_provider())),
+            Arc::new(ProviderDataPlane::new(
+                new_plugin_provider(),
+                new_location_provider(),
+                new_server_locations_provider(),
+            )),
             // Nothing to wait for: the sink reloads synchronously.
             Duration::from_millis(0),
         );
@@ -1288,8 +1330,12 @@ mod tests {
         let projected = generate(&intent(2)).expect("generates");
         for expected in expectations(&projected) {
             assert_eq!(
-                ProviderDataPlane::new(new_plugin_provider())
-                    .running_config_key(&expected.name),
+                ProviderDataPlane::new(
+                    new_plugin_provider(),
+                    new_location_provider(),
+                    new_server_locations_provider(),
+                )
+                .running_config_key(&expected.name),
                 Some(expected.config_key.clone()),
                 "`{}` is not running the config the version claims",
                 expected.name

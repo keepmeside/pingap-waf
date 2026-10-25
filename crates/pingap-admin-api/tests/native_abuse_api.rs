@@ -24,7 +24,8 @@ use bytes::Bytes;
 use http::{Method, StatusCode};
 use pingap_admin_api::{ApiRequest, ApiResponse, AppState, Caller, dispatch};
 use pingap_controlplane::projection::{
-    Applier, ConfigSink, DataPlane, NoPluginCheck, Validator, plugin_config_key,
+    Applier, ConfigSink, DataPlane, NoPluginCheck, Validator,
+    plugin_config_key, server_route_locations,
 };
 use pingap_controlplane::{
     AuthLevel, ControlPlaneStore, Role, TotpGuard, TursoStore,
@@ -48,6 +49,8 @@ const TOTP_KEY: &str = "PLpKJqvfkjTcYTDpauJf+2JnEayP+bm+0Oe60Jk=";
 #[derive(Default)]
 struct Reloaded {
     running: Mutex<BTreeMap<String, String>>,
+    locations: Mutex<BTreeMap<String, String>>,
+    servers: Mutex<BTreeMap<String, Vec<String>>>,
 }
 
 struct ReloadingSink {
@@ -68,6 +71,19 @@ impl ConfigSink for ReloadingSink {
         for (name, conf) in &config.plugins {
             running.insert(name.clone(), plugin_config_key(conf));
         }
+        let mut locations = self.reloaded.locations.lock().expect("lock");
+        locations.clear();
+        for (name, conf) in &config.locations {
+            locations
+                .insert(name.clone(), pingap_config::Hashable::hash_key(conf));
+        }
+        let mut servers = self.reloaded.servers.lock().expect("lock");
+        servers.clear();
+        for name in config.servers.keys() {
+            if let Some(route) = server_route_locations(&config, name) {
+                servers.insert(name.clone(), route);
+            }
+        }
         Ok(())
     }
 }
@@ -75,6 +91,14 @@ impl ConfigSink for ReloadingSink {
 impl DataPlane for Reloaded {
     fn running_config_key(&self, name: &str) -> Option<String> {
         self.running.lock().expect("lock").get(name).cloned()
+    }
+
+    fn running_location_key(&self, name: &str) -> Option<String> {
+        self.locations.lock().expect("lock").get(name).cloned()
+    }
+
+    fn running_server_locations(&self, name: &str) -> Option<Vec<String>> {
+        self.servers.lock().expect("lock").get(name).cloned()
     }
 }
 

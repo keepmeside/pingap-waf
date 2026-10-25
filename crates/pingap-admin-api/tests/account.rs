@@ -55,6 +55,14 @@ impl DataPlane for Unused {
     fn running_config_key(&self, _name: &str) -> Option<String> {
         None
     }
+
+    fn running_location_key(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    fn running_server_locations(&self, _name: &str) -> Option<Vec<String>> {
+        None
+    }
 }
 
 struct Api {

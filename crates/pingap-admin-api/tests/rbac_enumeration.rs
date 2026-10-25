@@ -62,6 +62,14 @@ impl DataPlane for NothingRunning {
     fn running_config_key(&self, _name: &str) -> Option<String> {
         None
     }
+
+    fn running_location_key(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    fn running_server_locations(&self, _name: &str) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// A migrated store with one real user per role, and an applier over it.
